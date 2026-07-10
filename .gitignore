@@ -1,0 +1,22 @@
+# macOS / editor noise
+.DS_Store
+**/.DS_Store
+
+# Python cache / bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Local runtime artefacts written by skills during use
+.ai-orchestrator/
+.ai-mc/
+.claude/
+
+# Logs and transient files
+*.log
+*.tmp

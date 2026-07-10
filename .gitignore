@@ -20,3 +20,6 @@ venv/
 # Logs and transient files
 *.log
 *.tmp
+
+# Other
+mc-test/

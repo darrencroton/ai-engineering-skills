@@ -271,7 +271,7 @@ Runtime slices append entries to `slices`:
   "completed_at": "2026-07-04T01:42:00Z",
   "artifact_dir": ".ai-mc/runs/20260704T013000Z/slices/slice-001",
   "before_head": "<commit HEAD immediately before this slice ran, or null>",
-  "changed_files": [],
+  "changed_files": ["<repo-relative path string, not an object>"],
   "validation": [],
   "drift_audit": {
     "verdict": "PASS",
@@ -340,7 +340,7 @@ Every orchestrator session must write this file in the slice artifact directory:
   "slice_id": "Slice 1",
   "status": "pass",
   "summary": "",
-  "changed_files": [],
+  "changed_files": ["<repo-relative path string, not an object — a list of plain strings matching the actual diff, not {path, status, lines_added} or similar>"],
   "validation": [
     {
       "command": "",

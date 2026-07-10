@@ -76,6 +76,7 @@ MC's blocking commands outlive the tool-call limits of the assistants that drive
 
 - Run `run --scope remaining` and `run-next` in the background (or under `nohup`/a detached shell), then poll `status`/`summarize`.
 - In model-supervised operation, prefer repeated bounded `wait --seconds <n>` calls that fit inside the tool limit (for example 240–540 seconds) over one long wait.
+- Local/open-weight model harnesses can have long silent periods (roughly a minute of cold start, several minutes of silent prefill on a large embedded prompt) with no visible token output before progress resumes; this is a timing characteristic, not a stall. Confirm genuine idleness across at least two separate observations before treating it as one.
 - While a live harness is running, keep MC observation/control commands separate from supplementary diagnostics that may require a new approval. An approval wait does not pause the harness and can leave it editing or committing without supervision.
 - For long pauses, prefer scheduling a later re-observe over a single blocking `pause-until` when the controller cannot safely block that long; `pause-until` remains correct when the controlling process genuinely can wait.
 - For C1 runs on subscription harnesses, prefer an MC model on a different provider than the orchestrator harness: if both share one subscription, a usage window stalls the supervisor and the supervised session at the same time.
@@ -100,6 +101,8 @@ MC must stop, without attempting a repair, on:
 - Ambiguous operational interruptions after reasonable observation.
 
 MC may recover from a rolling 5-hour usage window, temporary service interruption, or similar transient only when pane/log evidence is clear, the recovery is bounded, the same slice contract remains in force, no hard-stop prompt is visible, and incomplete work is not accepted as passing. Operational screen text can guide wait, retry, resume, or stop decisions; it can never accept a slice.
+
+An idle tool-call stall — pane output unchanged across two or more consecutive `wait`/`observe` calls, with no hard-stop prompt visible — is also a recoverable transient: send one short, specific pointer nudge (`send`) into the live session before considering a restart or a stop. Confirm the stall is real (byte-identical pane across separate observation windows) rather than slow generation before nudging.
 
 `observe` and `wait` include lightweight `operational_hints` extracted from pane and transcript tails. Treat ordinary hints as evidence for MC-model judgment, not as automatic decisions. Treat hard-stop hints as a deterministic floor: `send`, `pause-until`, and any unattended retry/resume must refuse when the visible evidence indicates weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect conditions. Prefer relative reset durations over absolute local times; absolute local reset times are usable only when they are unambiguously near-future for the controller timezone or include an explicit timezone.
 

@@ -23,20 +23,9 @@ These are defaults for a normally-configured Claude Code session, not a fixed gu
 
 Read `~/.claude/settings.json` for relevant user defaults if present. If no model is configured there, omit `--model` and let Claude Code use its default. Use `--effort <level>` when the user or supervising workflow specifies an effort level. Never hardcode model names.
 
-## Core Commands
+## Deterministic Launch Profile
 
-Launch all Claude worker runs via [../scripts/worker_jobs.py](../scripts/worker_jobs.py). The commands below are the worker command payloads to pass after `worker_jobs.py start --label <label> --`.
-
-```bash
-# Edit task worker command
-claude -p "PROMPT" [--model <model>] [--effort <level>] --permission-mode acceptEdits --output-format text --add-dir <dir>
-
-# Read-only review / plan review worker command
-claude -p "PROMPT" [--model <model>] [--effort <level>] --permission-mode plan --output-format text --add-dir <dir>
-
-# Resume most recent session in the current directory
-claude --continue
-```
+Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns `claude -p`, model/effort flags, `--permission-mode plan|acceptEdits`, text output, and directory scope; orchestrators must not compose these flags.
 
 ## Helper Use
 
@@ -82,10 +71,4 @@ Use `worker_jobs.py extract` when you want the clean final answer. Use `worker_j
 - **Read-only review**: `--permission-mode plan`
 - **Unrestricted execution**: only if the user explicitly requests it
 
-## Resume
-
-```bash
-claude --continue
-```
-
-Offer that exact command if continuation is useful.
+Worker continuation is not a separate raw-command path. Write a new semantic request with an `-rN` label so policy validation and evidence remain complete.

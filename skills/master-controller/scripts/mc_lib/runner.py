@@ -21,6 +21,8 @@ from .runtime import (
     render_repair_prompt,
     slice_dir_name,
     tmux_session_name,
+    write_worker_policy,
+    worker_policy_snapshot,
 )
 from .state import (
     append_operational_event,
@@ -216,6 +218,14 @@ def start_model_supervised_slice(
     credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
     for warning in credential_warnings:
         print(f"warning: {warning}")
+    policy_path = write_worker_policy(
+        state,
+        plan_slice,
+        slice_artifact_dir,
+        configured_worker_tools,
+        getattr(args, "worker_model", None),
+        getattr(args, "worker_effort", None),
+    )
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
         render_orchestrator_prompt(
@@ -275,6 +285,7 @@ def start_model_supervised_slice(
         # silently dropping it when --worker-tools is not re-supplied.
         configured_worker_tools,
         initial_repair,
+        worker_policy_snapshot(policy_path),
     )
     state.setdefault("supervision", {})["mode"] = supervision_mode
     reset_slice_pause_counters(state)
@@ -351,6 +362,7 @@ def _finalize_terminal(
         # Only a slice that actually consumed repair rounds records them; a
         # first-attempt terminal keeps the pre-repair-loop entry shape.
         repair=dict(repair) if repair["round"] else None,
+        worker_policy=(state.get("current_slice") or {}).get("worker_policy"),
     )
     state["slices"].append(entry)
     state["current_slice"] = None
@@ -775,6 +787,20 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 adapter = _current_adapter(args, repo, state)
                 session_name = str(current.get("tmux_session") or "")
                 try:
+                    # finalize captured the complete pane immediately before
+                    # returning this repair action. Check that durable capture
+                    # as well as the live pane: a large embedded prompt can
+                    # push an earlier hard prompt beyond a terminal's retained
+                    # live scrollback even though MC already preserved it.
+                    repair_capture = _slice_artifact_dir(repo, current) / f"pane-capture-repair-{round_number}.txt"
+                    captured_hard_prompt = adapter.detect_hard_prompt(
+                        repair_capture.read_text(encoding="utf-8") if repair_capture.is_file() else ""
+                    )
+                    if captured_hard_prompt["present"]:
+                        raise McError(
+                            "refusing to send into hard prompt preserved in repair evidence: "
+                            + ", ".join(str(kind) for kind in captured_hard_prompt["kinds"])
+                        )
                     adapter.send_literal(session_name, str(outcome.get("send_text") or ""))
                 except McError as exc:
                     # send_literal refuses when a hard prompt / hard-stop hint

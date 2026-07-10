@@ -9,7 +9,7 @@ Only the assistant directly handling the user's request may act as the orchestra
 
 The orchestrator owns context, planning, delegation, verification, testing, and final responsibility. It delegates selectively when a worker will improve quality, speed, independence, or context management. It keeps work local when the slice is small, prompt construction would cost more than the task, delegation would weaken correctness, or the orchestrator needs to preserve tight control of the acceptance boundary. The orchestrator is the finisher: workers produce inputs, evidence, drafts, and implementation, but the orchestrator must retain the final user-facing deliverable, authorization decisions, accept-or-reject decisions, and correctness-critical judgment.
 
-Use [scripts/worker_jobs.py](scripts/worker_jobs.py) to create a unique run directory, track worker artifacts, wait safely, check lightweight worker activity, cancel cleanly, and extract outputs for every worker run.
+Use [scripts/worker_jobs.py](scripts/worker_jobs.py) to validate semantic worker requests against an authoritative policy, compose tested harness commands, create a unique run directory, track worker artifacts, wait safely, check lightweight worker activity, cancel cleanly, and extract outputs for every worker run. Read [references/worker-contract.md](references/worker-contract.md) before launching workers.
 The helper writes worker artifacts to `.ai-orchestrator/runs/` in the current project by default. Override with `AI_ORCHESTRATOR_ARTIFACT_ROOT`. Use `--run-dir current` to reference the latest run without knowing the timestamped path.
 When using the helper, worker labels must use lowercase kebab-case in the form `<nn>-<tool>-<subtask-slug>[-rN]` (for example `01-codex-trace-login`). The helper writes `<label>-out.txt`, `<label>-err.txt`, and `<label>-status.json` inside the per-run directory and rejects bad labels before launch.
 Use `worker_jobs.py activity --run-dir "$run_dir" --label <label>` as the health check. If it reports `healthy=yes`, keep waiting on cadence.
@@ -54,9 +54,9 @@ The user's preferred operating mode is explicit skill use. Do not rely on the mo
 When a task needs a skill, name it explicitly in the orchestrator checklist and in any delegated prompt. Delegated prompts must include a `REQUIRED SKILLS` section:
 
 - list exact skill names the worker must use, or `none`
-- tell the worker to read each named skill's `SKILL.md` completely before acting, if available in its environment
-- tell the worker to report `skill unavailable: <name>` and continue with the closest fallback only when the skill is not installed
-- include the essential contract or checklist in the prompt anyway, because worker environments may not have the same skills installed
+- the launcher embeds each named skill's complete local Markdown instruction bundle, including referenced Markdown resources
+- a missing skill or referenced resource is a launch rejection, not a prompt-only fallback; read the feedback, correct the request or install/fix the skill, and retry
+- include the essential task contract in the semantic request as well, so the worker receives both its exact task and the reusable skill workflow
 
 Core local skill map:
 
@@ -76,8 +76,8 @@ Core local skill map:
 
 Tool responsibilities:
 
-- Use `scripts/worker_jobs.py` for worker launch, tracking, activity, cancellation, and extraction.
-- Use the selected model reference file for CLI invocation details.
+- Use `scripts/worker_jobs.py launch --policy <worker-policy.json> --request <worker-request.json>` for worker launch; never construct or invoke a worker harness command directly.
+- Use the selected model reference for capability and role-fit decisions. The launcher owns CLI flags.
 - Use shell/git commands locally for verification and diff inspection when that is faster and clearer than delegation.
 - Use GitHub tools or `gh` only for GitHub tasks where repository/PR context matters and the user request authorizes that workflow.
 
@@ -114,7 +114,7 @@ After choosing a role, choose a model from the table above:
 
 ## Delegation Discipline
 
-Every prompt sent to an external tool must be self-contained. Always use the role templates in [references/templates.md](references/templates.md) — do not improvise. They exist to package the right context so delegation is available when useful without forcing it when local work is sharper. Include: specific task, relevant code or file paths, constraints, approval state for any state-changing git/GitHub action, and expected output format.
+Every worker request must be self-contained. Encode the role template's semantic fields in `worker-request.json`; the launcher deterministically renders the worker-mode prompt and embeds requested skills. Include: specific task, relevant code or file paths, constraints, approval state for any state-changing git/GitHub action, and expected output format.
 For implementation work, include the frozen contract: intended slice, allowed files/functions, expected tests, explicit non-goals, risky surfaces, and validation plan. Workers may implement inside the contract or audit against it, but they must not expand it or approve drift.
 For correctness-critical investigations, explicitly name the evidence scope the worker must check before concluding: the files, directories, docs, configs, schemas, or artifacts that materially affect the answer.
 
@@ -131,9 +131,9 @@ Each new task requires a fresh role selection decision — do not carry forward 
 3. **Freeze contract** — for implementation tasks, capture the intended slice, allowed surface, non-goals, tests, risky surfaces, and rollback path before coding
 4. **Checklist** — write a short execution checklist with worker labels, launch/extract steps, drift-audit handoff, any promised follow-up reviewer, and the final synthesis step
 5. **Select role and model** — use the role matrix, model table, and any user directive
-6. **Load references** — read [references/templates.md](references/templates.md) and the selected model reference
-7. **Fill template** — include all context; the worker knows nothing else. When an edit follows a planning worker, carry the exact target files, `path:line` anchors, and current snippets into the edit prompt so the worker can move straight to the edit
-8. **Run** — invoke the model using its reference file and [scripts/worker_jobs.py](scripts/worker_jobs.py) so outputs live under one run directory with a manifest
+6. **Load contract** — read [references/worker-contract.md](references/worker-contract.md), [references/templates.md](references/templates.md), and the selected model reference for capability guidance
+7. **Write request** — write a semantic `worker-request.json` carrying the task, role, access, files, constraints, required skills, context, and output contract. Under MC, copy slice identity and plan digest from `worker-policy.json`; do not infer them
+8. **Run** — invoke `worker_jobs.py launch` with the policy and request. The helper validates policy, embeds complete required-skill bundles, composes the harness command, forces the child working directory to the policy repository, and records launch evidence. If rejected, read `<label>-request-feedback.md`, correct only the named request fields, and retry; never bypass rejection with a raw command
 9. **Monitor** — use a calm cadence. For senior tasks, wait 5 minutes, then run `worker_jobs.py activity --run-dir "$run_dir" --label <label> --max-idle 900` and re-check every 3 minutes. For simpler tasks, wait 3 minutes then re-check every 2 minutes. Three rules govern the cancellation decision: (1) `healthy=yes` → keep waiting; (2) `healthy=no` + process still running → re-check, do not cancel; require at least 3 consecutive `healthy=no` readings before considering early termination, and only when there is no prior evidence of work at all; (3) `healthy=no` + process not running → check status and extract. Do not infer failure from empty stdout/stderr alone while the process is running — a worker may produce no output for 10–15 minutes while thinking or running tools. Any worker with prior evidence of work may run up to 30 minutes before being treated as hung.
 10. **Stay in role** — while workers run, do orchestration-only work such as monitoring status, updating the checklist, preparing the synthesis shell, or drafting a follow-up review prompt. Do not independently re-read or solve the same delegated investigation in parallel. A targeted local tie-break read is allowed only after worker outputs are back and there is a real conflict or missing evidence that materially affects the synthesis.
 11. **Compress** — after completing a worker batch, summarise completed work in two to three lines and drop the raw worker output from active context to keep the session lean

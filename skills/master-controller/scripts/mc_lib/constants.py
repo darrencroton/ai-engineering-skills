@@ -77,10 +77,6 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "effort_config_key": "model_reasoning_effort",
         "worker_network_flag": ["-c", "sandbox_workspace_write.network_access=true"],
         "commit_git_access_flag": "--add-dir",
-        "worker_command_notes": [
-            "For Codex workers, use `-m <model>` for model and `-c model_reasoning_effort=\"<effort>\"` for effort.",
-            "`codex exec` does not accept approval-policy flags such as `-a never`; use sandbox flags such as `--sandbox read-only`.",
-        ],
         "notes": [
             "Use --no-alt-screen for durable tmux captures.",
             "Optional MC profile model and effort overrides are composed as -m and -c model_reasoning_effort=... .",
@@ -95,9 +91,6 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "base_command": ["claude", "--permission-mode", "auto"],
         "model_flag": "--model",
         "effort_flag": "--effort",
-        "worker_command_notes": [
-            "For Claude workers, use `--model <model>` for model and `--effort <effort>` for effort.",
-        ],
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
             "Optional MC profile model and effort overrides are composed while preserving --session-id transcript capture.",
@@ -115,9 +108,6 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "base_command": ["copilot", "--allow-all-tools", "--autopilot"],
         "model_flag": "--model",
         "effort_flag": "--effort",
-        "worker_command_notes": [
-            "For Copilot workers, use `--model <model>` for model and `--effort <effort>` for effort.",
-        ],
         "notes": [
             "Mechanically validated as an MC orchestrator harness: bare interactive TUI accepts tmux paste-buffer "
             "plus double-Enter prompt injection identically to codex/claude, and its directory-trust dialog text "
@@ -138,11 +128,6 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "base_command": ["opencode", "--auto"],
         "model_flag": "-m",
         "effort_flag": "--variant",
-        "worker_command_notes": [
-            "For OpenCode workers, use `-m <provider/model>` for model (form from ~/.config/opencode/opencode.json, "
-            "e.g. macstudio/qwen/qwen3.6-27b-q8) and `--variant <effort>` for effort when the underlying model "
-            "supports reasoning-effort control.",
-        ],
         "notes": [
             "Mechanically validated as an MC orchestrator harness: bare interactive TUI shows a stable 'Ask "
             "anything...' idle placeholder as a ready marker and accepts the same tmux paste-buffer plus "

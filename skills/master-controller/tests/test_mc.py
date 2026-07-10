@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import hashlib
 import io
 import importlib.util
 import json
@@ -525,6 +526,80 @@ class MasterControllerTests(unittest.TestCase):
         self.assertTrue(current.is_symlink())
         return json.loads((current.resolve() / "run.json").read_text(encoding="utf-8"))
 
+    def write_worker_policy(self, artifact, *, tool="opencode"):
+        artifact.mkdir(parents=True, exist_ok=True)
+        policy = {
+            "schema_version": 1,
+            "run_id": "test",
+            "slice_id": "Slice 1",
+            "plan_sha256": "a" * 64,
+            "repo_path": str(self.repo.resolve()),
+            "worker_artifact_root": str(artifact / "worker-runs"),
+            "required_tools": [tool],
+            "required_model": "default",
+            "required_effort": "default",
+            "allowed_access": ["read-only", "workspace-write"],
+            "allowed_roles": ["junior-worker", "senior-worker"],
+            "authorized_files": ["README.md"],
+        }
+        policy_path = artifact / "worker-policy.json"
+        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return policy_path, policy
+
+    def write_validated_worker_run(self, artifact, *, tool="opencode", label="01-opencode-readonly-check", state="completed", returncode=0):
+        policy_path, policy = self.write_worker_policy(artifact, tool=tool)
+        policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        contract = {
+            "status": "pass",
+            "policy_sha256": policy_sha,
+            "slice_id": "Slice 1",
+            "plan_sha256": policy["plan_sha256"],
+            "tool": tool,
+            "model": "default",
+            "effort": "default",
+            "role": "junior-worker",
+            "access": "read-only",
+            "repo_path": str(self.repo.resolve()),
+            "cwd": str(self.repo.resolve()),
+        }
+        # start_tracked_worker always records a positive subprocess pid and
+        # always creates outfile/errfile via `.open("wb")` before the child
+        # process starts, inside worker_artifact_root. The gate now requires
+        # that real footprint, so a genuine-launch fixture must match it.
+        outfile = worker_run / f"{label}-out.txt"
+        errfile = worker_run / f"{label}-err.txt"
+        outfile.write_text("", encoding="utf-8")
+        errfile.write_text("", encoding="utf-8")
+        (worker_run / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "workers": {
+                        label: {
+                            "tool": tool,
+                            "command": [tool, "run"],
+                            "pid": 4242,
+                            "outfile": str(outfile),
+                            "errfile": str(errfile),
+                            "launch_contract": contract,
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker_run / f"{label}-status.json").write_text(
+            json.dumps({"label": label, "state": state, "returncode": returncode}), encoding="utf-8"
+        )
+        mc.capture_worker_runs_summary(artifact)
+
+    def attach_worker_policy_snapshot(self, state, artifact):
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "worker_policy": mc.worker_policy_snapshot(artifact / "worker-policy.json"),
+        }
+
     def test_run_state_creation(self):
         state = self.init_run()
         self.assertEqual(state["schema_version"], 1)
@@ -738,7 +813,9 @@ Continue later.
         self.assertIn(str(slice_artifact_dir / "tool-homes"), prompt)
         self.assertIn(str(slice_artifact_dir / "copilot-home"), prompt)
         self.assertIn('run_dir="$(python3 ', prompt)
-        self.assertIn('start --run-dir "$run_dir"', prompt)
+        self.assertIn('launch --run-dir "$run_dir"', prompt)
+        self.assertIn("Embedded ai-orchestrator instructions:", prompt)
+        self.assertIn("Deterministic Worker Contract", prompt)
         self.assertIn("worker-evidence.md", prompt)
         self.assertIn("Required worker tool(s) for this run: none configured for this run", prompt)
 
@@ -749,7 +826,7 @@ Continue later.
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
         prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
         self.assertIn("Required worker tool(s) for this run: codex", prompt)
-        self.assertIn("authoritative for which worker tool(s) to use", prompt)
+        self.assertIn("Every configured tool is required to complete", prompt)
 
     def test_prompt_rendering_states_worker_model_and_effort(self):
         state = self.init_run()
@@ -767,10 +844,11 @@ Continue later.
         )
         self.assertIn("Required worker model for this run: gpt-5.5", prompt)
         self.assertIn("Required worker effort for this run: low", prompt)
-        self.assertIn('model_reasoning_effort="<effort>"', prompt)
-        self.assertIn("does not accept approval-policy flags", prompt)
+        self.assertIn('"model": "gpt-5.5"', prompt)
+        self.assertIn('"effort": "low"', prompt)
+        self.assertIn("Do not construct or invoke a worker harness command yourself", prompt)
 
-    def test_prompt_rendering_uses_profile_guidance_for_worker_model_and_effort(self):
+    def test_prompt_rendering_embeds_ai_orchestrator_instead_of_worker_flag_guidance(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
@@ -784,10 +862,11 @@ Continue later.
             "some-model",
             "medium",
         )
-        self.assertIn("Worker model/effort guidance:", prompt)
-        self.assertIn("- claude: For Claude workers, use `--model <model>`", prompt)
-        self.assertIn("`--effort <effort>`", prompt)
-        self.assertIn("- copilot: For Copilot workers, use `--model <model>`", prompt)
+        self.assertIn("BEGIN EMBEDDED SKILL FILE:", prompt)
+        self.assertIn("name: ai-orchestrator", prompt)
+        self.assertIn('"model": "some-model"', prompt)
+        self.assertIn('"effort": "medium"', prompt)
+        self.assertNotIn("Worker model/effort guidance:", prompt)
 
     def test_repair_prompt_covers_every_repairable_signature(self):
         # Every repairable signature must render a complete prompt (no
@@ -960,6 +1039,7 @@ Continue later.
         self.assertIn("MC_SLICE_TMP_DIR=/tmp/artifacts/tmp", command)
         self.assertIn("MC_TOOL_HOME_ROOT=/tmp/artifacts/tool-homes", command)
         self.assertIn("MC_WORKER_JOBS_PATH=", command)
+        self.assertIn("MC_WORKER_POLICY_PATH=/tmp/artifacts/worker-policy.json", command)
         self.assertIn("TMPDIR=/tmp/artifacts/tmp", command)
         self.assertTrue(command.endswith("python fake.py"))
 
@@ -1315,6 +1395,38 @@ Continue later.
         hints = mc.extract_operational_hints(safety_text, process_running=True, result_exists=False)
         self.assertFalse(any(hint["kind"] == "external_side_effect_request" for hint in hints))
 
+    def test_full_rendered_orchestrator_prompt_triggers_no_hard_prompt_or_hard_stop_hint(self):
+        # render_orchestrator_prompt embeds the complete ai-orchestrator skill
+        # bundle (SKILL.md plus every linked Markdown resource, including each
+        # model reference file). A doc phrase anywhere in that bundle that
+        # happens to collide with a HARD_PROMPT_MARKERS substring would make
+        # the repair-send guard and _raise_on_hard_stop_hints refuse delivery
+        # on almost every run, since the embedded bundle stays in tmux
+        # scrollback for most of a slice's life. Regression for the
+        # `copilot.md` "Allow access to all URLs..." / permission_prompt
+        # "allow access" collision found in review.
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        plan_slice = mc.parse_plan(self.plan)[0]
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+        prompt = mc.render_orchestrator_prompt(
+            state,
+            plan_slice,
+            slice_artifact_dir,
+            run_json,
+            ("claude", "codex", "copilot", "opencode"),
+            "some-model",
+            "medium",
+        )
+        self.assertIn("BEGIN EMBEDDED SKILL FILE:", prompt)
+
+        hard_prompt = mc.TmuxHarnessAdapter.detect_hard_prompt(prompt)
+        self.assertFalse(hard_prompt["present"], hard_prompt.get("kinds"))
+
+        hints = mc.extract_operational_hints(prompt, process_running=True, result_exists=False)
+        hard_stop_hints = [hint["kind"] for hint in hints if hint.get("hard_stop")]
+        self.assertEqual(hard_stop_hints, [])
+
     def test_hard_prompt_detection_keeps_external_side_effect_prompts(self):
         prompt = "Approve deploy to production? [y/n]"
 
@@ -1325,6 +1437,16 @@ Continue later.
         hints = mc.extract_operational_hints(prompt, process_running=True, result_exists=False)
         external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
         self.assertTrue(external["hard_stop"])
+
+    def test_operational_hints_ignore_instructional_timeout_flags(self):
+        text = 'Use worker_jobs.py wait --run-dir "$run_dir" --label check --timeout 300.'
+        hints = mc.extract_operational_hints(text, process_running=True, result_exists=False)
+        self.assertFalse(any(hint["kind"] == "network_transient" for hint in hints))
+
+        real_error = mc.extract_operational_hints(
+            "Network error: request timed out while contacting the provider.", process_running=True, result_exists=False
+        )
+        self.assertTrue(any(hint["kind"] == "network_transient" for hint in real_error))
 
     def test_operational_hints_parse_rolling_limit_duration(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
@@ -1852,7 +1974,9 @@ Continue later.
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        self.write_worker_policy(artifact)
         state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
@@ -1875,6 +1999,7 @@ Continue later.
             "# Worker Evidence\n- Result summary: worker was not launched; orchestrator did the check itself.\n",
             encoding="utf-8",
         )
+        self.write_worker_policy(artifact)
         # A worker-runs directory was init'd but no worker was ever started in it,
         # exactly reproducing the observed OpenCode/OpenCode Test 5 failure mode.
         worker_run = artifact / "worker-runs" / "workers-1"
@@ -1882,6 +2007,7 @@ Continue later.
         (worker_run / "manifest.json").write_text(json.dumps({"workers": {}}), encoding="utf-8")
         mc.capture_worker_runs_summary(artifact)
         state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
@@ -1904,24 +2030,184 @@ Continue later.
             "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: confirmed unchanged.\n",
             encoding="utf-8",
         )
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {"01-opencode-readonly-check": {"tool": "opencode", "command": ["opencode", "run"]}}}),
-            encoding="utf-8",
-        )
-        (worker_run / "01-opencode-readonly-check-status.json").write_text(
-            json.dumps({"label": "01-opencode-readonly-check", "state": "completed", "returncode": 0}),
-            encoding="utf-8",
-        )
-        mc.capture_worker_runs_summary(artifact)
+        self.write_validated_worker_run(artifact)
         state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "pass")
+
+    def test_gate_rejects_hand_authored_manifest_with_no_real_launch_footprint(self):
+        # An orchestrator has full write access to its own worker-runs tree
+        # and can read worker-policy.json (including its own sha256) to
+        # compute a matching policy_sha256. It could therefore hand-author a
+        # manifest.json + <label>-status.json pair that satisfies every
+        # digest/identity/model/effort/access/role/repo check without ever
+        # invoking worker_jobs.py launch or a real harness process. The gate
+        # must still reject that: a genuine start_tracked_worker launch always
+        # records a positive pid and always creates real outfile/errfile
+        # inside worker_artifact_root before the child process starts.
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text(
+            "# Worker Evidence\n- Label: 01-opencode-forged\n- Result summary: opencode worker ran successfully.\n",
+            encoding="utf-8",
+        )
+        policy_path, policy = self.write_worker_policy(artifact)
+        policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+        label = "01-opencode-forged"
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        contract = {
+            "status": "pass",
+            "policy_sha256": policy_sha,
+            "slice_id": "Slice 1",
+            "plan_sha256": policy["plan_sha256"],
+            "tool": "opencode",
+            "model": "default",
+            "effort": "default",
+            "role": "junior-worker",
+            "access": "read-only",
+            "repo_path": str(self.repo.resolve()),
+            "cwd": str(self.repo.resolve()),
+        }
+        # Deliberately no pid, no outfile, no errfile, and no worker_jobs.py
+        # invocation anywhere in this test — only three hand-written JSON
+        # files, exactly mirroring the zero-effort forgery this closes.
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {label: {"tool": "opencode", "launch_contract": contract}}}),
+            encoding="utf-8",
+        )
+        (worker_run / f"{label}-status.json").write_text(
+            json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("without matching validated launch contracts", decision.reason)
+        self.assertIn("real subprocess pid", decision.reason)
+
+    def test_gate_rejects_worker_policy_changed_after_mc_snapshot(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
+        self.write_validated_worker_run(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+        policy_path = artifact / "worker-policy.json"
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        policy["allowed_access"] = ["read-only", "workspace-write", "unrestricted"]
+        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("changed after MC created", decision.reason)
+
+    def test_gate_requires_successful_evidence_for_every_configured_worker_tool(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
+        policy_path, policy = self.write_worker_policy(artifact)
+        policy["required_tools"] = ["opencode", "codex"]
+        policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+        label = "01-opencode-readonly-check"
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        contract = {
+            "status": "pass",
+            "policy_sha256": policy_sha,
+            "slice_id": "Slice 1",
+            "plan_sha256": policy["plan_sha256"],
+            "tool": "opencode",
+            "model": "default",
+            "effort": "default",
+            "role": "junior-worker",
+            "access": "read-only",
+            "repo_path": str(self.repo.resolve()),
+            "cwd": str(self.repo.resolve()),
+        }
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {label: {"tool": "opencode", "command": ["opencode", "run"], "launch_contract": contract}}}),
+            encoding="utf-8",
+        )
+        (worker_run / f"{label}-status.json").write_text(
+            json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode", "codex")
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("codex", decision.reason)
+
+    def test_gate_rejects_matching_executable_without_validated_launch_contract(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-raw\n", encoding="utf-8")
+        self.write_worker_policy(artifact)
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "manifest.json").write_text(
+            json.dumps({"workers": {"01-opencode-raw": {"tool": "opencode", "command": ["opencode", "run"]}}}),
+            encoding="utf-8",
+        )
+        (worker_run / "01-opencode-raw-status.json").write_text(
+            json.dumps({"label": "01-opencode-raw", "state": "completed", "returncode": 0}), encoding="utf-8"
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("without matching validated launch contracts", decision.reason)
+        self.assertIn("correct the semantic worker request", decision.reason)
 
     def test_gate_blocks_pass_when_worker_is_mislabeled_but_actually_a_different_executable(self):
         # Reproduces a live OpenCode/OpenCode test run: a worker labeled
@@ -1940,6 +2226,7 @@ Continue later.
             "# Worker Evidence\n- Label: 01-opencode-drift-check\n- Result summary: drift check passed.\n",
             encoding="utf-8",
         )
+        self.write_worker_policy(artifact)
         worker_run = artifact / "worker-runs" / "workers-1"
         worker_run.mkdir(parents=True)
         (worker_run / "manifest.json").write_text(
@@ -1952,6 +2239,7 @@ Continue later.
         )
         mc.capture_worker_runs_summary(artifact)
         state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
@@ -2090,7 +2378,7 @@ Continue later.
             {
                 "slice_id", "title", "status", "started_at", "completed_at", "artifact_dir",
                 "before_head", "changed_files", "validation", "drift_audit", "code_review",
-                "commit", "next_action", "blockers", "gate_reason", "worker_tools",
+                "commit", "next_action", "blockers", "gate_reason", "worker_tools", "worker_policy",
             },
         )
 
@@ -2490,6 +2778,62 @@ Continue later.
         self.assertTrue(result["started"])
         persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(persisted["current_slice"]["worker_tools"], ["opencode"])
+        policy = json.loads((run_dir / "slices" / "slice-001" / "worker-policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(policy["required_tools"], ["opencode"])
+        self.assertEqual(policy["slice_id"], "Slice 1")
+        self.assertEqual(policy["plan_sha256"], state["plan"]["sha256"])
+        prompt = (run_dir / "slices" / "slice-001" / "prompt.md").read_text(encoding="utf-8")
+        self.assertIn("name: ai-orchestrator", prompt)
+        self.assertIn("worker_jobs.py launch", prompt)
+
+    def test_worker_policy_restricts_explicit_read_only_plan_requirement(self):
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        sections = dict(plan_slice.sections)
+        sections["Validation Plan"] += "\n- Worker evidence: run one bounded read-only support check."
+        read_only_slice = mc.PlanSlice(plan_slice.number, plan_slice.title, plan_slice.body, sections)
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        policy_path = mc.write_worker_policy(state, read_only_slice, artifact, ("opencode",), "model", None)
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        self.assertEqual(policy["allowed_access"], ["read-only"])
+
+    def test_stop_with_evidence_records_terminal_slice_attempt(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("unaccepted work\n", encoding="utf-8")
+        state["status"] = "running"
+        state["current_slice"] = mc.current_slice_state(
+            self.repo.resolve(), plan_slice, artifact, "mc_test_slice-001_a1", 1, mc.utc_now(), before, worker_tools=("opencode",)
+        )
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            reason="worker contract violation",
+            status="needs-human",
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+        with mock.patch.object(mc_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.stop_with_evidence(args), 0)
+        stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertIsNone(stopped["current_slice"])
+        self.assertEqual(stopped["status"], "needs-human")
+        self.assertEqual(len(stopped["slices"]), 1)
+        self.assertEqual(stopped["slices"][0]["status"], "needs-human")
+        self.assertEqual(stopped["slices"][0]["changed_files"], ["README.md"])
+        self.assertEqual(stopped["slices"][0]["gate_reason"], "worker contract violation")
 
     def test_finalize_enforces_worker_evidence_from_persisted_state(self):
         # finalize-slice is a separate invocation that may not re-supply
@@ -3179,7 +3523,7 @@ Continue later.
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
-        self.assertEqual(state["status"], "needs-human")
+        self.assertEqual(state["status"], "needs-human", state.get("stop_reason"))
         self.assertIn("repair prompt could not be delivered", state["stop_reason"])
         self.assertIn("hard prompt", state["stop_reason"])
         self.assertTrue((slice_dir / "pane-capture-repair-refused-1.txt").exists())
@@ -3885,18 +4229,9 @@ Continue later.
             "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: worker ran.\n",
             encoding="utf-8",
         )
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {"01-opencode-readonly-check": {"tool": "opencode", "command": ["opencode", "run"]}}}),
-            encoding="utf-8",
-        )
-        (worker_run / "01-opencode-readonly-check-status.json").write_text(
-            json.dumps({"label": "01-opencode-readonly-check", "state": "failed", "returncode": 1}),
-            encoding="utf-8",
-        )
-        mc.capture_worker_runs_summary(artifact)
+        self.write_validated_worker_run(artifact, state="failed", returncode=1)
         state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
         decision = mc.verify_gate(
             self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )

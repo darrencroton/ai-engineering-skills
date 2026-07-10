@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -145,23 +146,19 @@ def object_field(result: dict[str, Any], field: str) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, ...]) -> str | None:
+def worker_evidence_failure(
+    slice_artifact_dir: Path,
+    worker_tools: tuple[str, ...],
+    expected_snapshot: dict[str, Any] | None,
+) -> str | None:
     """Return a gate-failure reason if a required worker tool has no mechanical launch evidence.
 
-    An orchestrator can write a `worker-evidence.md` that narrates why it chose
-    not to launch a worker (or self-declares its own substitute as sufficient),
-    but that prose is not proof a worker actually ran. `worker-runs-summary.json`
-    is populated only from real `worker_jobs.py` run-directory artifacts
-    (`manifest.json` / `*-status.json`), so it cannot be satisfied by narration
-    alone. Require: a non-empty `worker-evidence.md` (the plan-mandated record),
-    at least one real worker entry in the run summary, and at least one of
-    those entries whose manifest `tool` (worker_jobs.py's own
-    `Path(command[0]).name` on the executed subprocess, not orchestrator-
-    reported) matches a required tool name. The last check specifically closes
-    a failure mode observed in testing: a worker labeled e.g.
-    `01-opencode-drift-check` whose manifest recorded `"tool": "bash"` — the
-    orchestrator ran a shell one-liner through the worker helper and named it
-    after the required tool rather than actually invoking that tool.
+    Narration and executable-name matching are insufficient. Require the
+    plan-mandated worker-evidence.md, MC's authoritative worker-policy.json, a
+    manifest launch contract whose policy digest and normalized semantic
+    fields match that policy, and successful helper-owned process status. This
+    prevents both mislabeled substitutes and correctly named harnesses launched
+    with unvalidated model/access/role flags.
     """
     if not worker_tools:
         return None
@@ -170,6 +167,27 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
     evidence_path = slice_artifact_dir / "worker-evidence.md"
     if not evidence_path.is_file() or evidence_path.stat().st_size == 0:
         return f"required worker tool(s) ({tools_label}) have no worker-evidence.md for this slice"
+    policy_path = slice_artifact_dir / "worker-policy.json"
+    if not policy_path.is_file():
+        return (
+            "required worker launch policy is missing; MC cannot verify that worker tool, model, access, and slice identity "
+            "were validated before launch"
+        )
+    try:
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return "worker-policy.json is not valid JSON"
+    if not isinstance(policy, dict):
+        return "worker-policy.json must contain a JSON object"
+    policy_sha256 = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    if not isinstance(expected_snapshot, dict):
+        return "MC run state has no immutable worker-policy snapshot for this slice"
+    if policy_sha256 != expected_snapshot.get("sha256") or policy != expected_snapshot.get("policy"):
+        return (
+            "worker-policy.json changed after MC created the slice policy. Restore the exact MC-generated policy; "
+            "do not widen tools, model, effort, role, access, repository, or authorized files from the orchestrator session"
+        )
+
     summary_path = slice_artifact_dir / "worker-runs-summary.json"
     if not summary_path.is_file():
         return (
@@ -183,9 +201,12 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
     runs = summary.get("runs") if isinstance(summary, dict) else []
     if not isinstance(runs, list):
         runs = []
+    worker_artifact_root_text = str(policy.get("worker_artifact_root") or "")
+    worker_artifact_root = Path(worker_artifact_root_text).resolve() if worker_artifact_root_text else None
     any_worker = False
-    matched_tool = False
-    matched_success = False
+    matched_tools: set[str] = set()
+    contracted_tools: set[str] = set()
+    successful_tools: set[str] = set()
     for run in runs:
         if not isinstance(run, dict):
             continue
@@ -194,9 +215,59 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
         manifest_workers = object_field(run.get("manifest") or {}, "workers") if isinstance(run.get("manifest"), dict) else {}
         tool_by_label: dict[str, str] = {}
         for label, entry in (manifest_workers.items() if isinstance(manifest_workers, dict) else ()):
-            if isinstance(entry, dict) and str(entry.get("tool", "")).lower() in required:
-                matched_tool = True
-                tool_by_label[str(label)] = str(entry.get("tool", "")).lower()
+            if not isinstance(entry, dict) or str(entry.get("tool", "")).lower() not in required:
+                continue
+            entry_tool = str(entry.get("tool", "")).lower()
+            matched_tools.add(entry_tool)
+            contract = entry.get("launch_contract")
+            if not isinstance(contract, dict):
+                continue
+            if contract.get("status") != "pass" or contract.get("policy_sha256") != policy_sha256:
+                continue
+            if contract.get("slice_id") != policy.get("slice_id") or contract.get("plan_sha256") != policy.get("plan_sha256"):
+                continue
+            contract_tool = str(contract.get("tool", "")).lower()
+            if contract_tool != entry_tool or contract_tool not in required:
+                continue
+            required_model = str(policy.get("required_model") or "default")
+            required_effort = str(policy.get("required_effort") or "default")
+            if contract.get("model") != required_model:
+                continue
+            if contract.get("effort") != required_effort:
+                continue
+            if contract.get("access") not in policy.get("allowed_access", []):
+                continue
+            if contract.get("role") not in policy.get("allowed_roles", []):
+                continue
+            if contract.get("repo_path") != policy.get("repo_path") or contract.get("cwd") != policy.get("repo_path"):
+                continue
+            # A manifest/status pair alone is just JSON on disk — the
+            # orchestrator has full write access to its own worker-runs tree
+            # and could hand-author a matching manifest entry, launch
+            # contract, and completed status without ever invoking
+            # worker_jobs.py or a real harness process. start_tracked_worker
+            # always records a positive subprocess pid and always creates
+            # outfile/errfile via `.open("wb")` before the child process
+            # starts, regardless of whether the tool produces output, and
+            # always writes them inside the policy's worker_artifact_root.
+            # Requiring that real filesystem footprint closes the
+            # zero-effort forgery (three hand-written JSON files, no other
+            # artifacts) without depending on content that could itself be
+            # fabricated.
+            if not isinstance(entry.get("pid"), int) or entry.get("pid", 0) <= 0:
+                continue
+            outfile_text, errfile_text = entry.get("outfile"), entry.get("errfile")
+            if not isinstance(outfile_text, str) or not isinstance(errfile_text, str):
+                continue
+            outfile, errfile = Path(outfile_text), Path(errfile_text)
+            if not outfile.is_file() or not errfile.is_file():
+                continue
+            if worker_artifact_root is not None and not (
+                _within(outfile, worker_artifact_root) and _within(errfile, worker_artifact_root)
+            ):
+                continue
+            contracted_tools.add(contract_tool)
+            tool_by_label[str(label)] = contract_tool
         # Launch alone is not enough: a required worker that crashed on start
         # (or is still running at finalize) proves nothing was delegated. The
         # status payloads come from worker_jobs.py's own *-status.json files,
@@ -207,23 +278,34 @@ def worker_evidence_failure(slice_artifact_dir: Path, worker_tools: tuple[str, .
             if str(status.get("label", "")) not in tool_by_label:
                 continue
             if str(status.get("state", "")).lower() == "completed" and status.get("returncode") == 0:
-                matched_success = True
+                successful_tools.add(tool_by_label[str(status.get("label", ""))])
     if not any_worker:
         return (
             f"required worker tool(s) ({tools_label}) were never launched: a worker_jobs.py run directory was "
             "created but no worker was started in it (worker-runs-summary.json has no worker entries)"
         )
-    if not matched_tool:
+    missing_tools = sorted(required - matched_tools)
+    if missing_tools:
         return (
-            f"required worker tool(s) ({tools_label}) were never actually invoked: worker_jobs.py recorded worker "
-            "run(s), but none used an executable matching the required tool name(s) — check for a worker labeled "
-            "after the required tool while actually running a different command"
+            f"required worker tool(s) were never actually invoked: {', '.join(missing_tools)}. worker_jobs.py recorded "
+            "worker run(s), but none used matching executable(s) — check for labels that hide a different command"
         )
-    if not matched_success:
+    missing_contracts = sorted(required - contracted_tools)
+    if missing_contracts:
         return (
-            f"required worker tool(s) ({tools_label}) never completed successfully: worker_jobs.py recorded matching "
-            "worker run(s), but none finished with state 'completed' and returncode 0 — a worker that crashed, was "
-            "cancelled, or is still running does not satisfy the worker-evidence gate"
+            f"required worker executable(s) ran without matching validated launch contracts: {', '.join(missing_contracts)}. "
+            "No such worker has a passing deterministic launch contract matching the immutable MC policy and current "
+            "worker-policy.json, backed by a real subprocess pid and outfile/errfile actually present under the policy "
+            "worker_artifact_root. A hand-authored manifest/status entry does not satisfy the gate. Do not invoke the "
+            "harness directly or use a raw worker command. Read any <label>-request-feedback.md artifact, correct the "
+            "semantic worker request, and launch it through worker_jobs.py launch --policy <worker-policy.json> "
+            "--request <worker-request.json>"
+        )
+    missing_success = sorted(required - successful_tools)
+    if missing_success:
+        return (
+            f"required worker tool(s) never completed successfully: {', '.join(missing_success)}. Matching worker run(s) "
+            "did not finish with state 'completed' and returncode 0 — crashed, cancelled, or running workers do not satisfy the gate"
         )
     return None
 
@@ -354,7 +436,14 @@ def verify_gate(
     if not artifact_exists(repo, slice_artifact_dir, result, "code_review", "code-review.md"):
         return gate_failure("review", "code review artifact is missing", result, changed_evidence)
 
-    worker_failure = worker_evidence_failure(slice_artifact_dir, worker_tools)
+    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+    expected_snapshot = current.get("worker_policy") if current and current.get("slice_id") == plan_slice.slice_id else None
+    if not isinstance(expected_snapshot, dict):
+        for entry in reversed(state.get("slices", [])):
+            if isinstance(entry, dict) and entry.get("slice_id") == plan_slice.slice_id and isinstance(entry.get("worker_policy"), dict):
+                expected_snapshot = entry["worker_policy"]
+                break
+    worker_failure = worker_evidence_failure(slice_artifact_dir, worker_tools, expected_snapshot)
     if worker_failure:
         return gate_failure("worker-evidence", worker_failure, result, changed_evidence)
 

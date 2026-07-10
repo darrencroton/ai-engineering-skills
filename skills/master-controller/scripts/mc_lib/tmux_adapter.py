@@ -140,13 +140,18 @@ class TmuxHarnessAdapter:
         )
 
     def _pane_text(self, session_name: str) -> str:
-        result = run_command(["tmux", "capture-pane", "-p", "-S", "-200", "-t", session_name], allow_failure=True)
+        # Complete embedded skill bundles can span hundreds of terminal lines.
+        # A real hard prompt printed just before prompt injection must remain
+        # visible to the send-time guard instead of being pushed outside a
+        # short scrollback window by the pasted instructions.
+        result = run_command(["tmux", "capture-pane", "-p", "-S", "-32768", "-t", session_name], allow_failure=True)
         return result.stdout if result.returncode == 0 else ""
 
     @staticmethod
     def _raise_on_trust_prompt(executable: str, capture: str) -> None:
+        normalized = re.sub(r"\s+", " ", capture)
         for marker in TRUST_PROMPT_MARKERS:
-            if marker in capture:
+            if marker in normalized:
                 raise McError(
                     f"{executable} directory trust prompt blocked unattended launch; trust the repo before running MC"
                 )
@@ -154,7 +159,11 @@ class TmuxHarnessAdapter:
     @staticmethod
     def detect_hard_prompt(capture: str) -> dict[str, Any]:
         """Return conservative hard-prompt flags from visible pane text."""
-        lowered = capture.lower()
+        # tmux inserts display-width line wraps into captured text. Normalize
+        # whitespace so a prompt split between two terminal rows remains a
+        # prompt rather than bypassing the send guard.
+        normalized = re.sub(r"\s+", " ", capture)
+        lowered = normalized.lower()
         matches: dict[str, Any] = {
             "present": False,
             "kinds": [],
@@ -162,7 +171,7 @@ class TmuxHarnessAdapter:
         }
         for kind, markers in HARD_PROMPT_MARKERS.items():
             if kind == "external_side_effect_request":
-                match = EXTERNAL_SIDE_EFFECT_PROMPT_RE.search(capture)
+                match = EXTERNAL_SIDE_EFFECT_PROMPT_RE.search(normalized)
                 if match:
                     matches["present"] = True
                     matches["kinds"].append(kind)

@@ -20,15 +20,17 @@ Supported worker harnesses are defined by the model table in [`SKILL.md`](SKILL.
 SKILL.md                  # Main skill definition, roles, workflow, model table
 ai-reminder               # tmux reminder helper for long-running assistant sessions
 scripts/
-  worker_jobs.py          # tracked worker launcher/status/activity/cancel/extract helper
+  worker_contract.py      # semantic policy/request validation and harness command composition
+  worker_jobs.py          # validated worker launch/status/activity/cancel/extract helper
 references/
+  worker-contract.md       # semantic policy/request schema and correction flow
   <harness>.md            # Harness-specific CLI references and commands
-  templates.md            # Delegation prompt templates by role and task type
+  templates.md            # Semantic worker-request templates by task type
 ```
 
 ## Usage
 
-This skill is loaded by an AI coding assistant that supports skill files. Once loaded, the assistant acts as orchestrator and uses the templates and model references to delegate work.
+This skill may be loaded natively by an AI coding assistant or embedded by a supervising workflow such as Master Controller. Once loaded, the assistant acts as orchestrator and uses the semantic launcher, templates, and model references to delegate work.
 
 Operating conventions:
 - Start with a short execution checklist and keep it updated through the run
@@ -37,7 +39,8 @@ Operating conventions:
 - Use self-contained worker prompts with absolute paths when practical
 - Include the frozen contract for implementation work: intended slice, allowed files/functions, expected tests, explicit non-goals, risky surfaces, and validation plan
 - For analysis tasks, ask workers to return `SECTION:` markers plus `path:line` evidence
-- Use `scripts/worker_jobs.py` for worker launches; artifacts are written to `.ai-orchestrator/runs/` in the project by default (override with `AI_ORCHESTRATOR_ARTIFACT_ROOT`)
+- Write semantic worker policy/request JSON and use `scripts/worker_jobs.py launch`; never construct a worker harness command directly. The launcher validates intent, embeds complete required-skill bundles, composes tested flags, and forces the worker process into the policy repository. Artifacts are written to `.ai-orchestrator/runs/` in the project by default (override with `AI_ORCHESTRATOR_ARTIFACT_ROOT`)
+- Read `references/worker-contract.md` for schemas, validation behavior, self-correction feedback, and the launch command
 - Use `--run-dir current` to reference the latest run without knowing the timestamped path
 - Use `worker_jobs.py activity` as the worker health check; for session-backed tools it reads lightweight session signals, otherwise it uses helper-managed file activity
 - Use `worker_jobs.py cancel` to stop workers cleanly and preserve final status
@@ -51,11 +54,11 @@ Operating conventions:
 
 The orchestrator does not assume workers will infer skills from context. Every worker prompt includes `REQUIRED SKILLS`.
 
-When a required skill is available to a worker, the worker should read that skill before acting. When it is not available, the worker should report `skill unavailable: <name>` and continue with the explicit task contract in the prompt.
+The launcher embeds a required skill and its transitively linked Markdown resources before the process starts. Missing or incomplete required skills fail closed with field-specific feedback; the orchestrator corrects the request or installation and retries.
 
 Common companion skills are listed in the local skill map in [`SKILL.md`](SKILL.md). That map is the source of truth for how orchestration coordinates with other skills.
 
-The companion skills are helpful but not mandatory. The orchestrator prompts carry the essential contract so workers can still complete or audit the task when those skills are unavailable.
+Companion skills are optional only when the request does not name them. Once listed in `required_skills`, their complete instruction bundle is mandatory for launch.
 
 Trigger conditions:
 - The user wants to delegate a task to an external AI agent

@@ -121,7 +121,8 @@ from .runtime import (
     worker_credential_source,
     worker_jobs_module,
     worker_jobs_path,
-    worker_model_effort_guidance_text,
+    write_worker_policy,
+    worker_policy_snapshot,
 )
 from .state import (
     append_operational_event,
@@ -274,7 +275,8 @@ __all__ = [
     "worker_credential_source",
     "worker_jobs_module",
     "worker_jobs_path",
-    "worker_model_effort_guidance_text",
+    "write_worker_policy",
+    "worker_policy_snapshot",
     "wait",
     "wait_observing",
     "write_git_diff",

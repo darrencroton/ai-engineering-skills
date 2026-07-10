@@ -211,6 +211,7 @@ def current_slice_state(
     orchestrator_session_id: str | None = None,
     worker_tools: tuple[str, ...] = (),
     repair: dict[str, Any] | None = None,
+    worker_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     state = {
         "slice_id": plan_slice.slice_id,
@@ -234,6 +235,8 @@ def current_slice_state(
     }
     if orchestrator_session_id:
         state["orchestrator_session_id"] = orchestrator_session_id
+    if worker_policy is not None:
+        state["worker_policy"] = copy.deepcopy(worker_policy)
     return state
 
 
@@ -246,6 +249,7 @@ def slice_entry_from_gate(
     before_head: str | None = None,
     worker_tools: tuple[str, ...] = (),
     repair: dict[str, Any] | None = None,
+    worker_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = gate.result or {}
     entry = {
@@ -275,6 +279,8 @@ def slice_entry_from_gate(
     # passes first-attempt keeps the exact pre-repair-loop entry shape.
     if repair is not None:
         entry["repair"] = dict(repair)
+    if worker_policy is not None:
+        entry["worker_policy"] = copy.deepcopy(worker_policy)
     return entry
 
 

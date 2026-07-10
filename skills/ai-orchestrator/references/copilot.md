@@ -32,23 +32,9 @@ COLUMNS=300 copilot --help | sed -n '/--model <model>/,/--mouse/p'
 
 For captured worker runs, prefer the latest available `claude-sonnet-X`. If no Sonnet model is available, prefer the latest plain `gpt-X`. Set `--model` explicitly rather than relying on the default.
 
-## Core Commands
+## Deterministic Launch Profile
 
-Launch all Copilot worker runs via [../scripts/worker_jobs.py](../scripts/worker_jobs.py). The commands below are the worker command payloads to pass after `worker_jobs.py start --label <label> --`. Prefer `--silent` for captured non-interactive runs.
-
-```bash
-# Non-interactive execution worker command
-copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --autopilot --silent --add-dir <dir>
-
-# Low-stakes web research worker command
-copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --allow-all-urls --autopilot --silent --add-dir <dir>
-
-# GitHub operations worker command (with MCP tools)
-copilot --model <model> [--effort <level>] -p "PROMPT" --allow-all-tools --add-github-mcp-toolset all --autopilot --silent --add-dir <dir>
-
-# Resume most recent session
-copilot --continue --allow-all-tools
-```
+Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns prompt/model/effort, autopilot, capture, and directory flags; orchestrators must not compose them. The current profile has no mechanically enforced read-only mode, so a read-only Copilot request is rejected with actionable feedback instead of being launched with write-capable permissions.
 
 ## Helper Use
 
@@ -86,7 +72,7 @@ Use `worker_jobs.py extract` when you want the final answer or section filtering
 | `--model` | Any valid model string |
 | `--effort` / `--reasoning-effort` | Reasoning effort level when explicitly requested by the user or supervising workflow |
 | `--allow-all-tools` | All tools without confirmation; required for non-interactive |
-| `--allow-all-urls` | Allow access to all URLs without confirmation |
+| `--allow-all-urls` | Grants unrestricted URL fetching without a confirmation step |
 | `--autopilot` | Enables continuation without user interaction |
 | `--silent` | Output only the agent response; prefer for captured non-interactive runs |
 | `--allow-tool` / `--deny-tool` | Scoped tool permissions e.g. `shell(git:*)` |
@@ -104,9 +90,4 @@ Use `worker_jobs.py extract` when you want the final answer or section filtering
 - **State-changing git/GitHub work**: only after explicit user approval
 - **Locked-down**: `--allow-tool` + `--deny-tool` for precise control
 
-## Resume
-
-```bash
-copilot --continue --allow-all-tools
-```
-Offer that exact command if continuation is useful.
+Worker continuation is not a separate raw-command path. Write a new semantic request with an `-rN` label so policy validation and evidence remain complete.

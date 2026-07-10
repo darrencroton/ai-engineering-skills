@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Manage tracked worker runs for ai-orchestrator.
+"""Validate, launch, and manage tracked worker runs for ai-orchestrator.
 
 Worker artifacts are written to .ai-orchestrator/runs/ in the current project
 by default (override with AI_ORCHESTRATOR_ARTIFACT_ROOT). Provides per-run
-directories, manifest tracking, status, activity, cancel, and extract commands.
+directories, semantic contract validation, deterministic harness composition,
+manifest tracking, status, activity, cancel, and extract commands.
 """
 
 from __future__ import annotations
@@ -21,6 +22,22 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from worker_contract import (
+    WorkerContractError,
+    WORKER_PROFILES,
+    LABEL_RE as CONTRACT_LABEL_RE,
+    compose_worker_command,
+    compile_skill_bundle,
+    load_json_object,
+    render_worker_prompt,
+    sha256_path,
+    validate_contract,
+)
 
 
 ARTIFACT_ROOT_ENV = "AI_ORCHESTRATOR_ARTIFACT_ROOT"
@@ -1133,6 +1150,12 @@ def command_init(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_profiles(args: argparse.Namespace) -> int:
+    del args
+    print(json.dumps({"schema_version": 1, "profiles": WORKER_PROFILES}, indent=2, sort_keys=True))
+    return 0
+
+
 def normalize_dependencies(manifest: dict[str, Any], label: str, depends_on: list[str] | None) -> list[str]:
     if not depends_on:
         return []
@@ -1152,24 +1175,24 @@ def normalize_dependencies(manifest: dict[str, Any], label: str, depends_on: lis
     return normalized
 
 
-def command_start(args: argparse.Namespace) -> int:
-    run_dir = ensure_managed_run_dir(resolve_run_dir(args.run_dir))
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    label = args.label
+def start_tracked_worker(
+    run_dir: Path,
+    label: str,
+    command: list[str],
+    *,
+    cwd: Path,
+    depends_on: list[str] | None = None,
+    launch_contract: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Start a validated worker command and persist its durable evidence."""
     validate_label(label)
-
-    command = normalize_command(args.command)
-    if not command:
-        raise WorkerJobsError("No worker command supplied.")
-
     tool_name = infer_tool_name(command)
 
     with hold_manifest_lock(run_dir):
         manifest = ensure_manifest(run_dir)
         if label in manifest["workers"]:
             raise WorkerJobsError(f"Worker label already exists in manifest: {label}")
-        depends_on = normalize_dependencies(manifest, label, args.depends_on)
+        normalized_dependencies = normalize_dependencies(manifest, label, depends_on)
 
         started_at = iso_now()
         outfile = run_dir / f"{label}-out.txt"
@@ -1187,6 +1210,8 @@ def command_start(args: argparse.Namespace) -> int:
             str(outfile),
             "--stderr",
             str(errfile),
+            "--cwd",
+            str(cwd),
             "--",
             *command,
         ]
@@ -1208,9 +1233,12 @@ def command_start(args: argparse.Namespace) -> int:
             "errfile": str(errfile),
             "status_file": str(status_file),
             "started_at": started_at,
+            "cwd": str(cwd),
         }
-        if depends_on:
-            manifest["workers"][label]["depends_on"] = depends_on
+        if normalized_dependencies:
+            manifest["workers"][label]["depends_on"] = normalized_dependencies
+        if launch_contract is not None:
+            manifest["workers"][label]["launch_contract"] = launch_contract
         save_manifest(run_dir, manifest)
         sync_run_index(run_dir, manifest=manifest, status="active")
 
@@ -1225,20 +1253,111 @@ def command_start(args: argparse.Namespace) -> int:
                     worker_entry["session_id"] = session_id_from_path(session_path) or session_path.stem
                     save_manifest(run_dir, manifest)
 
-    print(
-        json.dumps(
-            {
-                "label": label,
-                "pid": process.pid,
-                "outfile": str(outfile),
-                "errfile": str(errfile),
-                "status_file": str(status_file),
-                "run_dir": str(run_dir),
-            },
-            indent=2,
-            sort_keys=True,
+    return {
+        "label": label,
+        "pid": process.pid,
+        "outfile": str(outfile),
+        "errfile": str(errfile),
+        "status_file": str(status_file),
+        "run_dir": str(run_dir),
+        "cwd": str(cwd),
+    }
+
+
+def _feedback_paths(run_dir: Path, label: str) -> tuple[Path, Path]:
+    return run_dir / f"{label}-request-feedback.json", run_dir / f"{label}-request-feedback.md"
+
+
+def write_contract_feedback(run_dir: Path, label: str, exc: WorkerContractError) -> dict[str, Any]:
+    payload = {
+        "status": "rejected",
+        "label": label,
+        "issues": [issue.as_dict() for issue in exc.issues],
+        "next_action": "Correct only the listed worker-request fields, preserve the same slice contract, then run launch again.",
+    }
+    json_path, markdown_path = _feedback_paths(run_dir, label)
+    write_json(json_path, payload)
+    lines = [
+        "# Worker Request Rejected",
+        "",
+        "The worker was not launched. Fix the request and retry; do not substitute a raw harness command.",
+        "",
+    ]
+    for index, issue in enumerate(exc.issues, start=1):
+        lines.extend(
+            [
+                f"## {index}. {issue.code}: `{issue.field}`",
+                "",
+                issue.message,
+                "",
+                f"Correction: {issue.correction}",
+                "",
+            ]
         )
+    markdown_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+    return payload
+
+
+def command_launch(args: argparse.Namespace) -> int:
+    run_dir = ensure_managed_run_dir(resolve_run_dir(args.run_dir))
+    run_dir.mkdir(parents=True, exist_ok=True)
+    request_path = Path(args.request).expanduser().resolve()
+    policy_path = Path(args.policy).expanduser().resolve()
+    label = "worker-request"
+    try:
+        policy = load_json_object(policy_path, "policy")
+        request = load_json_object(request_path, "request")
+        if isinstance(request.get("label"), str) and CONTRACT_LABEL_RE.fullmatch(request["label"].strip()):
+            label = request["label"].strip()
+        contract = validate_contract(policy, request, run_dir)
+        label = contract["label"]
+        prompt = render_worker_prompt(contract)
+        command = compose_worker_command(contract, prompt)
+    except WorkerContractError as exc:
+        payload = write_contract_feedback(run_dir, label, exc)
+        print(json.dumps(payload, indent=2, sort_keys=True), file=sys.stderr)
+        return 2
+
+    contract_artifact = {
+        "status": "pass",
+        "policy_path": str(policy_path),
+        "policy_sha256": sha256_path(policy_path),
+        "request_path": str(request_path),
+        "request_sha256": sha256_path(request_path),
+        "slice_id": contract["slice_id"],
+        "plan_sha256": contract["plan_sha256"],
+        "tool": contract["tool"],
+        "model": contract["model"],
+        "effort": contract["effort"],
+        "role": contract["role"],
+        "access": contract["access"],
+        "repo_path": contract["repo_path"],
+        "cwd": contract["repo_path"],
+    }
+    request_copy = run_dir / f"{label}-request.json"
+    policy_copy = run_dir / f"{label}-policy.json"
+    prompt_path = run_dir / f"{label}-prompt.md"
+    launch_path = run_dir / f"{label}-launch.json"
+    write_json(request_copy, request)
+    write_json(policy_copy, policy)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    write_json(launch_path, {**contract_artifact, "resolved_command": command})
+    launch_contract = {
+        **contract_artifact,
+        "policy_artifact": str(policy_copy),
+        "request_artifact": str(request_copy),
+        "prompt_artifact": str(prompt_path),
+        "launch_artifact": str(launch_path),
+    }
+    result = start_tracked_worker(
+        run_dir,
+        label,
+        command,
+        cwd=Path(contract["repo_path"]),
+        depends_on=args.depends_on,
+        launch_contract=launch_contract,
     )
+    print(json.dumps({**result, "launch_contract": launch_contract}, indent=2, sort_keys=True))
     return 0
 
 
@@ -1495,6 +1614,7 @@ def command_runner(args: argparse.Namespace) -> int:
     with stdout_path.open("wb") as stdout_handle, stderr_path.open("wb") as stderr_handle:
         child = subprocess.Popen(
             command,
+            cwd=args.cwd,
             stdin=subprocess.DEVNULL,
             stdout=stdout_handle,
             stderr=stderr_handle,
@@ -1508,6 +1628,7 @@ def command_runner(args: argparse.Namespace) -> int:
                 "state": "running",
                 "started_at": iso_now(),
                 "child_pid": child.pid,
+                "cwd": str(Path(args.cwd).resolve()),
             },
         )
         returncode = child.wait()
@@ -1522,6 +1643,7 @@ def command_runner(args: argparse.Namespace) -> int:
             "child_pid": child.pid,
             "cancel_requested": cancel_requested,
             "returncode": returncode,
+            "cwd": str(Path(args.cwd).resolve()),
         },
     )
     sync_run_index(status_file.parent)
@@ -1543,11 +1665,14 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--prefix", default="run")
     init_parser.set_defaults(func=command_init)
 
-    start_parser = subparsers.add_parser(
-        "start",
-        help="Start one tracked worker. The helper owns stdout/stderr capture; do not add shell redirections unless you explicitly wrap the command in /bin/sh -lc.",
+    profiles_parser = subparsers.add_parser("profiles", help="Show deterministic worker role/access capabilities.")
+    profiles_parser.set_defaults(func=command_profiles)
+
+    launch_parser = subparsers.add_parser(
+        "launch",
+        help="Validate a semantic worker request against policy, compose the harness command, and start one tracked worker.",
     )
-    start_parser.add_argument(
+    launch_parser.add_argument(
         "--run-dir",
         required=True,
         help=(
@@ -1555,19 +1680,15 @@ def build_parser() -> argparse.ArgumentParser:
             f"artifact root (override with {ARTIFACT_ROOT_ENV})."
         ),
     )
-    start_parser.add_argument(
-        "--label",
-        required=True,
-        help="Worker label in the form <nn>-<tool>-<subtask-slug>[-rN], e.g. 01-codex-trace-login.",
-    )
-    start_parser.add_argument(
+    launch_parser.add_argument("--policy", required=True, help="MC/orchestrator worker-policy.json path.")
+    launch_parser.add_argument("--request", required=True, help="Semantic worker-request.json path.")
+    launch_parser.add_argument(
         "--depends-on",
         nargs="*",
         metavar="LABEL",
         help="Worker labels that must complete before this one (stored in manifest; checked by status/activity).",
     )
-    start_parser.add_argument("command", nargs=argparse.REMAINDER)
-    start_parser.set_defaults(func=command_start)
+    launch_parser.set_defaults(func=command_launch)
 
     status_parser = subparsers.add_parser("status", help="Show worker status.")
     status_parser.add_argument("--run-dir", required=True)
@@ -1613,6 +1734,7 @@ def build_parser() -> argparse.ArgumentParser:
     runner_parser.add_argument("--status-file", required=True)
     runner_parser.add_argument("--stdout", required=True)
     runner_parser.add_argument("--stderr", required=True)
+    runner_parser.add_argument("--cwd", required=True)
     runner_parser.add_argument("command", nargs=argparse.REMAINDER)
     runner_parser.set_defaults(func=command_runner)
 

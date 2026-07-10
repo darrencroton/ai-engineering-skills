@@ -29,22 +29,9 @@ opencode models
 
 Omit `-m` to use the configured default (`model` key in `opencode.json`). Never hardcode model names — read them from config or ask the user. Use `--variant <level>` for effort/reasoning-level when the user or supervising workflow specifies one; it only has an effect on models that support provider-specific reasoning-effort control (check `"reasoning": true` in the model's config entry as a starting signal, but treat unsupported variants as a no-op rather than an error).
 
-## Core Commands
+## Deterministic Launch Profile
 
-Launch all OpenCode worker runs via [../scripts/worker_jobs.py](../scripts/worker_jobs.py). The commands below are the worker command payloads to pass after `worker_jobs.py start --label <label> --`.
-
-```bash
-# Edit task worker command
-opencode run "PROMPT" [-m <provider/model>] [--variant <effort>] --agent build --auto --dir <dir>
-
-# Read-only review / plan review worker command
-opencode run "PROMPT" [-m <provider/model>] [--variant <effort>] --agent plan --auto --dir <dir>
-
-# Resume most recent session
-opencode run "PROMPT" --continue --dir <dir>
-```
-
-Confirmed by direct testing: `opencode run` prompt text is a positional argument (not a flag), and its default text output puts only the model's final answer on stdout — tool-call and status chatter goes to stderr. This matches Claude/Copilot's plain output shape, so no `--format json` or session-log fallback is needed for extraction.
+Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns `opencode run`, positional prompt placement, model/variant flags, `--agent plan|build`, `--auto`, and `--dir`; orchestrators must not compose these flags. Direct testing established that plan+auto is the unattended read-only combination and build+auto is edit-capable.
 
 ## Helper Use
 
@@ -91,10 +78,4 @@ Use `worker_jobs.py extract` when you want the clean final answer — it reads s
 - **Read-only review**: `--agent plan --auto`. Confirmed by direct testing: without `--auto`, a headless `opencode run --agent plan` call hangs indefinitely waiting for a tool-execution approval that no one is present to give — there is no TTY to approve it. `--agent plan` already keeps the agent read-only regardless of `--auto`; `--auto` only bypasses the approval prompt, it does not grant write access. Do not skip launching a worker, or substitute an orchestrator's own direct checks for a required worker run, based on an assumption that `--auto` is unsafe or unsupported for read-only tasks — test the documented command before concluding it can't be used.
 - **Unrestricted execution**: only if the user explicitly requests it
 
-## Resume
-
-```bash
-opencode run "PROMPT" --continue --dir <dir>
-```
-
-Offer that exact command if continuation is useful.
+Worker continuation is not a separate raw-command path. Write a new semantic request with an `-rN` label so policy validation and evidence remain complete.

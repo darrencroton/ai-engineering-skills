@@ -23,24 +23,9 @@ These are defaults for a normally-configured Codex CLI session, not a fixed guar
 
 Read `~/.codex/config.toml` for the user's default model (`model` key). Use that model as a starting point unless the user specifies otherwise. Prefer `model_reasoning_effort="high"` for Codex worker tasks, and reserve `xhigh` for especially complex review or synthesis. Prefer omitting `-m` entirely when the configured default is acceptable. Never hardcode model names.
 
-## Core Commands
+## Deterministic Launch Profile
 
-Launch all Codex worker runs via [../scripts/worker_jobs.py](../scripts/worker_jobs.py). The commands below are the worker command payloads to pass after `worker_jobs.py start --label <label> --`.
-
-```bash
-# Non-interactive execution worker command
-codex exec "PROMPT" [-m <model>] -c model_reasoning_effort="<effort>" \
-  [SANDBOX_FLAG] --skip-git-repo-check -C <dir>
-
-# Code review worker command
-codex exec -C <dir> review [-m <model>] -c model_reasoning_effort="<effort>" \
-  [SANDBOX_FLAG] --skip-git-repo-check
-
-# Resume most recent session
-codex exec resume --last --skip-git-repo-check
-```
-
-`--skip-git-repo-check` — always include; it allows running outside a git repo.
+Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns `codex exec`, model/reasoning flags, sandbox selection, `--skip-git-repo-check`, and working-directory flags; orchestrators must not compose these flags.
 
 ## Helper Use
 
@@ -92,10 +77,4 @@ Reasoning guidance:
 - Default to `high` for Codex worker tasks
 - Escalate to `xhigh` only for especially complex review, ambiguity, or synthesis
 
-## Resume
-
-```bash
-codex exec resume --last --skip-git-repo-check
-```
-
-Offer that exact command if continuation is useful.
+Worker continuation is not a separate raw-command path. Write a new semantic request with an `-rN` label so policy validation and evidence remain complete.

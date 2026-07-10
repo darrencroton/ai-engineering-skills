@@ -2,7 +2,7 @@
 
 Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, and verifies gates from outside the harness session. When verification finds a fixable gap, MC runs a bounded self-correcting repair loop: it surfaces the specific violation back into the live orchestrator session (preserving the context the orchestrator already built), lets it fix the gap, and re-verifies with the complete, unrelaxed gate. Only integrity breaches, an exhausted repair budget, a tripped same-signature circuit breaker, or policy-required approvals stop the run for a human.
 
-The three roles: **MC** is the deterministic supervisor — it owns run state and gates, steers repairs, never writes slice code, and never delegates to a worker itself. The **orchestrator** is the harness in tmux executing one slice (scoped-implementation → validation → drift-audit → code-review → commit); it reports a structured result but holds no final authority. A **worker** is a bounded helper the orchestrator launches via `ai-orchestrator`'s `worker_jobs.py`; it owns no gates, never commits, and never re-delegates.
+The three roles: **MC** is the deterministic supervisor — it owns run state, worker policy, and gates, steers repairs, never writes slice code, and never delegates to a worker itself. The **orchestrator** is the harness in tmux executing one slice (scoped-implementation → validation → drift-audit → code-review → commit); it reports a structured result but holds no final authority. A **worker** is a bounded helper requested semantically by the orchestrator and launched through `ai-orchestrator`'s deterministic policy/request interface; it owns no gates, never commits, and never re-delegates.
 
 MC has two documented operating styles. Model-supervised MC keeps the MC model in the loop for live operational judgment while deterministic commands own state transitions and gates. Deterministic batch MC runs the existing fail-closed `run-next` and `run --scope remaining` paths for simple unattended execution. The current implementation provides contract docs, durable run state, conservative plan discovery, tmux-backed slice execution, model-supervised observe/send/start/wait/pause/finalize/stop primitives, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
 
@@ -17,6 +17,7 @@ MC has two documented operating styles. Model-supervised MC keeps the MC model i
 - Running one eligible slice with `run-next`.
 - Running eligible slices sequentially with `run --scope remaining`.
 - Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, and `orchestrator-result.json` artifacts.
+- Writing `worker-policy.json`, embedding the ai-orchestrator contract into the slice prompt, and verifying validated worker-launch evidence without composing worker harness commands itself.
 - Recording supervision state and append-only operational event logs for model-supervised runs.
 - Verifying orchestrator claims against git evidence, classifying every non-pass gate outcome with a stable failure signature as repairable or terminal.
 - Driving the bounded repair loop: archiving the stale result, steering the live session with a targeted correction (or relaunching a fresh session per the circuit breaker), re-verifying with unrelaxed gates, and enforcing the repair budget from persisted state.
@@ -195,7 +196,7 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 ## Internal Layout
 
-`scripts/mc.py` is intentionally a thin, stable executable wrapper. The implementation lives in `scripts/mc_lib/`, grouped by responsibility: CLI construction, command handlers, plan parsing, run state, git/process helpers, harness profiles, tmux control, runtime artifacts, and gate verification. Keep public CLI behavior, run-state JSON, artifact names, and environment variables stable when editing these modules.
+`scripts/mc.py` is intentionally a thin executable wrapper. The implementation lives in `scripts/mc_lib/`, grouped by responsibility: CLI construction, command handlers, plan parsing, run state, git/process helpers, harness profiles, tmux control, runtime artifacts, and gate verification. When a stronger deterministic contract replaces an older path, remove the obsolete path and update tests/docs together rather than preserving ambiguous compatibility.
 
 ## Default MC Execution Flow
 
@@ -205,6 +206,7 @@ Two operational rules worth repeating here because they bite in practice (detail
 
 - MC's blocking commands outlive assistant tool-call limits. Run `run`/`run-next` in the background and poll `status`; in model-supervised mode use repeated bounded `wait` calls, not one long wait.
 - For model-supervised runs on subscription harnesses, put the MC model on a different provider than the orchestrator harness so one usage window cannot stall both.
+- Keep live MC observation/control calls separate from supplementary commands that may need approval; an approval delay does not pause the harness.
 
 `observe` and `wait` expose `operational_hints` in their JSON output. These hints summarize common pane/transcript evidence such as rolling usage limits, weekly/monthly/account limits, service unavailable messages, network transients, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result. Ordinary hints are evidence for the MC model, not commands. Hard-stop hints are deterministic guards: `send`, `pause-until`, and wait/retry/resume paths refuse unattended continuation when weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect evidence is present.
 

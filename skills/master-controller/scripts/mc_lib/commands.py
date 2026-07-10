@@ -24,6 +24,7 @@ from .constants import (
 )
 from .gates import verify_gate
 from .git_ops import (
+    changed_files_between,
     git,
     git_access_path,
     git_head,
@@ -34,7 +35,7 @@ from .git_ops import (
     resolve_repo,
     write_git_diff,
 )
-from .models import McError
+from .models import GateDecision, McError
 from .observation import (
     _current_adapter,
     _raise_on_hard_stop_hints,
@@ -621,6 +622,34 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
             "evidence_path": relative_artifact_path(repo, artifact_dir / "pane-capture.txt"),
         },
     )
+    plan_slice = plan_slice_by_id(parse_plan(resolve_plan(Path(state["plan_path"]))), str(current.get("slice_id") or ""))
+    if plan_slice is None:
+        raise McError(f"current slice is not present in plan: {current.get('slice_id')}")
+    changed_files = tuple(
+        sorted(changed_files_between(repo, str(current.get("before_head") or "") or None, after_head, after_status))
+    )
+    before_head = str(current.get("before_head") or "") or None
+    objective_result = {
+        "commit": {
+            "requested": bool(state.get("policy", {}).get("commit_required", True)),
+            "created": bool(after_head and after_head != before_head),
+            "hash": after_head if after_head and after_head != before_head else None,
+        }
+    }
+    terminal = GateDecision(args.status, args.reason, result=objective_result, actual_changed_files=changed_files)
+    state.setdefault("slices", []).append(
+        slice_entry_from_gate(
+            repo,
+            plan_slice,
+            artifact_dir,
+            str(current.get("started_at") or utc_now()),
+            terminal,
+            before_head,
+            tuple(str(tool) for tool in current.get("worker_tools") or ()),
+            repair=dict(repair_state(current)) if repair_state(current)["round"] else None,
+            worker_policy=current.get("worker_policy") if isinstance(current.get("worker_policy"), dict) else None,
+        )
+    )
     update_state_for_stop(run_dir / "run.json", state, args.status, args.reason)
     _json_print({"stopped": True, "status": args.status, "reason": args.reason, "artifact_dir": relative_artifact_path(repo, artifact_dir)})
     return 0
@@ -736,7 +765,15 @@ def reconcile(args: argparse.Namespace) -> int:
     worker_tools = tuple(entry_worker_tools) if isinstance(entry_worker_tools, list) else ()
     gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, worker_tools)
     reconciled_entry = slice_entry_from_gate(
-        repo, plan_slice, artifact_dir, str(entry.get("started_at") or utc_now()), gate, before_head, worker_tools
+        repo,
+        plan_slice,
+        artifact_dir,
+        str(entry.get("started_at") or utc_now()),
+        gate,
+        before_head,
+        worker_tools,
+        repair=entry.get("repair") if isinstance(entry.get("repair"), dict) else None,
+        worker_policy=entry.get("worker_policy") if isinstance(entry.get("worker_policy"), dict) else None,
     )
     state["slices"][entry_index] = reconciled_entry
     state["current_slice"] = None
@@ -789,8 +826,6 @@ def list_profiles(args: argparse.Namespace) -> int:
         effort_override = profile.get("effort_flag") or (f"-c {profile['effort_config_key']}=..." if profile.get("effort_config_key") else "none")
         print(f"  model_override: {model_override}")
         print(f"  effort_override: {effort_override}")
-        for note in profile.get("worker_command_notes", []):
-            print(f"  worker: {note}")
         for note in profile.get("notes", []):
             print(f"  - {note}")
     return 0

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
 import os
 import platform
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .constants import HARNESS_PROFILES, SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
+from .constants import SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
 from .git_ops import meaningful_status_lines, unauthorized_files
 from .models import GateDecision, McError, PlanSlice
 
@@ -305,7 +306,10 @@ def extract_operational_hints(
                 )
             )
 
-        network_match = re.search(r"\b(?:network error|connection reset|econnreset|timed out|timeout|connection refused)\b", lowered)
+        network_match = re.search(
+            r"\b(?:network error|connection reset|econnreset|connection timed out|request timed out|network timeout|connection refused)\b",
+            lowered,
+        )
         if network_match:
             hints.append(
                 _hint(
@@ -501,6 +505,45 @@ def ensure_slice_runtime_dirs(slice_artifact_dir: Path, worker_tools: tuple[str,
     return seed_worker_credentials(paths, worker_tools, orchestrator_harness_name)
 
 
+def write_worker_policy(
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    worker_tools: tuple[str, ...],
+    worker_model: str | None,
+    worker_effort: str | None,
+) -> Path:
+    """Write the authoritative semantic boundary consumed by ai-orchestrator."""
+    policy_path = slice_artifact_dir / "worker-policy.json"
+    worker_requirement = plan_slice.sections.get("Validation Plan", "").lower()
+    allowed_access = ["read-only"] if "worker" in worker_requirement and "read-only" in worker_requirement else ["read-only", "workspace-write"]
+    policy = {
+        "schema_version": 1,
+        "run_id": str(state["run_id"]),
+        "slice_id": plan_slice.slice_id,
+        "plan_sha256": str(state.get("plan", {}).get("sha256") or ""),
+        "repo_path": str(Path(state["repo_path"]).resolve()),
+        "worker_artifact_root": str(slice_paths(slice_artifact_dir)["worker_artifact_root"]),
+        "required_tools": list(worker_tools),
+        "required_model": worker_model or "default",
+        "required_effort": worker_effort or "default",
+        "allowed_access": allowed_access,
+        "allowed_roles": ["junior-worker", "senior-worker"],
+        "authorized_files": [entry.strip().strip("`").rstrip(".") for entry in plan_slice.authorized_files],
+    }
+    policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return policy_path
+
+
+def worker_policy_snapshot(policy_path: Path) -> dict[str, Any]:
+    policy = json.loads(policy_path.read_text(encoding="utf-8"))
+    return {"sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(), "policy": policy}
+
+
+def ai_orchestrator_embedded_instructions() -> str:
+    return str(worker_jobs_module().compile_skill_bundle("ai-orchestrator"))
+
+
 def slice_environment(
     slice_artifact_dir: Path,
     run_json: Path,
@@ -521,6 +564,7 @@ def slice_environment(
         "MC_TOOL_HOME_ROOT": str(paths["tool_home_root"]),
         "MC_WORKER_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
         "MC_WORKER_JOBS_PATH": str(worker_jobs_path()),
+        "MC_WORKER_POLICY_PATH": str(slice_artifact_dir / "worker-policy.json"),
         "TMPDIR": str(paths["tmp_dir"]),
     }
     # Only redirect a tool's own home when that tool is a *worker* for this
@@ -562,23 +606,6 @@ def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
     return " ".join(policies)
 
 
-def worker_model_effort_guidance_text(worker_tools: tuple[str, ...]) -> str:
-    if not worker_tools:
-        return "No worker tool is configured for this run."
-    guidance: list[str] = []
-    for tool in worker_tools:
-        profile = HARNESS_PROFILES.get(tool)
-        if not profile:
-            guidance.append(f"- {tool}: no MC profile guidance is defined.")
-            continue
-        notes = profile.get("worker_command_notes") or []
-        if not notes:
-            guidance.append(f"- {tool}: no worker-specific model/effort guidance is configured.")
-            continue
-        guidance.append(f"- {tool}: " + " ".join(str(note) for note in notes))
-    return "\n".join(guidance)
-
-
 def load_prompt_template() -> str:
     # The extracted template is rendered with str.format in
     # render_orchestrator_prompt, so any literal `{`/`}` added to the template
@@ -605,6 +632,25 @@ def render_orchestrator_prompt(
 ) -> str:
     template = load_prompt_template()
     paths = slice_paths(slice_artifact_dir)
+    example_tool = worker_tools[0] if len(worker_tools) == 1 else "<one required tool; create one request per tool>"
+    example_role = "senior-worker" if example_tool in {"claude", "codex"} else "junior-worker"
+    request_example = {
+        "schema_version": 1,
+        "label": "01-<tool>-<subtask>",
+        "slice_id": plan_slice.slice_id,
+        "plan_sha256": str(state.get("plan", {}).get("sha256") or ""),
+        "tool": example_tool,
+        "model": worker_model or "default",
+        "effort": worker_effort or "default",
+        "role": example_role,
+        "access": "read-only",
+        "task": "<bounded worker task>",
+        "context": "<task-specific context>",
+        "required_skills": [],
+        "files": [entry.strip().strip("`").rstrip(".") for entry in plan_slice.authorized_files],
+        "constraints": ["<task-specific constraint>"],
+        "expected_output": "<exact output contract>",
+    }
     values = {
         "plan_path": state["plan_path"],
         "run_json_path": str(run_json),
@@ -618,7 +664,9 @@ def render_orchestrator_prompt(
         "codex_home": str(paths["codex_home"]),
         "claude_config_dir": str(paths["claude_config_dir"]),
         "worker_auth_policy": worker_auth_policy_text(worker_tools),
-        "worker_model_effort_guidance": worker_model_effort_guidance_text(worker_tools),
+        "worker_policy_path": str(slice_artifact_dir / "worker-policy.json"),
+        "worker_request_example": json.dumps(request_example, indent=2, sort_keys=True),
+        "ai_orchestrator_embedded_instructions": ai_orchestrator_embedded_instructions(),
         "worker_tools": ", ".join(worker_tools) if worker_tools else "none configured for this run",
         "worker_model": worker_model or "default",
         "worker_effort": worker_effort or "default",

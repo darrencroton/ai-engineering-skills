@@ -27,15 +27,14 @@ Claude config dir: {claude_config_dir}
 Required worker tool(s) for this run: {worker_tools}
 Required worker model for this run: {worker_model}
 Required worker effort for this run: {worker_effort}
-Worker model/effort guidance:
-{worker_model_effort_guidance}
+Worker policy: {worker_policy_path}
 Worker auth policy: {worker_auth_policy}
 Selected slice: {slice_id} - {slice_title}
 
 Read the full plan file and the selected slice contract before coding. If the slice contract is incomplete, ambiguous, approval-gated, or contradicts this prompt, stop and write `orchestrator-result.json` with status `blocked`.
-This prompt names skills (scoped-implementation, drift-audit, code-review, commit). If a named skill is installed in your environment, read it completely before acting. If it is not installed, do not stop: this prompt's frozen contract and required workflow carry the essential obligations of each skill — follow them directly and note `skill unavailable: <name>` in your summary.
-The `Required worker tool(s) for this run` line above is authoritative for which worker tool(s) to use. If the plan's validation-plan prose names a different or additional tool (for example, wording carried over from a previous test run with a different harness/worker combination), use the tool(s) configured for this run instead, and note the discrepancy in `worker-evidence.md`. If it says "none configured for this run", only launch a worker if the plan explicitly requires one, and use your own judgement for an appropriate tool.
-The `Required worker model` and `Required worker effort` lines are authoritative when they are not "default". Apply the `Worker model/effort guidance` for each configured worker tool. For worker tools that do not support the configured model or effort, stop and report the mismatch in `worker-evidence.md` or `orchestrator-result.json` instead of silently falling back.
+This prompt names skills (ai-orchestrator, scoped-implementation, drift-audit, code-review, commit). Apply each named skill at the required workflow stage. The complete ai-orchestrator skill and all of its linked Markdown instructions are embedded below, so use them even if this harness has no native skill loader or discovers skills differently. For another named skill, read it completely before acting when installed; if it is unavailable, follow this prompt's explicit contract and note `skill unavailable: <name>` in your summary.
+The `Required worker tool(s) for this run` line above is authoritative. Every configured tool is required to complete through its own validated request. If the plan requires a worker but this line says "none configured for this run", stop as blocked and report that MC/operator reconfiguration is required; do not choose or launch an unconfigured tool. If plan prose names a different tool than policy, follow policy and report the discrepancy.
+The worker policy is authoritative for required tools, model, effort, roles, repository, slice identity, plan digest, access modes, and authorized files. Do not construct or invoke a worker harness command yourself. Write one semantic worker-request JSON per required tool and pass it with the policy to `worker_jobs.py launch`; the launcher validates the contract, embeds worker-mode and complete required-skill instructions, composes the tested harness flags, forces the worker into the policy repository, and records mechanical evidence. If launch rejects the request, read its feedback artifact and correct only the named request fields. Do not bypass rejection with a raw command.
 The `Worker auth policy` line above is authoritative for worker credential handling. Do not set, unset, or redirect tool home/config variables yourself, and do not invent your own isolated home directory for a worker. If a worker fails with an authentication error, that is a blocker to report (with the exact error) in `worker-evidence.md` or `orchestrator-result.json`, not something to work around by clearing or redirecting variables or falling back to unscoped credentials.
 Commit creation is authorized only for this selected slice after validation, drift audit, and code review pass. Do not push, open a PR, release, deploy, change dependencies/licenses, request secrets, or perform destructive actions unless the frozen plan explicitly authorizes that action.
 After creating a commit, run `git rev-parse HEAD` and copy that exact 40-character hash into `orchestrator-result.json` under `commit.hash`. Do not infer, abbreviate, expand from memory, or fabricate a full hash from `git commit` output.
@@ -68,15 +67,21 @@ Required workflow:
 9. After commit, run `git rev-parse HEAD` and use that exact full hash in `orchestrator-result.json`.
 
 Worker helper sequence:
-- If you use an external AI worker, launch it through the worker helper so MC gets durable artifacts. A required worker only satisfies MC's gate when it actually ran to successful completion (state `completed`, returncode 0) under the worker helper using the required tool's own executable; a crashed, cancelled, still-running, or mislabeled worker does not.
+- If you use an external AI worker, launch it through the worker helper's validated contract interface so MC gets durable artifacts. A required worker only satisfies MC's gate when its launch contract passes and it completes with state `completed`, returncode 0. A raw, crashed, cancelled, still-running, or policy-mismatched worker does not.
 - MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}`, `MC_SLICE_TMP_DIR={slice_tmp_dir}`, `MC_TOOL_HOME_ROOT={tool_home_root}`, and `TMPDIR={slice_tmp_dir}` for this slice. When Copilot is a worker and not the orchestrator, MC also sets `COPILOT_HOME={copilot_home}`. When Codex is a worker and not the orchestrator, MC also sets `CODEX_HOME={codex_home}` seeded with `auth.json`. Claude worker auth follows the `Worker auth policy` line above; MC does not set `CLAUDE_CONFIG_DIR` for Claude workers.
 - Create one worker run directory before starting workers:
 
     `run_dir="$(python3 {worker_jobs_path} init --prefix workers)"`
 
-- Start each worker with an explicit run directory and label:
+- Write a semantic request JSON under the slice temp directory. Start from this shape and replace every placeholder with task-specific content:
 
-    `python3 {worker_jobs_path} start --run-dir "$run_dir" --label <nn>-<tool>-<subtask-slug> -- <worker command>`
+{worker_request_example}
+
+- Launch the request through the deterministic policy boundary:
+
+    `python3 {worker_jobs_path} launch --run-dir "$run_dir" --policy "{worker_policy_path}" --request <worker-request.json>`
+
+- On rejection, read `<label>-request-feedback.md`, apply its specific correction, and launch again. A rejected request starts no worker and does not authorize a raw harness fallback.
 
 - Monitor and read the worker through the same run directory:
 
@@ -109,6 +114,10 @@ Write these artifacts under `{slice_artifact_dir}`:
 - `orchestrator-result.json`
 
 The final `orchestrator-result.json` must match the schema in `{result_schema_path}`.
+
+Embedded ai-orchestrator instructions:
+
+{ai_orchestrator_embedded_instructions}
 ```
 
 ## Repair Contract

@@ -92,17 +92,17 @@ Use this shape for every implementation slice:
 - Slice headings must be `## Slice <N>: <name>` with unique numbers, and each slice must include all seven `###` sections above verbatim.
 - `Files allowed to change:` must list each authorized path as an indented sub-bullet. Entries are matched segment-aware: a plain path matches exactly, a trailing `/` matches a directory subtree, and `*`/`?` match within one segment — use `**` for a recursive glob (`docs/**/*.md`).
 - `Approval needed before implementation:` must be an exact `no` to run unattended. Anything else (`yes`, `not yet decided`, `none`, blank) stops the run for a human. An explicit `yes` can later be cleared at runtime with MC's `approve` command without editing the plan; anything unclear cannot.
-- Slice batches (`Batch A: Slices 1-2`) apply to Mode A and Mode B runs only. `master-controller` (Mode C) executes atomic slices in plan order and ignores batch groupings, so a plan destined for MC should make each slice independently gateable rather than relying on a batch sharing one review.
+- Slice batches (`Batch A: Slices 1-2`) apply to Mode A runs only (either usage). `master-controller` (Mode B) executes atomic slices in plan order and ignores batch groupings, so a plan destined for MC should make each slice independently gateable rather than relying on a batch sharing one review.
 - `master-controller`'s `check-plan` command validates all of the above across every slice before a run begins (and again automatically at `init`), plus lint warnings for dependency/license-shaped authorized files, whole-repo globs, and batch groupings. Running it against a fresh plan is the fast way to confirm the plan is MC-ready.
 
 ## Execution Modes
 
-The same plan file serves three run modes, but not every plan feature binds in every mode:
+The same plan file serves two run modes — Mode A (one agent session, checkpointed by default or autonomous as an alternate usage) and Mode B (supervised autonomy under `master-controller`) — but not every plan feature binds in both:
 
-- **Atomic slices** are safe everywhere — they are the unit all three modes gate on.
-- **Batches** bind in Modes A and B only; Mode C ignores them (each slice is gated alone).
-- **`Approval needed before implementation:`** must be an exact `no` for any slice expected to run unattended (Mode B or C). An explicit `yes` stops Mode B and stops Mode C until the operator records approval; anything else is a planning defect that blocks Mode C entirely.
-- **Risky-surface control is plan-level in every mode**: gates verify file authorization mechanically, but dependency/license/side-effect stops are heuristic — the plan is where those surfaces are kept out of unattended slices.
+- **Atomic slices** are safe everywhere — they are the unit both modes gate on.
+- **Batches** bind in Mode A only (either usage); Mode B ignores them (each slice is gated alone).
+- **`Approval needed before implementation:`** must be an exact `no` for any slice expected to run unattended (Mode A autonomous usage, or Mode B). An explicit `yes` stops an autonomous Mode A run and stops Mode B until the operator records approval; anything else is a planning defect that blocks Mode B entirely.
+- **Risky-surface control is plan-level in both modes**: gates verify file authorization mechanically, but dependency/license/side-effect stops are heuristic — the plan is where those surfaces are kept out of unattended slices.
 
 ## Output Rules
 
@@ -118,15 +118,15 @@ The same plan file serves three run modes, but not every plan feature binds in e
 
 End the plan with a copyable launcher for the next chat. The skill chain is the same in every mode (`scoped-implementation` → `drift-audit` → `code-review` → `commit`, with `ai-orchestrator` for delegation and `handoff` at boundaries); the modes differ only in who holds the gates and when handoff happens.
 
-Choose the mode for the plan:
+Choose the launcher for the plan:
 
-- **Mode A (Assisted)** — when slices are risky, touch flagged surfaces, or you want a checkpoint between them. You stay in the loop, approve before risky slices, review findings, and approve each commit. One slice (or a few tightly-coupled slices) per chat, then a handoff to the next session.
-- **Mode B (Autonomous session)** — when the plan is straightforward, the implementing and reviewing models are strong, the work fits one session, and the user does not want to stand up an external supervisor. The orchestrator runs all remaining slices, delegates the hostile drift-audit skill and an independent code-review skill pass per slice, recovers from findings itself, and commits each slice that clears all gates. You assess at the end.
-- **Mode C (Supervised autonomy)** — when the plan is long, the run is unattended, models are weaker or cheaper, or the user wants external verification with a durable audit trail. Do not embed a launcher for this mode: end the plan with a pointer to the single authoritative Mode C launcher in `master-controller`'s `SKILL.md` ("Launcher") with the plan file path filled into its first line. A plan destined for Mode C must keep every slice independently gateable — MC ignores batches — and should pass `check-plan` cleanly.
+- **Mode A, checkpointed (default)** — when slices are risky, touch flagged surfaces, or you want a checkpoint between them. You stay in the loop, approve before risky slices, review findings, and approve each commit. One slice (or a few tightly-coupled slices) per chat, then a handoff to the next session.
+- **Mode A, autonomous session (alternate usage)** — the same mode and session run in a loop over all remaining slices, for when the plan is straightforward, the implementing and reviewing models are strong, the work fits one session, and the user does not want to stand up an external supervisor. The orchestrator delegates the hostile drift-audit skill and an independent code-review skill pass per slice, recovers from findings itself, and commits each slice that clears all gates. You assess at the end.
+- **Mode B (Supervised autonomy)** — when the plan is long, the run is unattended, models are weaker or cheaper, or the user wants external verification with a durable audit trail. Do not embed a launcher for this mode: end the plan with a pointer to the single authoritative Mode B launcher in `master-controller`'s `SKILL.md` ("Launcher") with the plan file path filled into its first line. A plan destined for Mode B must keep every slice independently gateable — MC ignores batches — and should pass `check-plan` cleanly.
 
-Every mode keeps two non-negotiables: a slice whose Risk Flags mark approval-needed pauses (Mode A) or stops the run (Modes B and C), and each slice reports its authorization-gate result before quality review.
+Every launcher keeps two non-negotiables: a slice whose Risk Flags mark approval-needed pauses (checkpointed Mode A) or stops the run (autonomous Mode A and Mode B), and each slice reports its authorization-gate result before quality review.
 
-### Mode A — Assisted run
+### Mode A — Assisted run (default, checkpointed)
 
 ```md
 Plan file: <path>
@@ -152,7 +152,7 @@ After the selected slice(s) or batch are committed, use the handoff skill to rec
 Confirm before starting: plan file read, selected slice(s) or batch, branch, and the first slice.
 ```
 
-### Mode B — Autonomous full-loop driver
+### Mode A — Autonomous session (alternate usage)
 
 ```md
 Plan file: <path>

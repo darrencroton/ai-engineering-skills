@@ -14,9 +14,9 @@ Each contract lives in exactly one place; everything else points at it. Before e
 |---|---|
 | Why the repo exists, principles, personas, autonomy ladder | `docs/VISION.md` |
 | Human-facing skill index, quickstart, glossary | `README.md` (top level) |
-| Mode A / Mode B launchers | `skills/implementation-plan/SKILL.md` → "Next Chat Prompt Format" |
-| Mode C launcher and MC operating path | `skills/master-controller/SKILL.md` → "Launcher", "Default Operating Path" |
-| Handoff resume prompt | Derived from the Mode A launcher per `skills/handoff/SKILL.md` — never restated |
+| Mode A launchers (checkpointed default and autonomous alternate usage) | `skills/implementation-plan/SKILL.md` → "Next Chat Prompt Format" |
+| Mode B launcher and MC operating path | `skills/master-controller/SKILL.md` → "Launcher", "Default Operating Path" |
+| Handoff resume prompt | Derived from the checkpointed Mode A launcher per `skills/handoff/SKILL.md` — never restated |
 | Plan format and machine-consumed fields | `skills/implementation-plan/SKILL.md` |
 | MC trust boundary and safety rules | `skills/master-controller/SKILL.md` → "Safety Rules" |
 | Run-state schema | `skills/master-controller/references/run-state-schema.md` |

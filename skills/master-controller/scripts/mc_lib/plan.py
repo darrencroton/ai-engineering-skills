@@ -204,8 +204,8 @@ def plan_check_report(path: Path) -> dict[str, Any]:
         r"^\s*-\s*Batch\s+\S+\s*:\s*Slices?\b", text, flags=re.MULTILINE
     ):
         warnings.append(
-            "plan defines slice batches: batches apply to Mode A/B sessions only — MC runs atomic "
-            "slices in plan order and ignores batch groupings"
+            "plan defines slice batches: batches bind in Mode A sessions only — MC (Mode B) runs "
+            "atomic slices in plan order and ignores batch groupings"
         )
 
     return {

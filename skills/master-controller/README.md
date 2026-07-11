@@ -12,7 +12,7 @@ MC is one mode with a supervision dial, not two modes. Model-supervised operatio
 - Updating `.ai-mc/current` to the active run.
 - Recording repo, branch, harness, plan, environment preflight, and policy.
 - Parsing implementation-plan markdown conservatively enough to identify frozen slice contracts.
-- Sanity-checking the whole plan before a run begins (`check-plan`, also run automatically at `init`): every slice's required sections, authorized surface, and approval flag, plus lint warnings for dependency/license-shaped authorized files, whole-repo surfaces, and Mode A/B-only batch groupings.
+- Sanity-checking the whole plan before a run begins (`check-plan`, also run automatically at `init`): every slice's required sections, authorized surface, and approval flag, plus lint warnings for dependency/license-shaped authorized files, whole-repo surfaces, and Mode A-only batch groupings.
 - Refusing incomplete, ambiguous, approval-gated, or unauthorized slices.
 - Reporting the next eligible slice in `run-next --dry-run`.
 - Running one eligible slice with `run-next`.
@@ -207,7 +207,7 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 ## Default MC Execution Flow
 
-`SKILL.md` is the source of truth for the default operating path and holds the single authoritative Mode C launcher (this README previously duplicated the operating path and the two copies drifted). In short: **model-supervised operation is the default**; use the **unattended batch style** when no supervising model is available or a conservative fail-closed run is enough; follow the step sequences in `SKILL.md` → "Default Operating Path" and the launcher in `SKILL.md` → "Launcher". Do not ask users to hand-compose harness sandbox, model, or effort flags — use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command`.
+`SKILL.md` is the source of truth for the default operating path and holds the single authoritative Mode B launcher (this README previously duplicated the operating path and the two copies drifted). In short: **model-supervised operation is the default**; use the **unattended batch style** when no supervising model is available or a conservative fail-closed run is enough; follow the step sequences in `SKILL.md` → "Default Operating Path" and the launcher in `SKILL.md` → "Launcher". Do not ask users to hand-compose harness sandbox, model, or effort flags — use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command`.
 
 Two operational rules worth repeating here because they bite in practice (details in `SKILL.md` → "Long-Running Command Discipline"):
 

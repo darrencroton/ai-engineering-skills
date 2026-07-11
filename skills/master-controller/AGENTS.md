@@ -6,7 +6,7 @@ This directory defines the `master-controller` skill: deterministic supervision 
 
 ## File Roles
 
-- `SKILL.md`: source of truth for the operating contract — roles/topology, workflow, default operating path, the Mode C launcher, long-running command discipline, safety rules, and the trust boundary. Other documents (including the repo's top-level README) point here; do not restate the launcher or operating path elsewhere.
+- `SKILL.md`: source of truth for the operating contract — roles/topology, workflow, default operating path, the Mode B launcher, long-running command discipline, safety rules, and the trust boundary. Other documents (including the repo's top-level README) point here; do not restate the launcher or operating path elsewhere.
 - `README.md`: human-facing overview — CLI examples, run-state layout, plan eligibility, profiles, privacy and data flows, and the "Verify Your Setup" trial. Defers to `SKILL.md` for the operating path.
 - `references/run-state-schema.md`: durable `run.json` and slice-state semantics. Update alongside any state-shape change in `state.py`/`commands.py`.
 - `references/orchestrator-prompt.md`: the rendered slice prompt and repair-prompt contracts. Any `{placeholder}` change must match `render_orchestrator_prompt`/`render_repair_prompt` in `runtime.py`; literal braces must be escaped.

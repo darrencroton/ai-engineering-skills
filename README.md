@@ -24,7 +24,7 @@ Each skill is a self-contained directory under [`skills/`](skills/) with a stand
 
 - **Compose through a bootstrap repo.** If you maintain a private agent-home repo that composes skills from several sources into one canonical catalogue, register this repo there and let its setup script clone it and create the symlinks.
 
-The atomic skills need nothing beyond the Markdown files. Supervised autonomy (Mode C) additionally needs `python3`, `git`, `tmux`, and at least one supported coding CLI on the machine that runs Master Controller.
+The atomic skills need nothing beyond the Markdown files. Supervised autonomy (Mode B) additionally needs `python3`, `git`, `tmux`, and at least one supported coding CLI on the machine that runs Master Controller.
 
 ## Quickstart
 
@@ -35,33 +35,31 @@ In your coding assistant: *"Use the code-review skill on the diff on this branch
 
 **2. Implement a feature with checkpoints (Mode A).**
 - Chat 1: *"Use the implementation-plan skill: <describe the change>."* You get a plan with frozen slices and a copyable launcher prompt at the end.
-- Chat 2: paste the launcher into a fresh session. The agent implements one slice, audits its own authorization, reviews quality, and asks you before committing. Repeat per slice.
+- Chat 2: paste the launcher into a fresh session. The agent implements one slice, audits its own authorization, reviews quality, and asks you before committing. Repeat per slice. (For a straightforward plan with strong models, the same mode has an autonomous alternate usage that loops through all remaining slices in one session — both launchers live in `implementation-plan`'s SKILL.md.)
 
-**3. Run a whole plan unattended (Mode C).**
+**3. Run a whole plan unattended (Mode B).**
 - Verify your machine once with the tmux-backed trial in [`skills/master-controller/README.md`](skills/master-controller/README.md) → "Verify Your Setup".
 - Sanity-check the plan: `python3 skills/master-controller/scripts/mc.py check-plan --plan <plan.md>` (also runs automatically at `init` — a defective plan stops before any harness launches).
-- Start the run with the Mode C launcher in [`skills/master-controller/SKILL.md`](skills/master-controller/SKILL.md) → "Launcher". MC executes slice after slice in fresh sessions, verifies every gate from local evidence, repairs bounded gaps, and stops for you on anything outside policy.
+- Start the run with the Mode B launcher in [`skills/master-controller/SKILL.md`](skills/master-controller/SKILL.md) → "Launcher". MC executes slice after slice in fresh sessions, verifies every gate from local evidence, repairs bounded gaps, and stops for you on anything outside policy.
 
 ## The Autonomy Ladder
 
-All rungs run the same skill chain; each rung moves the gatekeeper further from the keyboard.
+Three rungs, one skill chain; each rung moves the gatekeeper further from the keyboard.
 
 **Rung 0 — Standalone skills.** Every skill is independently useful in any harness with no infrastructure. This is the entry point and the graceful-degradation floor.
 
-**Mode A — Assisted.** You supervise an orchestrated run slice by slice: the agent restates each frozen contract, implements, audits, and reviews; you approve risky slices before coding and every commit after gates pass. Launcher: [`skills/implementation-plan/SKILL.md`](skills/implementation-plan/SKILL.md) → "Next Chat Prompt Format".
+**Mode A — Assisted (one agent session).** You supervise an orchestrated run slice by slice: the agent restates each frozen contract, implements, audits, and reviews; you approve risky slices before coding and every commit after gates pass. The same mode has an **autonomous alternate usage**: pointed at all remaining slices with standing authorization to commit whatever clears every gate, it loops through the plan in one session — right when the plan is straightforward, the models are strong, and you don't want to stand up an external supervisor. In that usage the gates are promises kept in-session: disciplined, but not externally verified. Both launchers: [`skills/implementation-plan/SKILL.md`](skills/implementation-plan/SKILL.md) → "Next Chat Prompt Format".
 
-**Mode B — Autonomous session.** One agent session runs all remaining slices and holds its own gates, delegating independent drift audits and code reviews, stopping on anything approval-gated. Right when the plan is straightforward, the implementing and reviewing models are strong, and you don't want to stand up an external supervisor. Its gates are promises kept in-session — disciplined, but not externally verified. Launcher: same file as Mode A.
-
-**Mode C — Supervised autonomy (Master Controller).** The gatekeeper moves outside the implementing agent. MC keeps durable run state, sanity-checks the whole plan before starting, launches a fresh session per slice (the context reset that makes long plans tractable), verifies gates from git and artifact evidence, steers bounded repairs, and stops for a human on anything outside policy. Supervision is a dial, not a fork: by default a supervising model stays in the loop for operational judgment (usage resets, stalls, transient interruptions); if you can't or don't want to provide one, MC's fail-closed batch style runs unattended and stops at the first ambiguity. Launcher and details: [`skills/master-controller/SKILL.md`](skills/master-controller/SKILL.md).
+**Mode B — Supervised autonomy (Master Controller).** The gatekeeper moves outside the implementing agent. MC keeps durable run state, sanity-checks the whole plan before starting, launches a fresh session per slice (the context reset that makes long plans tractable), verifies gates from git and artifact evidence, steers bounded repairs, and stops for a human on anything outside policy. Supervision is a dial, not a fork: by default a supervising model stays in the loop for operational judgment (usage resets, stalls, transient interruptions); if you can't or don't want to provide one, MC's fail-closed batch style runs unattended and stops at the first ambiguity. Launcher and details: [`skills/master-controller/SKILL.md`](skills/master-controller/SKILL.md).
 
 Choosing a rung is about the task, not your skill level:
 
 | Situation | Use |
 |---|---|
 | One-off review, audit, commit, or handoff | Rung 0 — call the skill directly |
-| Risky or unfamiliar surfaces; you want a checkpoint between slices | Mode A |
-| Straightforward plan, strong models, fits in one session, no third model available to supervise | Mode B |
-| Long plan, unattended time, weaker/cheaper/local models, or you want external verification and a durable audit trail | Mode C |
+| Risky or unfamiliar surfaces; you want a checkpoint between slices | Mode A (checkpointed) |
+| Straightforward plan, strong models, fits in one session, no third model available to supervise | Mode A (autonomous usage) |
+| Long plan, unattended time, weaker/cheaper/local models, or you want external verification and a durable audit trail | Mode B |
 
 ## Skills
 
@@ -92,9 +90,9 @@ The default flow for feature or bug work, at every rung:
 4. **Review quality** — `code-review` after the authorization gate passes.
 5. **Simplify** (optional) — `code-simplifier` as a separate pass over working code.
 6. **Hand off** (if needed) — `handoff` before ending an unfinished session.
-7. **Commit** — `commit`, only with explicit approval (yours in Mode A; the plan's standing authorization in Modes B and C after all gates pass).
+7. **Commit** — `commit`, only with explicit approval (yours in checkpointed Mode A; the plan's standing authorization in autonomous Mode A and Mode B after all gates pass).
 
-Each launcher template lives in exactly one place: Modes A and B in `implementation-plan`'s SKILL.md, Mode C in `master-controller`'s SKILL.md, and the handoff resume prompt derives from the Mode A launcher as described in `handoff`'s SKILL.md. Generated plans end with the right launcher already filled in.
+Each launcher template lives in exactly one place: both Mode A launchers (checkpointed and autonomous) in `implementation-plan`'s SKILL.md, the Mode B launcher in `master-controller`'s SKILL.md, and the handoff resume prompt derives from the checkpointed Mode A launcher as described in `handoff`'s SKILL.md. Generated plans end with the right launcher already filled in.
 
 ## Privacy and Data Flows
 
@@ -115,7 +113,7 @@ Beyond the unit suites (CI runs them on every push), the system is exercised end
 - **Orchestrating assistant** — the human-facing agent that owns a task end-to-end and delegates through `ai-orchestrator`.
 - **Slice orchestrator** — the per-slice session MC launches and supervises; same discipline, no final authority.
 - **Worker** — a bounded, single-purpose helper launched through a validated contract; owns no gates, never commits, never re-delegates.
-- **Supervising model** — in Mode C, the model that drives MC's commands and handles operational judgment; it never decides acceptance.
+- **Supervising model** — in Mode B, the model that drives MC's commands and handles operational judgment; it never decides acceptance.
 - **Master Controller (MC)** — the deterministic supervisor: run state, gates, repair loop, stop authority.
 - **Repair loop** — MC's bounded self-correction: a fixable gate failure is steered back into the live session and re-verified at full rigor; budgets and a circuit breaker cap it.
 - **Run state** — durable JSON plus per-slice artifacts under `.ai-mc/` in the target repo; the audit trail.

@@ -292,6 +292,20 @@ All decisions D1–D5 were ratified and the full change program (§6) plus every
 
 ### Remaining items that need the operator
 
-1. **Commit** the change set (nothing has been committed; explicit approval required by convention).
-2. **Push** to GitHub to give CI its first run; fix anything environment-specific it surfaces.
-3. **Tag** `v0.1.0` retroactively (or proceed straight toward v1.0 per the changelog scaffold) when ready.
+1. **Commit** the change set (nothing has been committed; explicit approval required by convention). *Done — `12b5a08`, pushed; CI green on first run (plus `6b4bbb2` bumping CI actions off deprecated Node 20).*
+2. **Push** to GitHub to give CI its first run; fix anything environment-specific it surfaces. *Done — both runs green.*
+3. **Tag** `v0.1.0` retroactively (or proceed straight toward v1.0 per the changelog scaffold) when ready. *Deferred by the operator — release clock not started.*
+
+---
+
+## 9. Post-Implementation Refinement — D6: Two-Mode Taxonomy (2026-07-11)
+
+Reading the rewritten README fresh, the operator identified a residual seam: the quickstart's three entry points (standalone skill / checkpointed run / MC run) did not map onto the three-mode list, because old Mode B had no distinct entry point — it was the Mode A launcher family pointed at all remaining slices with standing commit authorization. Three labels were describing two shapes of run.
+
+**Decision (D6):** two modes. Mode A — assisted, one agent session — with a checkpointed default and an **autonomous alternate usage** (the former Mode B, now documented as a usage of A rather than a peer mode). Mode B — supervised autonomy under Master Controller (the former Mode C). The autonomy ladder is now Rung 0 → Mode A → Mode B, and the quickstart's entry points align with it one-to-one.
+
+**Investigation notes:** the two Mode A launcher prompts live in `implementation-plan`'s SKILL.md (not `ai-orchestrator`'s README, which contains no launchers), and they stay there per the source-of-truth map — generated plans end with a launcher rendered from those templates. The handoff skill's formerly embedded launcher copy had already been reduced to derive-from-source instructions in the first change set; a repo-wide sweep for launcher-signature phrases confirmed exactly two launcher homes remain.
+
+**Implemented:** README (quickstart, ladder, decision table, workflow chain, glossary, installation), `docs/VISION.md` (ladder renumbered to Rungs 0–2 with the autonomous usage folded into Rung 1; a deliberate vision revision per the governance rule), `implementation-plan` (Execution Modes, launcher choices, both launcher headings), `master-controller` SKILL.md/README/AGENTS.md, `handoff`, `CONTRIBUTING` source-of-truth map, the `check-plan` batch-lint warning text in `plan.py` plus its regression test, and the changelog (Unreleased entries rewritten to describe the final state relative to 0.1.0). Historical documents (this report's earlier sections, the 0.1.0 changelog entry) intentionally retain the old labels as a record.
+
+**Incidental fix found during verification:** the full-suite run surfaced a pre-existing flaky fixture unrelated to this change set — the hard-prompt-at-repair fake harness printed its trust prompt at session startup, racing MC's initial prompt injection under system load (MC's readiness check correctly refuses to paste into a visible hard prompt, so the run timed out as `blocked` instead of exercising the intended repair-time refusal). Root-caused empirically via a manual CLI reproduction and preserved-artifact test loops; fixed at the owning layer by making the fixture wait for injection (`wait_for_initial_prompt` in `mc_test_helpers.py`) before showing the trust prompt, preserving the test's intent exactly. Eighteen consecutive isolated runs green after the fix.

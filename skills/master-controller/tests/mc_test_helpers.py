@@ -359,6 +359,24 @@ def wait_for_repair_prompt(deadline_seconds=25):
             return True
         time.sleep(0.05)
     return False
+
+
+def wait_for_initial_prompt(deadline_seconds=20):
+    # Wait until MC's initial prompt injection has arrived. A fixture that
+    # shows a hard prompt on screen must do so only *after* injection, or it
+    # races MC's readiness check, which correctly refuses to paste into a
+    # visible hard prompt and the run times out instead of exercising the
+    # intended repair-time refusal.
+    seen = ""
+    deadline = time.monotonic() + deadline_seconds
+    while time.monotonic() < deadline:
+        chunk = os.read(sys.stdin.fileno(), 4096).decode(errors="ignore")
+        if chunk:
+            seen += chunk
+        if "slice orchestrator" in seen:
+            return True
+        time.sleep(0.05)
+    return False
 """
 
 
@@ -462,12 +480,16 @@ def write_alternating_failure_harness(path):
 
 
 def write_hard_prompt_at_repair_harness(path):
-    # Puts a hard trust prompt on screen, then reports a repairable result:
-    # the repair delivery must refuse and stop the run with evidence.
+    # Puts a hard trust prompt on screen after the initial prompt has been
+    # injected, then reports a repairable result: the repair delivery must
+    # refuse and stop the run with evidence. Waiting for injection first is
+    # load-bearing — see wait_for_initial_prompt in the preamble.
     path.write_text(
         _STDIN_RAW_PREAMBLE
         + textwrap.dedent(
             """
+            if not wait_for_initial_prompt():
+                raise SystemExit(3)
             print("Do you trust the files in this folder?", flush=True)
             time.sleep(0.5)
             write_failing_validation_result()

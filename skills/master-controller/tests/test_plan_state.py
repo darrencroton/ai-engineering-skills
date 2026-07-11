@@ -64,7 +64,7 @@ class PlanStateTests(McTestCase):
         self.assertEqual(report["errors"], [])
         joined = "\n".join(report["warnings"])
         self.assertIn("authorizes the entire repository", joined)
-        self.assertIn("batches apply to Mode A/B sessions only", joined)
+        self.assertIn("batches bind in Mode A sessions only", joined)
 
     def test_init_fails_closed_on_plan_sanity_errors_in_any_slice(self):
         # The defect is in Slice 2, not the next runnable slice: init must

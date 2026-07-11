@@ -5,7 +5,7 @@ description: Supervise execution of an existing implementation-plan by running e
 
 # Master Controller
 
-Use this skill when the user wants a controller to execute an already-approved implementation plan one slice at a time — the top rung of this repository's autonomy ladder (Mode C). The master controller (MC) is a supervisor backed by deterministic tools: it sanity-checks the whole plan before starting, creates durable run state, launches one orchestrator harness per slice, observes or records harness evidence, verifies every claim against local evidence — recomputing the highest-risk gates (file authorization, commit ancestry, clean worktree) itself rather than trusting any report — and, when its verification finds a fixable gap, steers the live orchestrator session back onto the correct path through a bounded self-correcting repair loop. Only when the orchestrator repeatedly fails to satisfy the same gate, exhausts the repair budget, or breaches integrity does MC hard-stop and wait for a human.
+Use this skill when the user wants a controller to execute an already-approved implementation plan one slice at a time — the top rung of this repository's autonomy ladder (Mode B). The master controller (MC) is a supervisor backed by deterministic tools: it sanity-checks the whole plan before starting, creates durable run state, launches one orchestrator harness per slice, observes or records harness evidence, verifies every claim against local evidence — recomputing the highest-risk gates (file authorization, commit ancestry, clean worktree) itself rather than trusting any report — and, when its verification finds a fixable gap, steers the live orchestrator session back onto the correct path through a bounded self-correcting repair loop. Only when the orchestrator repeatedly fails to satisfy the same gate, exhausts the repair budget, or breaches integrity does MC hard-stop and wait for a human.
 
 Supervision is a dial within this one mode, not a fork. By default, the MC model stays in the loop for operational judgment (usage resets, stalls, transient interruptions) while deterministic commands own exact state transitions, tmux control, artifact capture, and gate verification. When no supervising model is available or wanted, MC's fail-closed unattended batch style (`run-next`, `run --scope remaining`; recorded in run state as `supervision.mode: deterministic-batch`) runs without live model judgment and stops at the first operational ambiguity — the right trade for short plans on reliable harnesses, scripted runs, and fully-local setups with nothing suitable in the supervision seat. Acceptance gates are identical in both styles; the supervising model only ever handles operational judgment, never acceptance.
 
@@ -41,7 +41,7 @@ Docker and container setup are out of scope. MC may run inside a container or on
 
 ## Workflow
 
-1. **Sanity-check the plan** - `check-plan` validates every slice contract up front (required sections, non-empty authorized surfaces, exact yes/no approval flags, unique slice numbers) and lints for conditions MC cannot mechanically guard mid-run (dependency/license-shaped authorized files, whole-repo surfaces, Mode A/B-only batch groupings). `init` runs the same check automatically and fails closed on errors, so a defective plan stops for the user before any harness launches.
+1. **Sanity-check the plan** - `check-plan` validates every slice contract up front (required sections, non-empty authorized surfaces, exact yes/no approval flags, unique slice numbers) and lints for conditions MC cannot mechanically guard mid-run (dependency/license-shaped authorized files, whole-repo surfaces, Mode A-only batch groupings). `init` runs the same check automatically and fails closed on errors, so a defective plan stops for the user before any harness launches.
 2. **Initialize** - create `.ai-mc/runs/<timestamp>/run.json` in the target repo and update `.ai-mc/current`.
 3. **Check eligibility** - identify the next uncompleted slice and fail closed on approval-needed risk flags without a recorded approval.
 4. **Run or supervise one slice** - launch a fresh tmux-backed harness session for one eligible slice. In model-supervised operation, keep the MC model in the loop to observe live pane/log/json/git evidence and choose safe operational actions.
@@ -82,7 +82,7 @@ Approval-gated slices: when MC stops on an approval-needed slice and the user ex
 
 ## Launcher
 
-This is the single authoritative Mode C launcher (the top-level README and `implementation-plan` point here rather than restating it). Paste it into a fresh session with a supervising model to start a run:
+This is the single authoritative Mode B launcher (the top-level README and `implementation-plan` point here rather than restating it). Paste it into a fresh session with a supervising model to start a run:
 
 ```md
 Plan file: <path>

@@ -2,7 +2,7 @@
 
 Use these shapes to write `worker-request.json`. They describe intent; they are never pasted into a harness command. The deterministic launcher validates them against policy, renders worker mode, embeds complete required-skill bundles, composes tool flags, and enforces the repository working directory.
 
-Copy `slice_id`, `plan_sha256`, tool, model, and effort from the current policy. Use the tightest file list that covers the task. Choose `read-only` for investigation, plan review, drift audit, code review, or validation. Choose `workspace-write` only for a bounded authorized edit. Use an empty `required_skills` array when no skill is needed.
+Copy `slice_id`, `plan_sha256`, tool, model, and effort from the current policy. Use the tightest file list that covers the task. Choose `read-only` for investigation, plan review, drift audit, code review, or validation — read-only permits running commands that do not modify the workspace (such as the validation the task names) but forbids creating or editing files. Choose `workspace-write` only for a bounded authorized edit. Use an empty `required_skills` array when no skill is needed.
 
 For information tasks, put literal `SECTION:` markers and `path:line` evidence requirements in `expected_output`. For confirmation tasks, require a literal `RESULT:` line. Missing required skills or linked Markdown resources reject the launch; fix the request or installation and retry.
 

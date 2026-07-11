@@ -25,6 +25,15 @@ Master Controller writes `worker-policy.json` for an MC slice. A standalone ai-o
 }
 ```
 
+## Access Modes
+
+Access modes are contract semantics defined here, not by any harness flag:
+
+- `read-only`: the worker may read files and run commands that do not modify the workspace (validation, tests, checks). It must not create, edit, or delete files.
+- `workspace-write`: the worker may edit only the files listed in the request, which must fall inside the policy's authorized files. It still never commits.
+
+Harness profiles map each mode to the closest tested launch configuration, and the mechanical strictness of that configuration varies by harness — for example, OpenCode's plan agent mechanically denies only edit tools, leaving command execution constrained by prompt (see [opencode.md](opencode.md)), while Codex's `--sandbox read-only` is an OS-level sandbox. Some worker models also interpret a harness's read-only mode more conservatively than this contract and refuse to run any command; treat such a refusal as a failed delegation and retry with a corrected request through the launcher, never by composing a raw harness command. The mutation backstop is not the harness flag: under MC, the recomputed file-authorization gate and the clean post-commit worktree check catch workspace changes regardless of what a worker or harness did.
+
 ## Request
 
 The orchestrator writes one semantic request per worker. Copy `slice_id` and `plan_sha256` exactly from the current policy. Use `read-only` for analysis, review, validation, or planning. Use `workspace-write` only for a bounded edit authorized by the frozen contract.

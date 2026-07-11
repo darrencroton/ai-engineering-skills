@@ -448,8 +448,18 @@ def render_worker_prompt(contract: dict[str, Any]) -> str:
     skills = contract["required_skills"]
     skill_list = "\n".join(f"  - {name}" for name in skills) if skills else "  - none"
     files = "\n".join(f"  - {path}" for path in contract["files"]) if contract["files"] else "  - none"
+    if contract["access"] == "read-only":
+        access_constraint = (
+            "Access mode is read-only: you may read files and run commands that do not modify the workspace "
+            "(for example the validation, tests, or checks the task asks for); you must not create, edit, or delete files."
+        )
+    else:
+        access_constraint = (
+            "Access mode is workspace-write: you may edit only the files listed in this request; "
+            "do not modify anything else."
+        )
     constraints = [
-        f"Access mode is {contract['access']}; do not exceed it.",
+        access_constraint,
         "You are a delegated worker, not the orchestrator. Do not invoke ai-orchestrator, re-delegate, commit, or make final acceptance decisions.",
         *contract["constraints"],
     ]

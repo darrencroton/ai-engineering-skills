@@ -843,6 +843,73 @@ def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
     (slice_artifact_dir / "worker-runs-summary.json").write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def worker_delegation_overview(slice_artifact_dir: Path) -> list[dict[str, Any]]:
+    """Per-worker delegation visibility for summaries.
+
+    Reports every worker launch found under the slice's worker-runs tree:
+    label, tool, process state/returncode, and whether the worker's output
+    contains the marker its own request's expected_output contracted
+    (``RESULT:`` / ``SECTION:``). Observability only — never part of gate
+    acceptance. This surfaces failed-then-retried delegations (for example a
+    worker that refused its task but exited 0) that the process-level
+    worker-evidence gate has no reason to reject.
+    """
+    worker_root = slice_artifact_dir / "worker-runs"
+    overview: list[dict[str, Any]] = []
+    if not worker_root.exists():
+        return overview
+    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
+        manifest: dict[str, Any] = {}
+        manifest_path = run_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest = loaded if isinstance(loaded, dict) else {}
+            except json.JSONDecodeError:
+                manifest = {}
+        workers = manifest.get("workers") if isinstance(manifest.get("workers"), dict) else {}
+        for label, entry in sorted(workers.items()):
+            if not isinstance(entry, dict):
+                continue
+            status: dict[str, Any] = {}
+            status_path = run_dir / f"{label}-status.json"
+            if status_path.exists():
+                try:
+                    loaded = json.loads(status_path.read_text(encoding="utf-8"))
+                    status = loaded if isinstance(loaded, dict) else {}
+                except json.JSONDecodeError:
+                    status = {}
+            expected = ""
+            request_path = run_dir / f"{label}-request.json"
+            if request_path.exists():
+                try:
+                    expected = str(json.loads(request_path.read_text(encoding="utf-8")).get("expected_output") or "")
+                except (json.JSONDecodeError, AttributeError):
+                    expected = ""
+            markers = [marker for marker in ("RESULT:", "SECTION:") if marker in expected]
+            marker_state = "n/a"
+            if markers:
+                out_text = ""
+                outfile = entry.get("outfile")
+                if isinstance(outfile, str) and Path(outfile).is_file():
+                    try:
+                        out_text = Path(outfile).read_text(encoding="utf-8", errors="replace")
+                    except OSError:
+                        out_text = ""
+                marker_state = "present" if any(marker in out_text for marker in markers) else "absent"
+            overview.append(
+                {
+                    "run_dir": str(run_dir),
+                    "label": str(label),
+                    "tool": str(entry.get("tool", "")),
+                    "state": str(status.get("state", "unknown")),
+                    "returncode": status.get("returncode"),
+                    "contracted_marker": marker_state,
+                }
+            )
+    return overview
+
+
 def sensitive_artifact_dirs(run_dir: Path) -> list[Path]:
     paths: list[Path] = []
     slices_dir = run_dir / "slices"

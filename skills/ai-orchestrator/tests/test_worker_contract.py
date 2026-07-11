@@ -84,6 +84,22 @@ class WorkerContractTests(unittest.TestCase):
         self.assertIn("no re-delegation", prompt)
         self.assertNotIn("<worker command>", " ".join(command))
 
+    def test_prompt_defines_access_mode_semantics(self):
+        # Regression: "Access mode is read-only; do not exceed it." left the
+        # worker model to guess whether read-only forbids running commands.
+        # OpenCode's plan agent only mechanically denies edit tools, and
+        # models resolved the ambiguity inconsistently (MC Test 11), so the
+        # prompt must state the contract semantics explicitly.
+        contract = worker_contract.validate_contract(self.policy, self.request, self.run_dir)
+        prompt = worker_contract.render_worker_prompt(contract)
+        self.assertIn("run commands that do not modify the workspace", prompt)
+        self.assertIn("must not create, edit, or delete files", prompt)
+
+        self.request["access"] = "workspace-write"
+        contract = worker_contract.validate_contract(self.policy, self.request, self.run_dir)
+        prompt = worker_contract.render_worker_prompt(contract)
+        self.assertIn("edit only the files listed in this request", prompt)
+
     def test_opencode_workspace_write_uses_build_agent(self):
         self.request["access"] = "workspace-write"
         contract = worker_contract.validate_contract(self.policy, self.request, self.run_dir)

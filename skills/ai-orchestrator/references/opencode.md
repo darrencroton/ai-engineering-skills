@@ -31,7 +31,7 @@ Omit `-m` to use the configured default (`model` key in `opencode.json`). Never 
 
 ## Deterministic Launch Profile
 
-Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns `opencode run`, positional prompt placement, model/variant flags, `--agent plan|build`, `--auto`, and `--dir`; orchestrators must not compose these flags. Direct testing established that plan+auto is the unattended read-only combination and build+auto is edit-capable.
+Write policy/request JSON as documented in [worker-contract.md](worker-contract.md), then use `worker_jobs.py launch`. The launcher owns `opencode run`, positional prompt placement, model/variant flags, `--agent plan|build`, `--auto`, and `--dir`; orchestrators must not compose these flags. Direct testing established that plan+auto is the unattended no-edit combination (see Permission Guidance for exactly what plan mode does and does not enforce) and build+auto is edit-capable.
 
 ## Helper Use
 
@@ -65,7 +65,7 @@ Use `worker_jobs.py extract` when you want the clean final answer — it reads s
 | (positional) | Prompt text passed directly as an argument to `opencode run`, not via a flag |
 | `-m / --model` | `provider/model` string from `opencode.json` / `opencode models`; omit to use the configured default |
 | `--variant` | Reasoning-effort level when explicitly requested and supported by the underlying model |
-| `--agent` | `build` (default, edit-capable) or `plan` (read-only) |
+| `--agent` | `build` (default, edit-capable) or `plan` (edit tools mechanically denied; see Permission Guidance) |
 | `--auto` | Auto-approve permissions not explicitly denied; required for non-interactive/unattended runs |
 | `--dir` | Working directory for the run |
 | `-c / --continue` | Continue the most recent session |
@@ -75,7 +75,7 @@ Use `worker_jobs.py extract` when you want the clean final answer — it reads s
 ## Permission Guidance
 
 - **Edit tasks**: `--agent build --auto`
-- **Read-only review**: `--agent plan --auto`. Confirmed by direct testing: without `--auto`, a headless `opencode run --agent plan` call hangs indefinitely waiting for a tool-execution approval that no one is present to give — there is no TTY to approve it. `--agent plan` already keeps the agent read-only regardless of `--auto`; `--auto` only bypasses the approval prompt, it does not grant write access. Do not skip launching a worker, or substitute an orchestrator's own direct checks for a required worker run, based on an assumption that `--auto` is unsafe or unsupported for read-only tasks — test the documented command before concluding it can't be used.
+- **Read-only review**: `--agent plan --auto`. Confirmed by direct testing: without `--auto`, a headless `opencode run --agent plan` call hangs indefinitely waiting for a tool-execution approval that no one is present to give — there is no TTY to approve it. What `--agent plan` mechanically enforces is narrower than "read-only": its built-in permission ruleset denies edit tools only (base `*: allow` plus `edit: deny`); bash remains mechanically available, constrained only by a prompt-level plan-mode "READ-ONLY phase" reminder. `--auto` only bypasses the approval prompt; it does not grant edit access. Two consequences, both confirmed by direct testing: a plan-mode worker can genuinely execute non-modifying commands, so validation-run tasks are legitimate read-only work under the contract's access-mode definition (see [worker-contract.md](worker-contract.md)); and some models read the plan-mode reminder more conservatively and refuse to execute anything — treat that refusal as a failed delegation and retry with a corrected request through the launcher. The mutation backstop is not this flag: under MC, the recomputed file-authorization and clean-worktree gates catch workspace changes regardless of what the worker did. Do not skip launching a worker, or substitute an orchestrator's own direct checks for a required worker run, based on an assumption that `--auto` is unsafe or unsupported for read-only tasks — test the documented command before concluding it can't be used.
 - **Unrestricted execution**: only if the user explicitly requests it
 
 Worker continuation is not a separate raw-command path. Write a new semantic request with an `-rN` label so policy validation and evidence remain complete.

@@ -2295,6 +2295,76 @@ Continue later.
         summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
         self.assertEqual([Path(entry["run_dir"]).name for entry in summary["runs"]], ["workers-1"])
 
+    def test_worker_delegation_overview_flags_missing_contracted_marker(self):
+        # Regression (MC Test 11): a worker that refused its task but exited
+        # cleanly (state completed, returncode 0) passed the process-level
+        # worker-evidence gate and was invisible in every summary. The
+        # overview must surface, per worker, whether the output contains the
+        # marker its own request's expected_output contracted.
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        for name, out_text in (("workers-1", "How would you like to proceed?"), ("workers-2", "RESULT: pass — verified.")):
+            worker_run = artifact / "worker-runs" / name
+            worker_run.mkdir(parents=True)
+            (worker_run / "01-opencode-check-out.txt").write_text(out_text, encoding="utf-8")
+            (worker_run / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "workers": {
+                            "01-opencode-check": {
+                                "tool": "opencode",
+                                "outfile": str(worker_run / "01-opencode-check-out.txt"),
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (worker_run / "01-opencode-check-request.json").write_text(
+                json.dumps({"expected_output": "Return RESULT: pass or RESULT: blocked."}),
+                encoding="utf-8",
+            )
+            (worker_run / "01-opencode-check-status.json").write_text(
+                json.dumps({"label": "01-opencode-check", "state": "completed", "returncode": 0}),
+                encoding="utf-8",
+            )
+
+        overview = mc.worker_delegation_overview(artifact)
+
+        self.assertEqual(len(overview), 2)
+        by_run = {Path(entry["run_dir"]).name: entry for entry in overview}
+        self.assertEqual(by_run["workers-1"]["contracted_marker"], "absent")
+        self.assertEqual(by_run["workers-1"]["state"], "completed")
+        self.assertEqual(by_run["workers-1"]["returncode"], 0)
+        self.assertEqual(by_run["workers-2"]["contracted_marker"], "present")
+
+    def test_worker_delegation_overview_reports_na_without_contracted_marker(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        worker_run = artifact / "worker-runs" / "workers-1"
+        worker_run.mkdir(parents=True)
+        (worker_run / "01-opencode-scan-out.txt").write_text("free-form notes", encoding="utf-8")
+        (worker_run / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "workers": {
+                        "01-opencode-scan": {
+                            "tool": "opencode",
+                            "outfile": str(worker_run / "01-opencode-scan-out.txt"),
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        (worker_run / "01-opencode-scan-request.json").write_text(
+            json.dumps({"expected_output": "Describe what you found."}),
+            encoding="utf-8",
+        )
+
+        overview = mc.worker_delegation_overview(artifact)
+
+        self.assertEqual(overview[0]["contracted_marker"], "n/a")
+        self.assertEqual(overview[0]["state"], "unknown")
+
     def test_reconcile_repairs_failed_slice_after_commit_hash_evidence_mismatch(self):
         self.prepare_committed_repo()
         state = self.init_run()

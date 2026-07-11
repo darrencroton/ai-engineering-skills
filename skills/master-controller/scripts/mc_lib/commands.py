@@ -65,6 +65,7 @@ from .runtime import (
     slice_dir_name,
     slice_paths,
     worker_credential_source,
+    worker_delegation_overview,
     worker_jobs_path,
 )
 from .runner import execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
@@ -357,6 +358,25 @@ def summarize(args: argparse.Namespace) -> int:
     else:
         for entry in state["slices"]:
             print(f"- {entry.get('slice_id', 'unknown')}: {entry.get('status', 'unknown')}")
+            artifact_dir = entry.get("artifact_dir")
+            if not artifact_dir:
+                continue
+            overview = worker_delegation_overview(repo / str(artifact_dir))
+            if not overview:
+                continue
+            flagged = [
+                worker
+                for worker in overview
+                if worker["contracted_marker"] == "absent"
+                or worker["state"] != "completed"
+                or worker["returncode"] != 0
+            ]
+            print(f"  workers: {len(overview)} launched, {len(flagged)} flagged")
+            for worker in flagged:
+                print(
+                    f"    ! {worker['label']} ({worker['tool']}): state={worker['state']} "
+                    f"returncode={worker['returncode']} contracted_marker={worker['contracted_marker']}"
+                )
     print(f"Completed: {len(completed)}/{state['plan']['slice_count']}")
     return 0
 

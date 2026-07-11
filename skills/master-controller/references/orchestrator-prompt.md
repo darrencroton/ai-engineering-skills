@@ -68,6 +68,7 @@ Required workflow:
 
 Worker helper sequence:
 - If you use an external AI worker, launch it through the worker helper's validated contract interface so MC gets durable artifacts. A required worker only satisfies MC's gate when its launch contract passes and it completes with state `completed`, returncode 0. A raw, crashed, cancelled, still-running, or policy-mismatched worker does not.
+- MC's worker gate is process-level; semantic verification of the worker's output is yours. A worker that exits cleanly but does not return the output its request contracted (for example it refused the task, asked a question instead of answering, or omitted the required `RESULT:`/`SECTION:` output) has not completed its delegation: write a corrected follow-up request with an `-rN` label and launch it through the same contract interface, and do not cite the failed attempt as worker evidence.
 - MC sets `AI_ORCHESTRATOR_ARTIFACT_ROOT={worker_artifact_root}`, `MC_SLICE_TMP_DIR={slice_tmp_dir}`, `MC_TOOL_HOME_ROOT={tool_home_root}`, and `TMPDIR={slice_tmp_dir}` for this slice. When Copilot is a worker and not the orchestrator, MC also sets `COPILOT_HOME={copilot_home}`. When Codex is a worker and not the orchestrator, MC also sets `CODEX_HOME={codex_home}` seeded with `auth.json`. Claude worker auth follows the `Worker auth policy` line above; MC does not set `CLAUDE_CONFIG_DIR` for Claude workers.
 - Create one worker run directory before starting workers:
 

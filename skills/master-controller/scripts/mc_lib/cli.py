@@ -99,6 +99,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="sanity-check a whole implementation plan before initializing an MC run",
     )
     check_parser.add_argument("--plan", required=True, help="implementation plan markdown file")
+    check_parser.add_argument(
+        "--repo",
+        default=".",
+        help="target git repository for worktree-aware surface lint (optional; plan-intrinsic checks run without it)",
+    )
     check_parser.set_defaults(func=check_plan)
 
     approve = subparsers.add_parser("approve", help="record operator approval for one approval-gated slice")

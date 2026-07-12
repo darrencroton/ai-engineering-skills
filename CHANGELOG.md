@@ -28,6 +28,7 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 
 - Flaky runtime-test fixture: the hard-prompt-at-repair fake harness now exposes a Codex-ready marker after terminal setup and waits for MC's initial prompt injection before showing its trust prompt, removing a startup race that could time the test out under system load.
 - `check-plan` now rejects malformed slice-like headings instead of silently omitting their work, and rejects authorized entries that cannot match repository-relative git paths.
+- `check-plan` closes three more silent-mismatch shapes: authorized entries with unwrapped whitespace (usually a trailing annotation like `README.md (new file)`) are rejected — backtick-wrap the path to annotate it; slice-like headings inside fenced code blocks, and unclosed fences, are rejected as ambiguous; and a plain entry that names an existing directory draws a warning when repo context is available (automatic at `init`, and via `check-plan --repo`, default the current directory). The `Slice Batches` lint now fires at any heading level.
 - CI now declares a read-only token boundary and does not persist checkout credentials; MC's Python 3.13 minimum is documented consistently with the version CI validates.
 - Model-supervised startup failures now retain the underlying exception in run state instead of recording only a generic launch failure.
 

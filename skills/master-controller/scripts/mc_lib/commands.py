@@ -97,7 +97,7 @@ def init_run(args: argparse.Namespace) -> int:
     # Whole-plan sanity check before any state is created: a plan defect in any
     # slice (not just the next one) stops init so the operator fixes the plan
     # before the workflow begins, rather than mid-run at the slice carrying it.
-    report = plan_check_report(plan)
+    report = plan_check_report(plan, repo=repo)
     if report["errors"]:
         raise McError(
             "plan failed pre-run sanity check:\n  - "
@@ -243,10 +243,18 @@ def check_plan(args: argparse.Namespace) -> int:
 
     Standalone form of the check init runs automatically: validates every
     slice contract and lints authorized surfaces so plan defects surface
-    before a run begins, not mid-run. Exits non-zero when errors are present.
+    before a run begins, not mid-run. When the target repository is available
+    (--repo, default the current directory), entries are also linted against
+    the worktree; outside a repository the plan-intrinsic checks still run.
+    Exits non-zero when errors are present.
     """
     plan = resolve_plan(Path(args.plan))
-    report = plan_check_report(plan)
+    repo: Path | None
+    try:
+        repo = resolve_repo(Path(getattr(args, "repo", ".") or "."))
+    except McError:
+        repo = None
+    report = plan_check_report(plan, repo=repo)
     print(f"Plan: {plan}")
     print(f"Slices discovered: {report['slice_count']}")
     if report["approval_gated"]:

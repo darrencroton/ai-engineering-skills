@@ -23,7 +23,8 @@ SLICE_LIKE_HEADING_RE = re.compile(
     r"^[ ]{0,3}#{1,6}\s+Slice(?:\s|:|\d|$)[^\n]*$",
     flags=re.IGNORECASE | re.MULTILINE,
 )
-SLICE_BATCH_HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+Slice Batches\b", flags=re.IGNORECASE)
+SLICE_BATCH_HEADING_RE = re.compile(r"^[ ]{0,3}#{1,6}\s+Slice Batches\b", flags=re.IGNORECASE | re.MULTILINE)
+BATCH_BULLET_RE = re.compile(r"^\s*-\s*Batch\s+\S+\s*:\s*Slices?\b", flags=re.MULTILINE)
 
 
 def plan_digest(path: Path) -> str:
@@ -153,21 +154,65 @@ def authorized_entry_error(entry: str) -> str | None:
         return f"entry {normalized!r} uses a backslash; authorized git paths must use '/' separators"
     if "//" in normalized:
         return f"entry {normalized!r} contains an empty path segment"
+    # A backtick-wrapped entry has already had its path extracted, so internal
+    # whitespace there is deliberate. Unwrapped whitespace is almost always a
+    # trailing annotation ("README.md (new file)") that would silently match
+    # no changed path at runtime.
+    if any(ch.isspace() for ch in normalized) and not re.match(r"`[^`]+`", entry.strip()):
+        return (
+            f"entry {normalized!r} contains unwrapped whitespace, which matches no changed path; "
+            "backtick-wrap the path itself (`path/to/file` (note)) so annotations are kept out of the match"
+        )
     parts = normalized.rstrip("/").split("/")
     if any(part in {".", ".."} for part in parts):
         return f"entry {normalized!r} contains a '.' or '..' path segment that matches no authorized git path"
     return None
 
 
-def malformed_slice_headings(text: str) -> list[str]:
-    malformed: list[str] = []
-    for match in SLICE_LIKE_HEADING_RE.finditer(text):
-        heading = match.group(0)
-        if SLICE_BATCH_HEADING_RE.match(heading):
-            continue
-        if not SLICE_HEADING_RE.fullmatch(heading):
-            malformed.append(heading)
-    return malformed
+def directory_surface_lint(entry: str, repo: Path) -> str | None:
+    normalized = normalize_authorized_entry(entry)
+    if not normalized or normalized.endswith("/"):
+        return None
+    if any(marker in normalized for marker in ("*", "?", "[")):
+        return None
+    if (repo / normalized).is_dir():
+        return (
+            f"entry {normalized!r} names an existing directory; a plain path matches only an identical "
+            f"changed path, so it authorizes nothing beneath the directory — write {normalized + '/'!r} "
+            "to authorize the subtree"
+        )
+    return None
+
+
+def mask_fenced_blocks(text: str) -> tuple[str, bool]:
+    """Blank out fenced code blocks, preserving offsets and line structure.
+
+    Returns the masked text and whether a fence was left unclosed. Heading
+    scans compare against the masked text so a '## Slice ...' example inside a
+    fence is reported as ambiguous instead of being read as (or hidden from)
+    a machine-consumed heading.
+    """
+    masked_lines: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in text.split("\n"):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        marker: tuple[str, int, str] | None = None
+        if indent <= 3 and stripped[:3] in ("```", "~~~"):
+            char = stripped[0]
+            run = len(stripped) - len(stripped.lstrip(char))
+            marker = (char, run, stripped[run:].strip())
+        if fence is None:
+            if marker:
+                fence = (marker[0], marker[1])
+                masked_lines.append(" " * len(line))
+            else:
+                masked_lines.append(line)
+        else:
+            masked_lines.append(" " * len(line))
+            if marker and marker[0] == fence[0] and marker[1] >= fence[1] and not marker[2]:
+                fence = None
+    return "\n".join(masked_lines), fence is not None
 
 
 def surface_lint(entry: str) -> str | None:
@@ -197,17 +242,19 @@ def surface_lint(entry: str) -> str | None:
     return None
 
 
-def plan_check_report(path: Path) -> dict[str, Any]:
+def plan_check_report(path: Path, repo: Path | None = None) -> dict[str, Any]:
     """Whole-plan pre-run sanity check.
 
     Validates every slice contract up front so a plan defect surfaces before
     any harness launches, instead of mid-run at whichever slice carries it.
     Errors are conditions that would block a slice or hide work (missing
     sections, empty authorized surface, unclear approval flags, duplicate
-    numbers): init fails closed on them. Warnings are lint for conditions MC
-    cannot mechanically guard against mid-run (heuristic stop surfaces,
-    mode-dependent plan features): the operator should resolve them or
-    consciously accept them before starting.
+    numbers, fenced or malformed slice headings): init fails closed on them.
+    Warnings are lint for conditions MC cannot mechanically guard against
+    mid-run (heuristic stop surfaces, mode-dependent plan features): the
+    operator should resolve them or consciously accept them before starting.
+    When ``repo`` is given, authorized entries are additionally linted against
+    the worktree (e.g. a plain entry that names an existing directory).
     """
     text = path.read_text(encoding="utf-8")
     slices = parse_plan(path)
@@ -215,12 +262,27 @@ def plan_check_report(path: Path) -> dict[str, Any]:
     warnings: list[str] = []
     approval_gated: list[str] = []
 
-    malformed_headings = malformed_slice_headings(text)
-    for heading in malformed_headings:
+    masked_text, unclosed_fence = mask_fenced_blocks(text)
+    if unclosed_fence:
         errors.append(
-            f"malformed slice heading {heading!r}; slice headings must be exactly "
-            "'## Slice <N>: <name>' so planned work cannot be silently skipped"
+            "plan contains an unclosed code fence, which makes heading detection ambiguous; "
+            "close the fenced block before running"
         )
+    for match in SLICE_LIKE_HEADING_RE.finditer(text):
+        heading = match.group(0)
+        if SLICE_BATCH_HEADING_RE.match(heading):
+            continue
+        if not masked_text[match.start():match.end()].strip():
+            errors.append(
+                f"slice-like heading {heading!r} sits inside a fenced code block; MC's parser reads "
+                "headings literally, so fenced examples can silently change the slice set — move or reword it"
+            )
+            continue
+        if not SLICE_HEADING_RE.fullmatch(heading):
+            errors.append(
+                f"malformed slice heading {heading!r}; slice headings must be exactly "
+                "'## Slice <N>: <name>' so planned work cannot be silently skipped"
+            )
     if not slices:
         errors.append("plan contains no slices (no '## Slice <N>: <name>' headings found)")
     duplicates = duplicate_slice_numbers(slices)
@@ -248,6 +310,10 @@ def plan_check_report(path: Path) -> dict[str, Any]:
                 lint = surface_lint(raw_entry)
                 if lint:
                     warnings.append(f"{prefix}: {lint}")
+                if repo is not None:
+                    dir_lint = directory_surface_lint(raw_entry, repo)
+                    if dir_lint:
+                        warnings.append(f"{prefix}: {dir_lint}")
         approval = plan_slice.approval_needed
         if approval is None:
             errors.append(
@@ -256,9 +322,7 @@ def plan_check_report(path: Path) -> dict[str, Any]:
             )
         elif approval:
             approval_gated.append(plan_slice.slice_id)
-    if re.search(r"^#{2,3}\s*Slice Batches\b", text, flags=re.MULTILINE) or re.search(
-        r"^\s*-\s*Batch\s+\S+\s*:\s*Slices?\b", text, flags=re.MULTILINE
-    ):
+    if SLICE_BATCH_HEADING_RE.search(masked_text) or BATCH_BULLET_RE.search(masked_text):
         warnings.append(
             "plan defines slice batches: batches bind in Mode A sessions only — MC (Mode B) runs "
             "atomic slices in plan order and ignores batch groupings"

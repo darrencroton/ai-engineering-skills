@@ -130,6 +130,113 @@ class PlanStateTests(McTestCase):
         self.assertIn("invalid authorized surface", "\n".join(report["errors"]))
         self.assertNotIn("package.json", "\n".join(report["warnings"]))
 
+    def test_check_plan_rejects_unwrapped_annotation_entries(self):
+        for entry in ["README.md (new file)", "README.md - new helper"]:
+            with self.subTest(entry=entry):
+                write_plan(self.plan)
+                self.plan.write_text(
+                    self.plan.read_text(encoding="utf-8").replace("  - README.md", f"  - {entry}"),
+                    encoding="utf-8",
+                )
+
+                report = mc.plan_check_report(self.plan)
+                runnable, reasons = mc.eligibility(mc.parse_plan(self.plan)[0])
+
+                self.assertIn("unwrapped whitespace", "\n".join(report["errors"]))
+                self.assertFalse(runnable)
+                self.assertIn("unwrapped whitespace", "\n".join(reasons))
+
+        # Backtick-wrapping stays the escape hatch: annotated entries and paths
+        # that genuinely contain spaces remain expressible.
+        for entry in ["`README.md` (new file)", "`my notes.md`"]:
+            with self.subTest(entry=entry):
+                write_plan(self.plan)
+                self.plan.write_text(
+                    self.plan.read_text(encoding="utf-8").replace("  - README.md", f"  - {entry}"),
+                    encoding="utf-8",
+                )
+                self.assertEqual(mc.plan_check_report(self.plan)["errors"], [])
+
+    def test_check_plan_warns_when_plain_entry_names_existing_directory(self):
+        (self.repo / "docs").mkdir()
+        for entry, expect_warning in [("docs", True), ("docs/", False), ("docs/**", False), ("missing/", False)]:
+            with self.subTest(entry=entry):
+                write_plan(self.plan)
+                self.plan.write_text(
+                    self.plan.read_text(encoding="utf-8").replace("  - README.md", f"  - {entry}"),
+                    encoding="utf-8",
+                )
+
+                report = mc.plan_check_report(self.plan, repo=self.repo)
+
+                self.assertEqual(report["errors"], [])
+                self.assertEqual(
+                    "names an existing directory" in "\n".join(report["warnings"]),
+                    expect_warning,
+                )
+
+        # Without repo context the worktree lint is skipped, not guessed.
+        write_plan(self.plan)
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8").replace("  - README.md", "  - docs"),
+            encoding="utf-8",
+        )
+        self.assertNotIn("names an existing directory", "\n".join(mc.plan_check_report(self.plan)["warnings"]))
+
+    def test_init_surfaces_directory_entry_warning(self):
+        (self.repo / "docs").mkdir()
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8").replace("  - README.md", "  - docs"),
+            encoding="utf-8",
+        )
+        self.prepare_committed_repo()
+        args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(mc.init_run(args), 0)
+        self.assertIn("names an existing directory", out.getvalue())
+
+    def test_check_plan_warns_on_batch_heading_at_any_level(self):
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8") + "\n#### Slice Batches\n\n- Batch A: Slices 1-2\n",
+            encoding="utf-8",
+        )
+
+        report = mc.plan_check_report(self.plan)
+
+        self.assertEqual(report["errors"], [])
+        self.assertIn("batches bind in Mode A sessions only", "\n".join(report["warnings"]))
+
+    def test_check_plan_rejects_slice_like_headings_inside_code_fences(self):
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8") + "\n```md\n## Slice 9: Fenced Example\n```\n",
+            encoding="utf-8",
+        )
+
+        report = mc.plan_check_report(self.plan)
+
+        self.assertIn("sits inside a fenced code block", "\n".join(report["errors"]))
+
+        # A fenced batch heading is documentation, not a batch grouping: no
+        # fence error (batch headings are reserved) and no batch warning.
+        write_plan(self.plan)
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8") + "\n```md\n## Slice Batches\n```\n",
+            encoding="utf-8",
+        )
+        report = mc.plan_check_report(self.plan)
+        self.assertEqual(report["errors"], [])
+        self.assertNotIn("batches bind in Mode A sessions only", "\n".join(report["warnings"]))
+
+    def test_check_plan_rejects_unclosed_code_fence(self):
+        self.plan.write_text(
+            self.plan.read_text(encoding="utf-8") + "\n```\nstray fenced text\n",
+            encoding="utf-8",
+        )
+
+        report = mc.plan_check_report(self.plan)
+
+        self.assertIn("unclosed code fence", "\n".join(report["errors"]))
+
     def test_init_fails_closed_on_plan_sanity_errors_in_any_slice(self):
         # The defect is in Slice 2, not the next runnable slice: init must
         # still stop, so plan problems surface before the workflow begins.

@@ -42,7 +42,7 @@ Docker and container setup are out of scope. MC may run inside a container or on
 
 ## Workflow
 
-1. **Sanity-check the plan** - `check-plan` validates every slice contract up front (canonical slice headings, required sections, usable repository-relative authorized surfaces, exact yes/no approval flags, unique slice numbers) and lints for conditions MC cannot mechanically guard mid-run (dependency/license-shaped authorized files, whole-repo surfaces, Mode A-only batch groupings). `init` runs the same check automatically and fails closed on errors, so a defective plan stops for the user before any harness launches.
+1. **Sanity-check the plan** - `check-plan` validates every slice contract up front (canonical slice headings — rejecting slice-like headings hidden in fenced code blocks and unclosed fences — required sections, usable repository-relative authorized surfaces, exact yes/no approval flags, unique slice numbers) and lints for conditions MC cannot mechanically guard mid-run (dependency/license-shaped authorized files, whole-repo surfaces, plain entries that name existing directories, Mode A-only batch groupings). `init` runs the same check automatically and fails closed on errors, so a defective plan stops for the user before any harness launches.
 2. **Initialize** - create `.ai-mc/runs/<timestamp>/run.json` in the target repo and update `.ai-mc/current`.
 3. **Check eligibility** - identify the next uncompleted slice and fail closed on approval-needed risk flags without a recorded approval.
 4. **Run or supervise one slice** - launch a fresh tmux-backed harness session for one eligible slice. In model-supervised operation, keep the MC model in the loop to observe live pane/log/json/git evidence and choose safe operational actions.

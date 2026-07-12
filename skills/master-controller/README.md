@@ -14,7 +14,7 @@ Runtime requirement: Python 3.13 or newer. MC uses Python 3.13's segment-aware `
 - Updating `.ai-mc/current` to the active run.
 - Recording repo, branch, harness, plan, environment preflight, and policy.
 - Parsing implementation-plan markdown conservatively enough to identify frozen slice contracts.
-- Sanity-checking the whole plan before a run begins (`check-plan`, also run automatically at `init`): every slice's required sections, authorized surface, and approval flag, plus lint warnings for dependency/license-shaped authorized files, whole-repo surfaces, and Mode A-only batch groupings.
+- Sanity-checking the whole plan before a run begins (`check-plan`, also run automatically at `init`): every slice's required sections, authorized surface, and approval flag — including rejecting fenced or malformed slice-like headings and unusable path entries — plus lint warnings for dependency/license-shaped authorized files, whole-repo surfaces, plain entries that name existing directories, and Mode A-only batch groupings.
 - Refusing incomplete, ambiguous, approval-gated, or unauthorized slices.
 - Reporting the next eligible slice in `run-next --dry-run`.
 - Running one eligible slice with `run-next`.
@@ -38,10 +38,10 @@ Runtime requirement: Python 3.13 or newer. MC uses Python 3.13's segment-aware `
 
 ## CLI
 
-Sanity-check a plan before starting (also runs automatically at `init`; errors fail init, warnings print):
+Sanity-check a plan before starting (also runs automatically at `init`; errors fail init, warnings print). `--repo` (default: the current directory) lets the check lint authorized entries against the worktree — for example a plain entry that names an existing directory; outside a git repository the plan-intrinsic checks still run:
 
 ```bash
-python3 skills/master-controller/scripts/mc.py check-plan --plan /path/to/plan.md
+python3 skills/master-controller/scripts/mc.py check-plan --plan /path/to/plan.md --repo /path/to/repo
 ```
 
 Initialize a run:
@@ -288,11 +288,11 @@ MC expects implementation-plan slice sections with these headings:
 - `### Validation Plan`
 - `### Rollback Path`
 
-The parser fails closed when a slice-like heading is malformed, when a required section is missing, when no usable repository-relative paths are listed under `Files allowed to change`, or when `Approval needed before implementation` is anything other than an exact `no` (a prefix like "not yet decided" or "none" is treated as unresolved, not as "no", and stops the run). Heading text beginning with the standalone word `Slice` is reserved for machine-consumed slice headings, except `Slice Batches`. `check-plan` applies these checks to every slice at once — plus surface lint for dependency/license-shaped files, whole-repo globs, top-level-only `*`, and batch groupings — so a defect in slice 5 stops the operator at init, not twenty minutes into the run.
+The parser fails closed when a slice-like heading is malformed or sits inside a fenced code block (including an unclosed fence), when a required section is missing, when no usable repository-relative paths are listed under `Files allowed to change` (entries with unwrapped whitespace — usually a trailing annotation — are unusable; backtick-wrap the path to annotate it), or when `Approval needed before implementation` is anything other than an exact `no` (a prefix like "not yet decided" or "none" is treated as unresolved, not as "no", and stops the run). Heading text beginning with the standalone word `Slice` is reserved for machine-consumed slice headings, except `Slice Batches`. `check-plan` applies these checks to every slice at once — plus surface lint for dependency/license-shaped files, whole-repo globs, top-level-only `*`, plain entries that name existing directories, and batch groupings — so a defect in slice 5 stops the operator at init, not twenty minutes into the run.
 
 An explicit `yes` approval flag can be cleared at runtime with `approve --slice "<Slice N>" --reason "<why>"`, which records the operator's approval in run state and the operational event log — the plan file itself stays frozen. A missing or unclear flag cannot be approved away; that is a planning defect to fix in the plan (which then requires a fresh `init`, using `--assume-complete` to adopt slices already completed under the previous run).
 
-Authorized file entries are matched with segment-aware globbing: a plain path matches exactly, a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
+Authorized file entries are matched with segment-aware globbing: a plain path matches exactly (never beneath a directory — write `docs/` rather than `docs` for a subtree), a trailing `/` matches everything under a directory, and a `*`/`?` glob matches within a single path segment (so `*.md` authorizes only top-level markdown). Use `**` explicitly for a recursive match such as `docs/**/*.md`.
 
 The plan is frozen at `init` by content digest. If the plan file changes mid-run, MC stops before the next slice; a revised plan requires a fresh `init`. Duplicate `## Slice N:` numbers are rejected at `init`, and each runtime slice re-checks that the current branch still matches the branch captured at `init`. `init --branch <name>` records and switches to an intended branch before the run; `--create-branch` creates it only when explicitly requested and only from a clean worktree.
 

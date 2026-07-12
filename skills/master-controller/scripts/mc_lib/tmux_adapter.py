@@ -301,7 +301,9 @@ class TmuxHarnessAdapter:
                 "refusing to send into hard prompt on screen: "
                 + ", ".join(str(kind) for kind in hard_prompt["kinds"])
             )
-        run_command(["tmux", "send-keys", "-t", session_name, "-l", text], error_prefix="tmux literal send failed")
+        # "--" ends tmux option parsing so a literal text that begins with "-"
+        # cannot be misread as a send-keys flag.
+        run_command(["tmux", "send-keys", "-t", session_name, "-l", "--", text], error_prefix="tmux literal send failed")
         # Keep the same settle-and-resubmit discipline as send_prompt. This
         # avoids the known single-Enter race in Codex/Claude TUIs while still
         # using literal tmux input rather than shell evaluation.

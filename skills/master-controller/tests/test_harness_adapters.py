@@ -190,7 +190,9 @@ class HarnessAdapterProfileTests(McTestCase):
         ]
         with mock.patch.object(mc_tmux_adapter, "run_command", side_effect=calls) as run, mock.patch.object(mc_tmux_adapter.time, "sleep"):
             adapter.send_literal("session", "continue; $(no shell)")
-        self.assertEqual(run.call_args_list[2].args[0], ["tmux", "send-keys", "-t", "session", "-l", "continue; $(no shell)"])
+        # "--" ends tmux option parsing so literal text beginning with "-"
+        # cannot be misread as a send-keys flag.
+        self.assertEqual(run.call_args_list[2].args[0], ["tmux", "send-keys", "-t", "session", "-l", "--", "continue; $(no shell)"])
         self.assertEqual(run.call_args_list[3].args[0], ["tmux", "send-keys", "-t", "session", "C-m"])
         self.assertEqual(run.call_args_list[4].args[0], ["tmux", "send-keys", "-t", "session", "C-m"])
 

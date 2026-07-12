@@ -593,9 +593,7 @@ def pause_until(args: argparse.Namespace) -> int:
             }
 
     update_run_locked(run_dir / "run.json", mark_paused)
-    wait_args = copy.copy(args)
-    wait_args.poll_seconds = args.poll_seconds
-    wait_reason, wait_snapshot = wait_observing(wait_args, repo, run_dir, pause_seconds)
+    wait_reason, wait_snapshot = wait_observing(args, repo, run_dir, pause_seconds)
     append_operational_event(
         repo,
         load_run(run_dir),
@@ -656,6 +654,12 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
     current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
     if not current:
         raise McError("run has no current slice")
+    # Same digest discipline as every other runtime path: the terminal slice
+    # entry below is rendered from the parsed plan, so it must never be built
+    # from a plan edited mid-run. The plain `stop` command (which reads no plan
+    # content) remains the escape hatch for cancelling such a run.
+    plan = resolve_plan(Path(state["plan_path"]))
+    verify_plan_unchanged(state, plan)
     artifact_dir = _slice_artifact_dir(repo, current)
     attempt = int(current.get("attempt") or 1)
     session_name = str(current.get("tmux_session") or "")
@@ -689,7 +693,7 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
             "evidence_path": relative_artifact_path(repo, artifact_dir / "pane-capture.txt"),
         },
     )
-    plan_slice = plan_slice_by_id(parse_plan(resolve_plan(Path(state["plan_path"]))), str(current.get("slice_id") or ""))
+    plan_slice = plan_slice_by_id(parse_plan(plan), str(current.get("slice_id") or ""))
     if plan_slice is None:
         raise McError(f"current slice is not present in plan: {current.get('slice_id')}")
     changed_files = tuple(

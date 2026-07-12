@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 
@@ -51,22 +52,6 @@ DEFAULT_SUPERVISION: dict[str, Any] = {
         "consecutive_pauses_current_slice": 0,
         "cumulative_pause_seconds_run": 0,
     },
-}
-
-# User-approved exception (explicit choice via AskUserQuestion, this session):
-# the operator may opt in to these known unattended-safe launch commands
-# with --allow-unattended-default. Without that flag, or for any other
-# harness name, MC still fails closed and requires --harness-command. Bare
-# harness names otherwise resolve to an interactive session (see
-# TmuxHarnessAdapter): tmux pastes the prompt and presses enter as if a human
-# were typing, so an unflagged harness process may prompt for per-action
-# approval that nothing in this loop can answer, silently deadlocking the run
-# until --timeout-seconds expires.
-KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
-    "codex": "codex --no-alt-screen -s workspace-write -a never",
-    "claude": "claude --permission-mode auto",
-    "opencode": "opencode --auto",
-    "copilot": "copilot --allow-all-tools --autopilot",
 }
 
 HARNESS_PROFILES: dict[str, dict[str, Any]] = {
@@ -142,6 +127,21 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
             "external_directory 'ask' rule has not been triggered and confirmed.",
         ],
     },
+}
+
+# User-approved exception (explicit choice via AskUserQuestion): the operator
+# may opt in to a known unattended-safe launch command with
+# --allow-unattended-default. Without that flag, or for any other harness
+# name, MC still fails closed and requires --harness-command. Bare harness
+# names otherwise resolve to an interactive session (see TmuxHarnessAdapter):
+# tmux pastes the prompt and presses enter as if a human were typing, so an
+# unflagged harness process may prompt for per-action approval that nothing in
+# this loop can answer, silently deadlocking the run until --timeout-seconds
+# expires. Derived from each profile's base_command so the two launch
+# vocabularies (--allow-unattended-default and --allow-profile-command) cannot
+# drift apart.
+KNOWN_UNATTENDED_HARNESS_COMMANDS: dict[str, str] = {
+    name: shlex.join(profile["base_command"]) for name, profile in HARNESS_PROFILES.items()
 }
 
 SENSITIVE_ARTIFACT_NAMES = {"copilot-home", "codex-home", "claude-config-dir", "tool-homes"}

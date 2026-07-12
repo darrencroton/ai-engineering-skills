@@ -229,6 +229,7 @@ At runtime, MC composes the launch command from the selected harness plus explic
 
 - `--worker-tools copilot` tells MC the slice will use a Copilot worker and the harness needs worker-compatible setup.
 - `--allow-profile-command` tells MC to use the tested profile command instead of requiring a hand-written `--harness-command`.
+- `--allow-unattended-default` opts in to the harness profile's known unattended-safe base command without full profile composition (no model/effort/worker flags). Like `--allow-profile-command`, it disables per-action approval, so MC's post-hoc gates are the safety boundary; without any of the three launch flags, a bare harness name fails closed rather than deadlocking on an approval prompt.
 - `--harness-model` and `--harness-effort` are composed by MC only when the selected orchestrator profile supports them.
 - `--worker-model` and `--worker-effort` are rendered into the slice prompt with per-tool command guidance; the orchestrator must preserve worker evidence and stop if the selected worker cannot honor them.
 - `commit_required=true` in run policy tells the Codex profile to add scoped git-directory access for local commits.

@@ -44,6 +44,11 @@ TERMINAL_SIGNATURES = frozenset(
     {
         "integrity-head",
         "slice-id-mismatch",
+        # An opt-in slice ("Independent audit required: yes") with no worker made
+        # available cannot be satisfied by steering the orchestrator — it is an
+        # operator/plan configuration mismatch — so it stops for a human at once
+        # rather than burning the repair budget.
+        "worker-unavailable",
     }
 )
 
@@ -447,9 +452,10 @@ def verify_gate(
         if not worker_tools:
             # The plan demands mechanical proof of an independent audit, but the
             # operator made no worker available this run, so MC cannot verify
-            # one. Fail closed rather than silently accepting a local self-audit.
+            # one. This is a config mismatch the orchestrator cannot repair, so
+            # stop terminally rather than spending the repair budget first.
             return gate_failure(
-                "worker-evidence",
+                "worker-unavailable",
                 "slice marks 'Independent audit required: yes' but no worker tool was made available for this run "
                 "(configure --worker-tools); MC cannot verify an independent audit",
                 result,

@@ -357,9 +357,10 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "pass")
 
-    def test_gate_opt_in_without_available_worker_blocks(self):
-        # An opt-in slice with no worker made available cannot be verified and
-        # must fail closed rather than silently accept a local self-audit.
+    def test_gate_opt_in_without_available_worker_stops_terminally(self):
+        # An opt-in slice with no worker made available is an operator/plan
+        # config mismatch the orchestrator cannot repair, so it fails closed
+        # terminally (needs-human) rather than burning the repair budget.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -374,8 +375,8 @@ class GateVerificationTests(McTestCase):
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ()
         )
 
-        self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.status, "needs-human")
+        self.assertEqual(decision.signature, "worker-unavailable")
         self.assertIn("no worker tool was made available", decision.reason)
 
     def test_gate_blocks_pass_when_required_worker_never_launched(self):

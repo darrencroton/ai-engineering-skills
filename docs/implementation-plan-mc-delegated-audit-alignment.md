@@ -209,6 +209,51 @@ This plan is executed **directly by the assistant in this session**, not run thr
 
 ---
 
+## Slice 5: Fail fast and fail closed when an opt-in slice has no worker available
+
+### Intended Change
+- Two robustness gaps surfaced in the Slice 1–4 fresh-eyes review are closed here (added post-hoc, operator-authorized, after Slice 4 shipped):
+  1. **Terminal, not repairable.** In `skills/master-controller/scripts/mc_lib/gates.py`, the opt-in branch's "no worker made available" case currently returns the `worker-evidence` signature, which is *repairable* — so the repair loop burns its whole budget trying to steer an orchestrator that cannot fix an operator/plan misconfiguration before finally stopping. Introduce a new terminal signature `worker-unavailable` (add to `TERMINAL_SIGNATURES`) and return it from that branch, so MC stops for a human immediately with a clear reason. The `worker_evidence_failure` path (a worker *was* available but did not produce genuine evidence) stays `worker-evidence`/repairable, since the orchestrator can fix that by actually running the audit.
+  2. **Fail fast at preflight.** In `skills/master-controller/scripts/mc_lib/commands.py`, `preflight` should fail (not silently pass) when the next runnable slice is marked `Independent audit required: yes` but no `--worker-tools` was configured, so the operator learns at setup time rather than at the finalize gate. Add a `check("independent-audit worker available", ...)` that fails in exactly that condition.
+- Update the existing `test_gate_opt_in_without_available_worker_blocks` test to expect `needs-human` / `worker-unavailable`, and add a preflight test in `test_harness_adapters.py` for the opt-in-without-worker failure.
+
+### Acceptance Criteria
+- Inputs: (a) `verify_gate` for an opt-in slice with no worker tools; (b) `preflight` for a run whose next slice is opt-in with `--worker-tools` empty; (c) `verify_gate` for an opt-in slice whose configured worker produced no genuine evidence.
+- Outputs: (a) `GateDecision` status `needs-human`, signature `worker-unavailable`; (b) preflight returns non-zero with an `independent-audit worker available` failure line; (c) unchanged — status `repairable`, signature `worker-evidence`.
+- User-visible behaviour: an opt-in slice with no configured worker stops the run cleanly for a human at preflight, and (as a backstop) terminally at the gate, instead of consuming repair attempts.
+- Behaviour that must not change: default (non-opt-in) slices are unaffected; opt-in slices with a configured worker still run the full mechanical verification; the `worker_evidence_failure` body is untouched; all other gate signatures and their repairable/terminal classification are unchanged.
+
+### Authorized Surface
+- Files allowed to change:
+  - `skills/master-controller/scripts/mc_lib/gates.py`
+  - `skills/master-controller/scripts/mc_lib/commands.py`
+  - `skills/master-controller/tests/test_gates_verification.py`
+  - `skills/master-controller/tests/test_harness_adapters.py`
+- Functions/classes/components allowed to change: `TERMINAL_SIGNATURES` and the opt-in no-worker branch of `verify_gate` in `gates.py`; `preflight` in `commands.py`; the opt-in-no-worker test in `test_gates_verification.py`; a new preflight test in `test_harness_adapters.py`.
+- Tests allowed or expected to change: `test_gates_verification.py`, `test_harness_adapters.py`.
+
+### Explicit Non-Goals
+- Do not change the `worker_evidence_failure` body or any other gate signature.
+- Do not alter the default-slice (reporting-only) path.
+- Do not add a `start-slice`-level refusal in this slice (preflight fail + gate terminal backstop are sufficient); keep the surface tight.
+
+### Risk Flags
+- Risky surfaces touched: the acceptance-gate signature taxonomy and preflight. Mitigated by an additive terminal signature (no existing signature reclassified) and a preflight check that only fires on the precise opt-in-without-worker condition.
+- Approval needed before implementation: no
+- Independent audit required: no
+
+### Validation Plan
+- Tests to add/update: opt-in-no-worker gate test expects `worker-unavailable`/`needs-human`; new preflight opt-in-no-worker failure test.
+- Commands to run:
+  - `python3 -m unittest test_gates_verification test_harness_adapters` (from the tests dir)
+  - Full MC + ai-orchestrator suites green.
+- Manual checks: confirm a default slice with no worker still passes, an opt-in slice with a genuine worker still passes, and only the opt-in-without-worker case newly stops terminally/at preflight.
+
+### Rollback Path
+- Revert `gates.py`, `commands.py`, `test_gates_verification.py`, and `test_harness_adapters.py` to their pre-slice content (restoring the repairable `worker-evidence` classification and removing the preflight check).
+
+---
+
 ## Final Validation
 
 After Slice 4, before declaring the change complete:

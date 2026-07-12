@@ -4,6 +4,8 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-13
+
 ### Added
 
 - `docs/VISION.md`: the repository's timeless vision — problem, commitments, autonomy ladder, roles, personas, design principles, non-goals.
@@ -12,6 +14,7 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 - `skills/master-controller/AGENTS.md`: maintainer guide with file roles, working rules, test matrix, and change checklists.
 - CI (GitHub Actions): compile checks plus both unit suites, including tmux-backed runtime tests with fake harnesses.
 - `CONTRIBUTING.md`: source-of-truth map, test matrix, and change conventions.
+- `docs/repo-review-vision-rubric-20260712.md`: repository-wide code-review and simplification assessment measured against the vision's eight design principles.
 
 ### Changed
 
@@ -21,6 +24,8 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 - Master Controller SKILL.md: headline verification claim aligned with the documented trust boundary; new "Roles and Topology" section naming all four seats (supervising model, MC deterministic tools, slice orchestrator, worker) and what each may decide.
 - `implementation-plan`: new "Execution Modes" section stating which plan features bind in which mode; Mode B (Master Controller) added to the launcher choices as a pointer; output rule keeping dependency/license files out of unattended authorized surfaces.
 - `ai-orchestrator` SKILL.md: MC-specific requirements consolidated into one "Under Master Controller" section; skill map trimmed to skills that exist in this repository.
+- `ai-orchestrator` worker management split by responsibility: vendor-specific session discovery, activity interpretation, and transcript extraction now live in `worker_sessions.py`, while `worker_jobs.py` retains contract launch, tracked-process lifecycle, and the CLI.
+- `stop-with-evidence` now fails closed when the frozen plan changed mid-run; the plan-independent `stop` command remains available for cancellation.
 - `code-simplifier` rewritten in the repository's contract style: ecosystem-neutral (standards discovered from the target project), no model pin.
 - `master-controller` test suite split from one 4,456-line monolith into seven themed modules plus a shared fixtures module (`mc_test_helpers.py`); test count and coverage unchanged.
 
@@ -31,6 +36,7 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 - `check-plan` closes three more silent-mismatch shapes: authorized entries with unwrapped whitespace (usually a trailing annotation like `README.md (new file)`) are rejected — backtick-wrap the path to annotate it; slice-like headings inside fenced code blocks, and unclosed fences, are rejected as ambiguous; and a plain entry that names an existing directory draws a warning when repo context is available (automatic at `init`, and via `check-plan --repo`, default the current directory). The `Slice Batches` lint now fires at any heading level.
 - CI now declares a read-only token boundary and does not persist checkout credentials; MC's Python 3.13 minimum is documented consistently with the version CI validates.
 - Model-supervised startup failures now retain the underlying exception in run state instead of recording only a generic launch failure.
+- Master Controller's known unattended launch commands are derived from harness profiles, authorized-surface matcher parity is regression-tested across MC and ai-orchestrator, and literal tmux sends terminate option parsing safely.
 
 ## [0.1.0] — 2026-07-10
 

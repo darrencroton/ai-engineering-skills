@@ -33,7 +33,6 @@ from .git_ops import (
     meaningful_status_lines,
     resolve_plan,
     resolve_repo,
-    write_git_diff,
 )
 from .models import GateDecision, McError
 from .observation import (
@@ -68,7 +67,7 @@ from .runtime import (
     worker_delegation_overview,
     worker_jobs_path,
 )
-from .runner import execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
+from .runner import _capture_git_evidence, execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
 from .state import (
     append_operational_event,
     approved_slice_ids,
@@ -673,11 +672,12 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
         artifact_dir,
     )
     capture_worker_runs_summary(artifact_dir)
-    after_head = git_head(repo)
-    after_status = git_status_text(repo)
-    (artifact_dir / f"git-status-after-attempt-{attempt}.txt").write_text(after_status, encoding="utf-8")
-    (artifact_dir / "git-status-after.txt").write_text(after_status, encoding="utf-8")
-    write_git_diff(repo, str(current.get("before_head") or "") or None, after_head, artifact_dir / "git-diff.patch")
+    after_head, after_status = _capture_git_evidence(
+        repo,
+        artifact_dir,
+        attempt,
+        str(current.get("before_head") or "") or None,
+    )
     adapter.request_stop(session_name)
     time.sleep(0.5)
     adapter.force_stop(session_name)

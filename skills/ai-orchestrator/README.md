@@ -22,6 +22,7 @@ ai-reminder               # tmux reminder helper for long-running assistant sess
 scripts/
   worker_contract.py      # semantic policy/request validation and harness command composition
   worker_jobs.py          # validated worker launch/status/activity/cancel/extract helper
+  worker_sessions.py      # Claude/Codex session discovery, activity, and transcript extraction
 references/
   worker-contract.md       # semantic policy/request schema and correction flow
   <harness>.md            # Harness-specific CLI references and commands
@@ -92,6 +93,6 @@ If you use it regularly, add a shell alias so it can be launched from whatever p
 
 1. Add a new row to the model table in `SKILL.md` (or remove the relevant row)
 2. Add `references/<model>.md` following the structure of the existing model files (or remove the relevant file)
-3. Update `scripts/worker_jobs.py` if the model needs custom activity, extraction, or session matching behavior
+3. Update `scripts/worker_sessions.py` for session matching or transcript interpretation, and `scripts/worker_jobs.py` for tracked-process lifecycle or CLI behavior
 4. Update `README.md` and `AGENTS.md` if the supported structure or maintenance expectations changed
 5. Only update `references/templates.md` if the new model requires a new role, prompt shape, or output-extraction pattern

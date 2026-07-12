@@ -393,8 +393,17 @@ class SupervisionRepairTests(McTestCase):
             allow_unattended_default=False,
             harness_model=None,
         )
-        with mock.patch.object(mc_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(io.StringIO()):
+        with (
+            mock.patch.object(mc_commands, "_current_adapter", return_value=fake_adapter),
+            mock.patch.object(
+                mc_commands,
+                "_capture_git_evidence",
+                wraps=mc_commands._capture_git_evidence,
+            ) as capture_git_evidence,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
             self.assertEqual(mc.stop_with_evidence(args), 0)
+        capture_git_evidence.assert_called_once_with(self.repo.resolve(), artifact, 1, before)
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertIsNone(stopped["current_slice"])
         self.assertEqual(stopped["status"], "needs-human")
@@ -402,6 +411,39 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(stopped["slices"][0]["status"], "needs-human")
         self.assertEqual(stopped["slices"][0]["changed_files"], ["README.md"])
         self.assertEqual(stopped["slices"][0]["gate_reason"], "worker contract violation")
+
+    def test_stop_with_evidence_rejects_plan_changed_mid_run(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        before = git(self.repo, "rev-parse", "HEAD")
+        state["status"] = "running"
+        state["current_slice"] = mc.current_slice_state(
+            self.repo.resolve(), plan_slice, artifact, "mc_test_slice-001_a1", 1, mc.utc_now(), before
+        )
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\nEdited mid-run.\n", encoding="utf-8")
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            reason="operator stop",
+            status="needs-human",
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+        )
+
+        with (
+            mock.patch.object(mc_commands, "_current_adapter") as current_adapter,
+            self.assertRaisesRegex(mc.McError, "plan file changed"),
+        ):
+            mc.stop_with_evidence(args)
+        current_adapter.assert_not_called()
 
     def test_finalize_enforces_worker_evidence_from_persisted_state(self):
         # finalize-slice is a separate invocation that may not re-supply

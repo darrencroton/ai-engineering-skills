@@ -161,15 +161,13 @@ class ObservationHintTests(McTestCase):
         self.assertFalse(any(hint["kind"] == "external_side_effect_request" for hint in hints))
 
     def test_full_rendered_orchestrator_prompt_triggers_no_hard_prompt_or_hard_stop_hint(self):
-        # render_orchestrator_prompt embeds the complete ai-orchestrator skill
-        # bundle (SKILL.md plus every linked Markdown resource, including each
-        # model reference file). A doc phrase anywhere in that bundle that
+        # render_orchestrator_prompt embeds the compact MC slice delegation
+        # contract. A doc phrase anywhere in that contract that
         # happens to collide with a HARD_PROMPT_MARKERS substring would make
         # the repair-send guard and _raise_on_hard_stop_hints refuse delivery
-        # on almost every run, since the embedded bundle stays in tmux
+        # on almost every run, since the embedded contract stays in tmux
         # scrollback for most of a slice's life. Regression for the
-        # `copilot.md` "Allow access to all URLs..." / permission_prompt
-        # "allow access" collision found in review.
+        # prompt collision found in review.
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
@@ -183,7 +181,7 @@ class ObservationHintTests(McTestCase):
             "some-model",
             "medium",
         )
-        self.assertIn("BEGIN EMBEDDED SKILL FILE:", prompt)
+        self.assertIn("Master Controller Slice Delegation Contract", prompt)
 
         hard_prompt = mc.TmuxHarnessAdapter.detect_hard_prompt(prompt)
         self.assertFalse(hard_prompt["present"], hard_prompt.get("kinds"))

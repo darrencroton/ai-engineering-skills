@@ -35,6 +35,144 @@ def load_run(run_path: Path) -> dict[str, Any]:
 def write_run(path: Path, state: dict[str, Any]) -> None:
     state["updated_at"] = utc_now()
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (path.parent / "run-report.md").write_text(render_run_report(state), encoding="utf-8")
+
+
+def _residual_lines(findings: Any) -> list[str]:
+    if not isinstance(findings, list) or not findings:
+        return ["- none"]
+    lines: list[str] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        location = f" at `{finding.get('location')}`" if finding.get("location") else ""
+        lines.append(
+            f"- **{finding.get('severity', 'unspecified')} / {finding.get('source', 'other')}**{location}: "
+            f"{finding.get('summary', '')} _(disposition: {finding.get('disposition', 'unspecified')})_"
+        )
+        lines.append(f"  - Rationale: {finding.get('rationale', '')}")
+        lines.append(f"  - Suggested follow-up: {finding.get('suggested_follow_up', '')}")
+    return lines or ["- none"]
+
+
+def render_slice_summary(entry: dict[str, Any]) -> str:
+    validation = entry.get("validation") if isinstance(entry.get("validation"), list) else []
+    validation_lines = [
+        f"- `{item.get('command', '')}`: {item.get('result', 'unknown')} — {item.get('notes', '')}"
+        for item in validation
+        if isinstance(item, dict)
+    ] or ["- none recorded"]
+    commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+    blockers = entry.get("blockers") if isinstance(entry.get("blockers"), list) else []
+    return "\n".join(
+        [
+            f"# {entry.get('slice_id', 'Unknown slice')} — {entry.get('title', '')}",
+            "",
+            f"- Status: {entry.get('status', 'unknown')}",
+            f"- Summary: {entry.get('summary', '') or 'none recorded'}",
+            f"- Gate reason: {entry.get('gate_reason', '')}",
+            f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
+            f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
+            f"- Commit: {commit.get('hash') or 'none'}",
+            "",
+            "## Validation",
+            "",
+            *validation_lines,
+            "",
+            "## Residual Findings / Post-Plan Considerations",
+            "",
+            *_residual_lines(entry.get("residual_findings")),
+            "",
+            "## Blockers",
+            "",
+            *([f"- {blocker}" for blocker in blockers] or ["- none"]),
+            "",
+            "## Next Action",
+            "",
+            f"- {entry.get('next_action') or 'none'}",
+            "",
+        ]
+    )
+
+
+def render_run_report(state: dict[str, Any]) -> str:
+    slices = state.get("slices") if isinstance(state.get("slices"), list) else []
+    all_residuals = [
+        (entry, finding)
+        for entry in slices
+        if isinstance(entry, dict)
+        for finding in (entry.get("residual_findings") if isinstance(entry.get("residual_findings"), list) else [])
+        if isinstance(finding, dict)
+    ]
+    lines = [
+        "# Master Controller Run Report",
+        "",
+        f"- Run: `{state.get('run_id', 'unknown')}`",
+        f"- Status: {state.get('status', 'unknown')}",
+        f"- Branch: `{state.get('branch', 'unknown')}`",
+        f"- Plan: `{state.get('plan_path', '')}`",
+        f"- Completed slices: {len(completed_slice_ids(state))}/{(state.get('plan') or {}).get('slice_count', 0)}",
+        f"- Stop reason: {state.get('stop_reason') or 'none'}",
+        "",
+        "## Slice Results",
+        "",
+    ]
+    if not slices:
+        lines.append("- No slices have run.")
+    for entry in slices:
+        if not isinstance(entry, dict):
+            continue
+        commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+        validation = entry.get("validation") if isinstance(entry.get("validation"), list) else []
+        validation_summary = "; ".join(
+            f"{item.get('command', '')}: {item.get('result', 'unknown')}"
+            for item in validation
+            if isinstance(item, dict)
+        ) or "none recorded"
+        artifact = entry.get("artifact_dir") or "none"
+        lines.extend(
+            [
+                f"### {entry.get('slice_id', 'Unknown')} — {entry.get('title', '')}",
+                "",
+                f"- Status: {entry.get('status', 'unknown')}",
+                f"- Summary: {entry.get('summary', '') or 'none recorded'}",
+                f"- Validation: {validation_summary}",
+                f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
+                f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
+                f"- Commit: {commit.get('hash') or 'none'}",
+                f"- Artifacts: `{artifact}`",
+                f"- Slice summary: `{entry.get('slice_summary') or 'not generated'}`",
+                "",
+            ]
+        )
+    lines.extend(["## Residual Findings / Post-Plan Considerations", ""])
+    if not all_residuals:
+        lines.append("- none")
+    else:
+        for entry, finding in all_residuals:
+            location = f" at `{finding.get('location')}`" if finding.get("location") else ""
+            lines.append(
+                f"- **{entry.get('slice_id')} — {finding.get('severity')} / {finding.get('source')}**{location}: "
+                f"{finding.get('summary')} _(disposition: {finding.get('disposition')})_"
+            )
+            lines.append(f"  - Rationale: {finding.get('rationale')}")
+            lines.append(f"  - Suggested follow-up: {finding.get('suggested_follow_up')}")
+    lines.extend(["", "## Run Blockers and Next Actions", ""])
+    any_actions = False
+    for entry in slices:
+        if not isinstance(entry, dict):
+            continue
+        blockers = entry.get("blockers") if isinstance(entry.get("blockers"), list) else []
+        next_action = str(entry.get("next_action") or "")
+        for blocker in blockers:
+            lines.append(f"- {entry.get('slice_id')}: blocker — {blocker}")
+            any_actions = True
+        if next_action:
+            lines.append(f"- {entry.get('slice_id')}: next — {next_action}")
+            any_actions = True
+    if not any_actions:
+        lines.append("- none")
+    return "\n".join(lines) + "\n"
 
 
 def run_json_path(run_path: Path) -> Path:
@@ -264,12 +402,14 @@ def slice_entry_from_gate(
         # instead of guessing HEAD^ (which misses a slice's earlier commits).
         "before_head": before_head,
         "changed_files": list(gate.actual_changed_files or tuple(result.get("changed_files") or ())),
+        "summary": result.get("summary", ""),
         "validation": result.get("validation", []),
         "drift_audit": result.get("drift_audit", {"verdict": None, "path": ""}),
         "code_review": result.get("code_review", {"verdict": None, "path": ""}),
         "commit": result.get("commit", {"requested": False, "created": False, "hash": None}),
         "next_action": result.get("next_action", ""),
         "blockers": result.get("blockers", []),
+        "residual_findings": copy.deepcopy(result.get("residual_findings", [])),
         "gate_reason": gate.reason,
         # Preserved (not just read) so reconcile can recover the worker-tool
         # requirement for this attempt without a fresh --worker-tools flag.
@@ -281,6 +421,10 @@ def slice_entry_from_gate(
         entry["repair"] = dict(repair)
     if worker_policy is not None:
         entry["worker_policy"] = copy.deepcopy(worker_policy)
+    slice_summary_path = slice_artifact_dir / "slice-summary.md"
+    slice_summary_path.parent.mkdir(parents=True, exist_ok=True)
+    entry["slice_summary"] = relative_artifact_path(repo, slice_summary_path)
+    slice_summary_path.write_text(render_slice_summary(entry), encoding="utf-8")
     return entry
 
 

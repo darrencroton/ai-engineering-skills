@@ -19,7 +19,7 @@ Runtime requirement: Python 3.13 or newer. MC uses Python 3.13's segment-aware `
 - Reporting the next eligible slice in `run-next --dry-run`.
 - Running one eligible slice with `run-next`.
 - Running eligible slices sequentially with `run --scope remaining`.
-- Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, and `orchestrator-result.json` artifacts.
+- Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, structured residual findings, per-slice summaries, and the aggregate run report.
 - Writing `worker-policy.json`, embedding the ai-orchestrator contract into the slice prompt, and verifying validated worker-launch evidence without composing worker harness commands itself.
 - Recording supervision state and append-only operational event logs for model-supervised runs.
 - Verifying orchestrator claims against git evidence, classifying every non-pass gate outcome with a stable failure signature as repairable or terminal.
@@ -90,6 +90,8 @@ Check state (`status` also warns when an active run's tmux session has vanished 
 python3 skills/master-controller/scripts/mc.py status --repo /path/to/repo
 python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 ```
+
+Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, and the structured residual findings that Mode A would preserve through its slice summary and handoff, while `run.json` remains Mode B's continuation authority.
 
 List harness and worker capability profiles:
 
@@ -336,6 +338,7 @@ Artifact sensitivity, for cleanup and sharing decisions (per-slice under `.ai-mc
 | `git-diff.patch` | The complete code change |
 | `worker-runs/` | Worker prompts and outputs, including code and embedded instructions |
 | `validation-summary.md`, `drift-audit.md`, `code-review.md` | Code excerpts and findings |
+| `slice-summary.md`, `../run-report.md` | Gate outcomes, commit hashes, blockers, next actions, and residual post-plan considerations |
 | `prompt.md`, `orchestrator-result.json`, `git-status-*.txt` | Plan text, file paths, verdicts, commit hashes |
 | `tool-homes/`, `codex-home/`, `copilot-home/` | **Seeded worker credentials** — marked sensitive; move them out of a finished run with `archive-sensitive` |
 | `../operational-events.jsonl` (per run) | Operational events with pane-excerpt evidence fields |
@@ -411,7 +414,8 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
     "code_review": {"verdict": "PASS", "path": "code-review.md"},
     "commit": {"requested": True, "created": True, "hash": commit_hash},
     "next_action": "",
-    "blockers": []
+    "blockers": [],
+    "residual_findings": []
 }), encoding="utf-8")
 time.sleep(5)
 PY
@@ -472,7 +476,8 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
     "code_review": {"verdict": "PASS", "path": "code-review.md"},
     "commit": {"requested": True, "created": True, "hash": commit_hash},
     "next_action": "",
-    "blockers": []
+    "blockers": [],
+    "residual_findings": []
 }), encoding="utf-8")
 time.sleep(2)
 PY

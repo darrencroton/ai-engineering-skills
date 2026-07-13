@@ -149,6 +149,7 @@ class WorkerContractTests(unittest.TestCase):
 
     def test_launch_records_validated_contract_and_artifacts(self):
         worker_jobs = load_worker_jobs()
+        self.request["required_skills"] = ["drift-audit"]
         policy_path = self.repo / "worker-policy.json"
         request_path = self.repo / "worker-request.json"
         policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
@@ -165,6 +166,7 @@ class WorkerContractTests(unittest.TestCase):
         launch_contract = start.call_args.kwargs["launch_contract"]
         self.assertEqual(launch_contract["status"], "pass")
         self.assertEqual(launch_contract["access"], "read-only")
+        self.assertEqual(launch_contract["required_skills"], ["drift-audit"])
         self.assertEqual(launch_contract["cwd"], str(self.repo.resolve()))
         self.assertEqual(start.call_args.kwargs["cwd"], self.repo.resolve())
         self.assertTrue((self.run_dir / f"{self.request['label']}-launch.json").is_file())

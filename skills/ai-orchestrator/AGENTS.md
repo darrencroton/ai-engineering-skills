@@ -9,6 +9,7 @@ This repo defines the `ai-orchestrator` skill. It teaches an AI coding agent how
 - `README.md`: human-facing overview and short maintenance notes
 - `SKILL.md`: source of truth for generic orchestration workflow, role selection, monitoring cadence, and helper usage
 - `references/worker-contract.md`: semantic policy/request schema, launch flow, and rejection behavior
+- `references/mc-slice-contract.md`: compact single source embedded into MC slice prompts; keep it limited to MC delegation semantics and free of harness-specific flags
 - `references/templates.md`: semantic request shapes only
 - `references/claude.md`, `references/codex.md`, `references/copilot.md`, `references/opencode.md`: model-specific CLI references; keep the same structure across senior-worker model files and only change the model-specific details
 - `scripts/worker_contract.py`: validates semantic policy/request artifacts, embeds complete required-skill bundles, and composes harness commands

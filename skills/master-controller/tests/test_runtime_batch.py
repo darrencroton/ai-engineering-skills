@@ -46,6 +46,7 @@ class RuntimeBatchTests(McTestCase):
                 "commit": {"requested": True, "created": True, "hash": "0" * 40},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
                 "gate_reason": "reported commit is not the current HEAD",
             }
         )
@@ -103,8 +104,9 @@ class RuntimeBatchTests(McTestCase):
             set(state["slices"][0]),
             {
                 "slice_id", "title", "status", "started_at", "completed_at", "artifact_dir",
-                "before_head", "changed_files", "validation", "drift_audit", "code_review",
+                "before_head", "changed_files", "summary", "validation", "drift_audit", "code_review",
                 "commit", "next_action", "blockers", "gate_reason", "worker_tools", "worker_policy",
+                "residual_findings", "slice_summary",
             },
         )
 

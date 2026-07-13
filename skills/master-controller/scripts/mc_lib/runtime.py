@@ -541,7 +541,12 @@ def worker_policy_snapshot(policy_path: Path) -> dict[str, Any]:
 
 
 def ai_orchestrator_embedded_instructions() -> str:
-    return str(worker_jobs_module().compile_skill_bundle("ai-orchestrator"))
+    # A slice needs the MC-specific semantic delegation contract, not the full
+    # general-purpose ai-orchestrator bundle and every linked harness reference.
+    # The validated launcher owns harness flags, while this compact reference is
+    # the single source for the instructions a skill-less slice harness needs.
+    path = skill_root().parent / "ai-orchestrator" / "references" / "mc-slice-contract.md"
+    return path.read_text(encoding="utf-8").rstrip()
 
 
 def slice_environment(
@@ -792,6 +797,13 @@ def render_repair_prompt(
         "gate_signature": gate.signature,
         "category_stanza": _repair_stanza(plan_slice, slice_artifact_dir, gate, before_head),
         "authorized_files": authorized,
+        "delegation_posture": (
+            "This slice is opt-in (`Independent audit required: yes`): use separate validated read-only worker requests for "
+            "`drift-audit` and `code-review`, wait for drift `PASS` before launching review, and retain both successful contracts."
+            if plan_slice.independent_audit_required
+            else "This slice uses the default posture: independent delegation remains preferred when a worker is available, "
+            "but a local audit is accepted. In either case, drift must return `PASS` before code review starts."
+        ),
         "slice_artifact_dir": str(slice_artifact_dir),
         "result_schema_path": str(result_schema_path()),
     }

@@ -86,6 +86,7 @@ class GateVerificationTests(McTestCase):
                 "commit": {"requested": True, "created": True, "hash": after},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             },
         )
         state = self.init_run()
@@ -119,6 +120,7 @@ class GateVerificationTests(McTestCase):
                 "commit": {"requested": True, "created": True, "hash": after},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             },
         )
         state = self.init_run()
@@ -357,6 +359,71 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "pass")
 
+    def test_gate_requires_explicit_residual_findings_ledger(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        result_path = artifact / "orchestrator-result.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        del result["residual_findings"]
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+        state = self.init_run()
+
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "result-malformed")
+        self.assertIn("residual_findings is missing", decision.reason)
+
+    def test_slice_and_run_reports_propagate_residual_findings(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        finding = {
+            "source": "code-review",
+            "severity": "info",
+            "location": "legacy.py:7",
+            "summary": "Legacy helper could be clarified later.",
+            "disposition": "pre-existing",
+            "rationale": "The slice neither touches nor depends on the helper.",
+            "suggested_follow_up": "Consider a separate cleanup plan.",
+        }
+        self.write_gate_result(
+            artifact,
+            changed_files=["README.md"],
+            commit_hash=after,
+            residual_findings=[finding],
+        )
+        state = self.init_run()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        decision = mc.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, mc.git_status_text(self.repo)
+        )
+        self.assertEqual(decision.status, "pass")
+
+        entry = mc.slice_entry_from_gate(self.repo, plan_slice, artifact, mc.utc_now(), decision, before)
+        self.assertEqual(entry["residual_findings"], [finding])
+        slice_summary = artifact / "slice-summary.md"
+        self.assertIn("Legacy helper could be clarified later", slice_summary.read_text(encoding="utf-8"))
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        state["slices"] = [entry]
+        state["status"] = "complete"
+        mc.write_run(run_dir / "run.json", state)
+        report = (run_dir / "run-report.md").read_text(encoding="utf-8")
+        self.assertIn("Legacy helper could be clarified later", report)
+        self.assertIn("Consider a separate cleanup plan", report)
+
     def test_gate_opt_in_without_available_worker_stops_terminally(self):
         # An opt-in slice with no worker made available is an operator/plan
         # config mismatch the orchestrator cannot repair, so it fails closed
@@ -453,6 +520,37 @@ class GateVerificationTests(McTestCase):
         )
 
         self.assertEqual(decision.status, "pass")
+
+    def test_gate_opt_in_requires_distinct_drift_and_code_review_contracts(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Drift audit only.\n", encoding="utf-8")
+        self.write_validated_worker_run(artifact)
+        worker_run = artifact / "worker-runs" / "workers-1"
+        manifest_path = worker_run / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        review_label = next(label for label in manifest["workers"] if "code-review" in label)
+        del manifest["workers"][review_label]
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        (worker_run / f"{review_label}-status.json").unlink()
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("code-review", decision.reason)
+        self.assertIn("separate validated launch", decision.reason)
 
     def test_gate_rejects_hand_authored_manifest_with_no_real_launch_footprint(self):
         # An orchestrator has full write access to its own worker-runs tree
@@ -798,6 +896,7 @@ class GateVerificationTests(McTestCase):
                 "commit": {"requested": True, "created": True, "hash": after},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             },
         )
         state = self.init_run()
@@ -824,6 +923,7 @@ class GateVerificationTests(McTestCase):
                 "commit": {"requested": True, "created": True, "hash": after},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             },
         )
         state = self.init_run()

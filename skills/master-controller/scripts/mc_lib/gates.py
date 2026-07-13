@@ -212,6 +212,9 @@ def worker_evidence_failure(
     matched_tools: set[str] = set()
     contracted_tools: set[str] = set()
     successful_tools: set[str] = set()
+    required_audits = {"drift-audit", "code-review"}
+    contracted_audits: set[str] = set()
+    successful_audits: set[str] = set()
     for run in runs:
         if not isinstance(run, dict):
             continue
@@ -219,6 +222,7 @@ def worker_evidence_failure(
             any_worker = True
         manifest_workers = object_field(run.get("manifest") or {}, "workers") if isinstance(run.get("manifest"), dict) else {}
         tool_by_label: dict[str, str] = {}
+        audit_by_label: dict[str, str] = {}
         for label, entry in (manifest_workers.items() if isinstance(manifest_workers, dict) else ()):
             if not isinstance(entry, dict) or str(entry.get("tool", "")).lower() not in required:
                 continue
@@ -273,6 +277,16 @@ def worker_evidence_failure(
                 continue
             contracted_tools.add(contract_tool)
             tool_by_label[str(label)] = contract_tool
+            contract_skills = contract.get("required_skills")
+            if (
+                isinstance(contract_skills, list)
+                and len(contract_skills) == 1
+                and isinstance(contract_skills[0], str)
+                and contract_skills[0] in required_audits
+            ):
+                audit = contract_skills[0]
+                contracted_audits.add(audit)
+                audit_by_label[str(label)] = audit
         # Launch alone is not enough: a required worker that crashed on start
         # (or is still running at finalize) proves nothing was delegated. The
         # status payloads come from worker_jobs.py's own *-status.json files,
@@ -283,7 +297,10 @@ def worker_evidence_failure(
             if str(status.get("label", "")) not in tool_by_label:
                 continue
             if str(status.get("state", "")).lower() == "completed" and status.get("returncode") == 0:
-                successful_tools.add(tool_by_label[str(status.get("label", ""))])
+                label = str(status.get("label", ""))
+                successful_tools.add(tool_by_label[label])
+                if label in audit_by_label:
+                    successful_audits.add(audit_by_label[label])
     if not any_worker:
         return (
             f"required worker tool(s) ({tools_label}) were never launched: a worker_jobs.py run directory was "
@@ -312,6 +329,21 @@ def worker_evidence_failure(
             f"required worker tool(s) never completed successfully: {', '.join(missing_success)}. Matching worker run(s) "
             "did not finish with state 'completed' and returncode 0 — crashed, cancelled, or running workers do not satisfy the gate"
         )
+    missing_audit_contracts = sorted(required_audits - contracted_audits)
+    if missing_audit_contracts:
+        return (
+            "opt-in independent audit is missing separate validated launch contract(s) for: "
+            + ", ".join(missing_audit_contracts)
+            + ". Launch one read-only request with required_skills ['drift-audit'], wait for and read its PASS verdict, "
+            "then launch a separate read-only request with required_skills ['code-review']; one generic worker run does not prove both audits"
+        )
+    missing_audit_success = sorted(required_audits - successful_audits)
+    if missing_audit_success:
+        return (
+            "opt-in independent audit launch(es) did not complete successfully for: "
+            + ", ".join(missing_audit_success)
+            + ". Each distinct audit worker must finish with state 'completed' and returncode 0"
+        )
     return None
 
 
@@ -323,6 +355,41 @@ def _validation_status(validation: Any) -> str | None:
         return "validation entries are malformed (expected objects)"
     if any(str(entry.get("result", "")).lower() != "pass" for entry in validation):
         return "validation did not pass"
+    return None
+
+
+_RESIDUAL_SOURCES = {"implementation", "validation", "drift-audit", "code-review", "worker", "other"}
+_RESIDUAL_DISPOSITIONS = {
+    "deferred-inconsequential",
+    "pre-existing",
+    "unrelated-out-of-scope",
+    "needs-follow-up",
+}
+
+
+def _residual_findings_status(findings: Any) -> str | None:
+    """Validate the reporting-only post-plan consideration ledger."""
+    if not isinstance(findings, list):
+        return "residual_findings is missing or malformed (expected a list, using [] when none)"
+    required_fields = ("source", "severity", "summary", "disposition", "rationale", "suggested_follow_up")
+    for index, finding in enumerate(findings):
+        if not isinstance(finding, dict):
+            return f"residual_findings[{index}] is malformed (expected an object)"
+        for field in required_fields:
+            if not isinstance(finding.get(field), str) or not str(finding[field]).strip():
+                return f"residual_findings[{index}].{field} must be a non-empty string"
+        if finding["source"] not in _RESIDUAL_SOURCES:
+            return (
+                f"residual_findings[{index}].source is invalid: {finding['source']!r}; "
+                f"expected one of {', '.join(sorted(_RESIDUAL_SOURCES))}"
+            )
+        if finding["disposition"] not in _RESIDUAL_DISPOSITIONS:
+            return (
+                f"residual_findings[{index}].disposition is invalid: {finding['disposition']!r}; "
+                f"expected one of {', '.join(sorted(_RESIDUAL_DISPOSITIONS))}"
+            )
+        if "location" in finding and not isinstance(finding["location"], str):
+            return f"residual_findings[{index}].location must be a string when present"
     return None
 
 
@@ -440,6 +507,10 @@ def verify_gate(
         return gate_failure("review", f"code review verdict is not PASS: {review_verdict or 'missing'}", result, changed_evidence)
     if not artifact_exists(repo, slice_artifact_dir, result, "code_review", "code-review.md"):
         return gate_failure("review", "code review artifact is missing", result, changed_evidence)
+
+    residual_failure = _residual_findings_status(result.get("residual_findings"))
+    if residual_failure:
+        return gate_failure("result-malformed", residual_failure, result, changed_evidence)
 
     # Independence (delegating drift-audit and code-review to a separate model)
     # is a degradable *preference* by default: a slice audited locally by a

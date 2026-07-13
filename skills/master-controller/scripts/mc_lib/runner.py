@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 import uuid
 from pathlib import Path
@@ -472,16 +473,17 @@ def finalize_model_supervised_slice(
         },
     )
 
+    repair_prompt_text = render_repair_prompt(plan_slice, slice_artifact_dir, gate, before_head=before_head)
+    repair_prompt_path = slice_artifact_dir / f"repair-prompt-repair-{round_number}.md"
+    repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
+    (slice_artifact_dir / "repair-prompt.md").write_text(repair_prompt_text, encoding="utf-8")
+
     if mode == "in-session":
         # Keep the live session and the populated current_slice (so
         # start-slice still refuses a concurrent second attempt). The MC
         # model delivers send_text via the send command — which the
         # `resuming` status accepts — waits for a fresh result, and
         # finalizes again.
-        repair_prompt_text = render_repair_prompt(plan_slice, slice_artifact_dir, gate, before_head=before_head)
-        repair_prompt_path = slice_artifact_dir / f"repair-prompt-repair-{round_number}.md"
-        repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
-        (slice_artifact_dir / "repair-prompt.md").write_text(repair_prompt_text, encoding="utf-8")
         current["repair"] = dict(repair)
         state["status"] = "resuming"
         state["stop_reason"] = None
@@ -499,7 +501,8 @@ def finalize_model_supervised_slice(
         }
 
     # relaunch / fresh-session: the old session is finished with; launch a
-    # new session for the same slice with the original frozen prompt.
+    # new session for the same slice with the original frozen prompt plus the
+    # targeted repair and the cumulative residual ledger from archived rounds.
     # start-slice cannot be used here — it refuses while current_slice is
     # populated, and clearing current_slice would drop the persisted repair
     # state the circuit breaker depends on.
@@ -520,6 +523,11 @@ def finalize_model_supervised_slice(
             render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, worker_tools),
             encoding="utf-8",
         )
+    fresh_prompt_path = slice_artifact_dir / f"fresh-session-prompt-repair-{round_number}.md"
+    fresh_prompt_path.write_text(
+        _fresh_session_repair_prompt(prompt_path, repair_prompt_text, slice_artifact_dir, round_number),
+        encoding="utf-8",
+    )
     # Persist the new generation/session BEFORE launching it: a crash after
     # the launch then finds run.json already pointing at the live session
     # (fully recoverable), and a crash before it leaves a recorded session
@@ -540,7 +548,7 @@ def finalize_model_supervised_slice(
     write_run(run_json, state)
     try:
         relaunch_adapter.start(repo, new_session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
-        relaunch_adapter.send_prompt(new_session_name, prompt_path)
+        relaunch_adapter.send_prompt(new_session_name, fresh_prompt_path)
     except Exception as exc:
         _capture_failure_evidence(
             relaunch_adapter,
@@ -569,6 +577,7 @@ def finalize_model_supervised_slice(
         "repair": dict(repair),
         "mode": mode,
         "tmux_session": new_session_name,
+        "repair_prompt_path": relative_artifact_path(repo, fresh_prompt_path),
         "next_action": "wait for a fresh result from the relaunched session, then finalize again",
     }
 
@@ -609,6 +618,50 @@ def _repair_delivery_message(plan_slice: PlanSlice, repair_prompt_path: Path) ->
         f"MC verification did NOT pass for {plan_slice.slice_id}; the slice is NOT accepted. "
         f"Read and follow the repair instructions in {repair_prompt_path} now, fix only the gap it names, "
         "re-run the failed gate, and rewrite orchestrator-result.json for this same slice."
+    )
+
+
+def _fresh_session_repair_prompt(
+    original_prompt_path: Path,
+    repair_prompt_text: str,
+    slice_artifact_dir: Path,
+    round_number: int,
+) -> str:
+    """Carry repair context and every archived residual into a new session."""
+    residual_findings: list[dict[str, Any]] = []
+    archived_results: list[str] = []
+    for archived_path in sorted(slice_artifact_dir.glob("orchestrator-result-repair-*.json")):
+        archived_results.append(str(archived_path))
+        try:
+            archived = json.loads(archived_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        findings = archived.get("residual_findings") if isinstance(archived, dict) else None
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            if isinstance(finding, dict) and finding not in residual_findings:
+                residual_findings.append(finding)
+
+    original_prompt = original_prompt_path.read_text(encoding="utf-8")
+    archives = "\n".join(f"- `{path}`" for path in archived_results) or "- none"
+    ledger = json.dumps(residual_findings, indent=2, sort_keys=True)
+    return (
+        original_prompt.rstrip()
+        + "\n\n---\n\n"
+        + f"# Fresh-Session Repair Continuation (Round {round_number})\n\n"
+        + "This is a continuation of the same frozen slice, not a new implementation attempt. Follow the targeted repair "
+        + "instructions below. The prior sessions' archived results are listed for auditability:\n\n"
+        + archives
+        + "\n\nMC recovered the following cumulative `residual_findings` ledger from those archived results:\n\n"
+        + "```json\n"
+        + ledger
+        + "\n```\n\n"
+        + "Your next `orchestrator-result.json` must retain every item in this recovered ledger, merging any newly discovered "
+        + "post-plan considerations and avoiding exact duplicates. Do not erase an item merely because this repair round is clean, "
+        + "and do not move a material slice-caused defect into the ledger.\n\n"
+        + repair_prompt_text.rstrip()
+        + "\n"
     )
 
 

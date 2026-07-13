@@ -68,6 +68,7 @@ Every review must do all of the following:
 - Report confirmed defects and clear risks as findings.
 - Put ambiguous concerns under `Open Questions / Assumptions`, not as hard findings.
 - Do not report untouched pre-existing issues unless the current change interacts with them.
+- When a plan-based workflow asks for residual or post-plan considerations, keep them separate from findings and the verdict. This category is only for genuinely pre-existing observations that do not interact with the change, unrelated out-of-scope opportunities, or inconsequential/speculative notes worth later consideration. A material defect introduced by the change remains a finding even when fixing it would require files outside the frozen contract; do not launder it into a post-plan consideration.
 
 ### 7. Validate review depth
 Before finishing, ask:

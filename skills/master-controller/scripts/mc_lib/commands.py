@@ -77,6 +77,7 @@ from .state import (
     operational_events_file,
     previous_completed_head,
     relative_artifact_path,
+    render_run_report,
     repair_state,
     resolve_run_dir,
     resolve_run_path,
@@ -216,6 +217,7 @@ def init_run(args: argparse.Namespace) -> int:
                 "commit": {"requested": False, "created": False, "hash": None},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
                 "gate_reason": "operator attested completion at init (--assume-complete); not verified by MC gates",
                 "worker_tools": [],
             }
@@ -375,8 +377,11 @@ def status(args: argparse.Namespace) -> int:
 
 def summarize(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
-    state = load_run(resolve_run_path(repo, args.run))
+    run_dir = resolve_run_dir(repo, args.run)
+    state = load_run(run_dir)
     completed = completed_slice_ids(state)
+    report_path = run_dir / "run-report.md"
+    report_path.write_text(render_run_report(state), encoding="utf-8")
     print(f"MC run {state['run_id']} summary")
     print(f"Status: {state['status']}")
     supervision = state.get("supervision", {})
@@ -400,6 +405,17 @@ def summarize(args: argparse.Namespace) -> int:
     else:
         for entry in state["slices"]:
             print(f"- {entry.get('slice_id', 'unknown')}: {entry.get('status', 'unknown')}")
+            residuals = entry.get("residual_findings") if isinstance(entry.get("residual_findings"), list) else []
+            if residuals:
+                print(f"  residual findings / post-plan considerations: {len(residuals)}")
+                for finding in residuals:
+                    if not isinstance(finding, dict):
+                        continue
+                    location = f" at {finding.get('location')}" if finding.get("location") else ""
+                    print(
+                        f"    - {finding.get('severity', 'unspecified')} {finding.get('source', 'other')}{location}: "
+                        f"{finding.get('summary', '')} [{finding.get('disposition', 'unspecified')}]"
+                    )
             artifact_dir = entry.get("artifact_dir")
             if not artifact_dir:
                 continue
@@ -424,6 +440,7 @@ def summarize(args: argparse.Namespace) -> int:
                     f"returncode={worker['returncode']} contracted_marker={worker['contracted_marker']}{tail}"
                 )
     print(f"Completed: {len(completed)}/{state['plan']['slice_count']}")
+    print(f"Run report: {relative_artifact_path(repo, report_path)}")
     return 0
 
 

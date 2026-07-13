@@ -657,6 +657,11 @@ def command_launch(args: argparse.Namespace) -> int:
         "effort": contract["effort"],
         "role": contract["role"],
         "access": contract["access"],
+        # Preserve the validated semantic purpose of the launch. MC uses this
+        # to distinguish independent drift-audit evidence from code-review
+        # evidence instead of accepting any successful worker process as proof
+        # that both gates were delegated.
+        "required_skills": list(contract["required_skills"]),
         "repo_path": contract["repo_path"],
         "cwd": contract["repo_path"],
     }

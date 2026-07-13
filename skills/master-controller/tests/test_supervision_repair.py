@@ -323,6 +323,52 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(repair_events[0]["signature"], "validation")
         self.assertEqual(repair_events[0]["round"], 1)
 
+    def test_fresh_session_repair_prompt_preserves_archived_residual_findings(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = self._model_supervised_current_slice(
+            state,
+            run_dir,
+            repair={"round": 1, "last_signature": "validation", "signature_streak": 1, "session_generation": 1},
+        )
+        finding = {
+            "source": "validation",
+            "severity": "low",
+            "summary": "A pre-existing warning should remain visible",
+            "disposition": "pre-existing",
+            "rationale": "The warning predates this slice and does not affect its acceptance criteria.",
+            "suggested_follow_up": "Review the warning after the plan completes.",
+        }
+        self._write_failing_validation_result(artifact)
+        result_path = artifact / "orchestrator-result.json"
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["residual_findings"] = [finding]
+        result_path.write_text(json.dumps(result), encoding="utf-8")
+
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        output = io.StringIO()
+        with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(mc.finalize_slice(self._finalize_args()), 0)
+
+        finalized = json.loads(output.getvalue())
+        self.assertEqual(finalized["mode"], "fresh-session")
+        fresh_prompt = artifact / "fresh-session-prompt-repair-2.md"
+        self.assertEqual(finalized["repair_prompt_path"], str(fresh_prompt.relative_to(self.repo.resolve())))
+        prompt_text = fresh_prompt.read_text(encoding="utf-8")
+        self.assertIn("orchestrator-result-repair-2.json", prompt_text)
+        self.assertIn(finding["summary"], prompt_text)
+        self.assertIn("must retain every item", prompt_text)
+        fake_adapter.send_prompt.assert_called_once_with(finalized["tmux_session"], fresh_prompt)
+
     def test_start_slice_persists_worker_tools_for_later_finalize(self):
         self.prepare_committed_repo()
         state = self.init_run()
@@ -351,7 +397,7 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(policy["slice_id"], "Slice 1")
         self.assertEqual(policy["plan_sha256"], state["plan"]["sha256"])
         prompt = (run_dir / "slices" / "slice-001" / "prompt.md").read_text(encoding="utf-8")
-        self.assertIn("name: ai-orchestrator", prompt)
+        self.assertIn("Master Controller Slice Delegation Contract", prompt)
         self.assertIn("worker_jobs.py launch", prompt)
 
     def test_worker_policy_restricts_explicit_read_only_plan_requirement(self):

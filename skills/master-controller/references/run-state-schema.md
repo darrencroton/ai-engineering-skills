@@ -272,6 +272,7 @@ Runtime slices append entries to `slices`:
   "artifact_dir": ".ai-mc/runs/20260704T013000Z/slices/slice-001",
   "before_head": "<commit HEAD immediately before this slice ran, or null>",
   "changed_files": ["<repo-relative path string, not an object>"],
+  "summary": "Concise slice outcome",
   "validation": [],
   "drift_audit": {
     "verdict": "PASS",
@@ -288,6 +289,8 @@ Runtime slices append entries to `slices`:
   },
   "next_action": "",
   "blockers": [],
+  "residual_findings": [],
+  "slice_summary": ".ai-mc/runs/20260704T013000Z/slices/slice-001/slice-summary.md",
   "gate_reason": "all gates passed",
   "worker_tools": ["<tool names required for this slice attempt, empty if none>"],
   "worker_policy": {
@@ -307,7 +310,7 @@ Runtime slices append entries to `slices`:
 
 Completed statuses for slice selection are `pass`, `committed`, `complete`, and `assumed-complete` (the last written only by `init --assume-complete` as an operator attestation). Any other status is treated as not completed unless a future policy explicitly says otherwise.
 
-Each slice artifact directory contains the rendered `prompt.md`, authoritative `worker-policy.json`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe`, `wait`, or batch polling has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Worker run directories preserve the semantic request, copied policy, complete embedded skill prompt, normalized launch contract, resolved argv, enforced repository working directory, process status, stdout, stderr, and actionable rejection feedback when validation fails. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+Each slice artifact directory contains the rendered `prompt.md`, authoritative `worker-policy.json`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe`, `wait`, or batch polling has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, MC-generated `slice-summary.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. Repair rounds add `repair-prompt-repair-<n>.md` and archived `orchestrator-result-repair-<n>.json` evidence; a relaunched harness receives `fresh-session-prompt-repair-<n>.md`, which combines the frozen prompt, targeted repair, and the cumulative residual-findings ledger recovered from archived results. The run directory also contains an MC-generated `run-report.md`, refreshed with every run-state write, that aggregates slice gates, commits, blockers, next actions, and residual findings for both partial and complete runs. Worker run directories preserve the semantic request, copied policy, complete embedded skill prompt, normalized launch contract, resolved argv, enforced repository working directory, process status, stdout, stderr, and actionable rejection feedback when validation fails. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
 Repair rounds add per-round artifacts keyed on the round number, so evidence from rounds sharing one session is never overwritten: `orchestrator-result-repair-<round>.json` (the failing result, archived before deletion so the re-poll waits for a genuinely new result), `pane-capture-repair-<round>.txt`, `git-status-repair-<round>.txt`, `repair-prompt-repair-<round>.md` (plus `repair-prompt.md` as the latest), `pane-capture-repair-refused-<round>.txt` when repair delivery was refused by a hard prompt on screen, and one `"kind": "repair"` operational event per round recording the signature and delivery mode (`in-session`, `fresh-session`, or `relaunch`).
 
@@ -362,9 +365,22 @@ Every orchestrator session must write this file in the slice artifact directory:
     "hash": null
   },
   "next_action": "",
-  "blockers": []
+  "blockers": [],
+  "residual_findings": [
+    {
+      "source": "code-review",
+      "severity": "info",
+      "location": "optional/path.py:12",
+      "summary": "A concise post-plan consideration.",
+      "disposition": "pre-existing",
+      "rationale": "Why this does not block or belong to the current slice.",
+      "suggested_follow_up": "What a later human or plan should consider."
+    }
+  ]
 }
 ```
+
+`residual_findings` is required and must be `[]` when empty. Allowed sources are `implementation`, `validation`, `drift-audit`, `code-review`, `worker`, and `other`. Allowed dispositions are `deferred-inconsequential`, `pre-existing`, `unrelated-out-of-scope`, and `needs-follow-up`. It transports genuinely non-blocking post-plan considerations; it must not be used to convert a material defect introduced by the slice into a passing result merely because fixing it would require an out-of-contract change.
 
 Allowed orchestrator `status` values:
 
@@ -376,6 +392,6 @@ Allowed orchestrator `status` values:
 
 MC verifies this result against git state, artifacts, validation output, drift audit, code review, and commit state before accepting a slice.
 
-Worker delegation is a degradable preference by default, not an acceptance gate: making a worker available (`--worker-tools`) lets the orchestrator delegate the drift-audit and code-review for an independent second opinion, but a slice audited locally by a single model is a valid `pass`, and MC only *reports* delegation (see `summarize`) rather than gating on it. A slice opts in to mechanical enforcement with `Independent audit required: yes` in its Risk Flags. Only for such an opt-in slice does MC additionally require mechanical evidence that every available tool launched under the current slice's deterministic policy and finished before it will accept a `pass`: a non-empty `worker-evidence.md`, plus `worker-runs-summary.json` containing one or more manifests whose passing `launch_contract` records collectively match every available tool, the exact stored and on-disk policy digest/content, slice/plan identity, required model/effort, permitted role/access, repository, and enforced working directory, backed by a real positive subprocess `pid` and real `outfile`/`errfile` present inside `worker_artifact_root`, with each corresponding status `completed` and returncode 0. On an opt-in slice, a raw harness invocation, matching executable without a validated contract, mutated policy, wrong repository/CWD, crashed/cancelled/running worker, missing tool, no worker made available at all, hand-authored manifest/status pair with no real launch footprint, or prose-only claim fails the repairable `worker-evidence` gate; on a default (non-opt-in) slice, none of these block acceptance. Rejection feedback names invalid request fields and corrections so the live orchestrator can self-correct without redoing accepted work. Available worker tools and the policy snapshot remain persisted in `current_slice` and each terminal slice entry for out-of-process finalization and reconciliation.
+Worker delegation is a degradable preference by default, not an acceptance gate: making a worker available (`--worker-tools`) lets the orchestrator delegate the drift-audit and code-review for an independent second opinion, but a slice audited locally by a single model is a valid `pass`, and MC only *reports* delegation (see `summarize`) rather than gating on it. A slice opts in to mechanical enforcement with `Independent audit required: yes` in its Risk Flags. Only for such an opt-in slice does MC additionally require mechanical evidence that every available tool launched under the current slice's deterministic policy and finished before it will accept a `pass`, and that separate successful launch contracts carry exactly `required_skills: ["drift-audit"]` and `required_skills: ["code-review"]`: a non-empty `worker-evidence.md`, plus `worker-runs-summary.json` containing one or more manifests whose passing `launch_contract` records collectively match every available tool, both required audits, the exact stored and on-disk policy digest/content, slice/plan identity, required model/effort, permitted role/access, repository, and enforced working directory, backed by a real positive subprocess `pid` and real `outfile`/`errfile` present inside `worker_artifact_root`, with each corresponding status `completed` and returncode 0. On an opt-in slice, a raw harness invocation, one generic worker launch, matching executable without a validated contract, mutated policy, wrong repository/CWD, crashed/cancelled/running worker, missing tool or audit purpose, no worker made available at all, hand-authored manifest/status pair with no real launch footprint, or prose-only claim fails the repairable `worker-evidence` gate; on a default (non-opt-in) slice, none of these block acceptance. Rejection feedback names invalid request fields and corrections so the live orchestrator can self-correct without redoing accepted work. Available worker tools and the policy snapshot remain persisted in `current_slice` and each terminal slice entry for out-of-process finalization and reconciliation.
 
 When all authorization, validation, drift, review, changed-file, ancestry, and clean-worktree evidence passes but `commit.hash` is wrong or abbreviated, MC may reconcile that evidence field to the proven current `HEAD`, write `mc-reconciliation.json` / `mc-reconciliation.md`, update `orchestrator-result.json`, and accept the slice. This reconciliation is limited to commit-hash evidence; it must not mask unauthorized files, missing validation, failed audits/reviews, dirty worktrees, or missing commits.

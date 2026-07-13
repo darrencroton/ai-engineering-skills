@@ -4,6 +4,20 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- Mode B residual-finding propagation: every passing orchestrator result carries a structured `residual_findings` ledger, MC writes a per-slice `slice-summary.md`, and every run-state update refreshes an aggregate `run-report.md` so non-blocking post-plan considerations survive fresh sessions and repair rounds.
+
+### Changed
+
+- MC opt-in independent audits now require separate validated worker contracts for `drift-audit` and `code-review`; prompts require the drift verdict before code review launches and preserve the original delegation posture during repair.
+- MC slice prompts embed a compact 615-word delegation contract instead of the full transitive `ai-orchestrator` skill and every harness reference.
+- Mode A handoff/final-report guidance and Mode B reporting now preserve the same residual post-plan considerations without using a repo-root `HANDOFF.md` as Mode B continuation state.
+
+### Fixed
+
+- MC's prompt now matches its exact-`PASS` code-review gate and distinguishes reportable pre-existing or unrelated observations from material slice-caused defects that must still stop the run.
+
 ## [0.2.0] — 2026-07-13
 
 ### Added

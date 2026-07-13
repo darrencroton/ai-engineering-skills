@@ -9,7 +9,7 @@ This directory defines the `master-controller` skill: deterministic supervision 
 - `SKILL.md`: source of truth for the operating contract — roles/topology, workflow, default operating path, the Mode B launcher, long-running command discipline, safety rules, and the trust boundary. Other documents (including the repo's top-level README) point here; do not restate the launcher or operating path elsewhere.
 - `README.md`: human-facing overview — CLI examples, run-state layout, plan eligibility, profiles, privacy and data flows, and the "Verify Your Setup" trial. Defers to `SKILL.md` for the operating path.
 - `references/run-state-schema.md`: durable `run.json` and slice-state semantics. Update alongside any state-shape change in `state.py`/`commands.py`.
-- `references/orchestrator-prompt.md`: the rendered slice prompt and repair-prompt contracts. Any `{placeholder}` change must match `render_orchestrator_prompt`/`render_repair_prompt` in `runtime.py`; literal braces must be escaped.
+- `references/orchestrator-prompt.md`: the rendered slice prompt and repair-prompt contracts. Any `{placeholder}` change must match `render_orchestrator_prompt`/`render_repair_prompt` in `runtime.py`; literal braces must be escaped. The prompt embeds only `ai-orchestrator/references/mc-slice-contract.md`, not the full transitive skill bundle.
 - `references/harness-adapter-contract.md`: adapter responsibilities, tmux requirements, profile composition, validated-harness evidence, and residual coverage gaps.
 - `scripts/mc.py`: thin CLI entrypoint; keep it free of logic.
 - `scripts/mc_lib/`: the implementation, grouped by responsibility — `cli.py` (argument parsing), `commands.py` (command handlers), `plan.py` (plan parsing, eligibility, check-plan), `state.py` (run state I/O), `gates.py` (deterministic gate verification), `git_ops.py` (git evidence and authorized-surface matching), `runner.py` (batch slice execution and the repair loop), `runtime.py` (slice runtime: prompts, environment, worker policy, artifacts), `tmux_adapter.py` (session control and capture), `observation.py` (operational hints), `profiles.py` (harness capability profiles), `constants.py` (shared vocabulary), `models.py` (dataclasses).
@@ -32,7 +32,7 @@ This directory defines the `master-controller` skill: deterministic supervision 
 
 ## When Changing Behavior
 
-- State shape → `state.py`/`commands.py` + `references/run-state-schema.md` + tests.
+- State shape or generated slice/run reports → `state.py`/`commands.py` + `references/run-state-schema.md` + tests.
 - Gate semantics → `gates.py` + the trust-boundary paragraph in `SKILL.md` ("Safety Rules") + tests.
 - Prompt contracts → `runtime.py` render functions + `references/orchestrator-prompt.md` + `test_prompts.py`.
 - Harness support → `constants.py` profiles + `references/harness-adapter-contract.md` + `test_harness_adapters.py`; readiness/hard-prompt markers need direct observation evidence, not assumption.

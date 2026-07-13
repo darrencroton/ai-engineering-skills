@@ -140,7 +140,8 @@ class TmuxHarnessAdapter:
         )
 
     def _pane_text(self, session_name: str) -> str:
-        # Complete embedded skill bundles can span hundreds of terminal lines.
+        # Embedded delegation contracts and frozen slice instructions can span
+        # many terminal lines.
         # A real hard prompt printed just before prompt injection must remain
         # visible to the send-time guard instead of being pushed outside a
         # short scrollback window by the pasted instructions.

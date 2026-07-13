@@ -30,6 +30,7 @@ Always:
 - files changed or examined
 - validation run and validation still needed
 - frozen contract, authorized surface, and authorization gate status when the task used implementation-plan or scoped-implementation
+- residual findings and post-plan considerations that were intentionally not fixed in the current frozen slice, including why they did not block and what later follow-up should consider
 
 When relevant:
 - branch name

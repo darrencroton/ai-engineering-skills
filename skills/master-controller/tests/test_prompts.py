@@ -22,8 +22,8 @@ class PromptRenderingTests(McTestCase):
         self.assertIn(str(slice_artifact_dir / "copilot-home"), prompt)
         self.assertIn('run_dir="$(python3 ', prompt)
         self.assertIn('launch --run-dir "$run_dir"', prompt)
-        self.assertIn("Embedded ai-orchestrator instructions:", prompt)
-        self.assertIn("Deterministic Worker Contract", prompt)
+        self.assertIn("Embedded MC slice delegation contract:", prompt)
+        self.assertIn("Master Controller Slice Delegation Contract", prompt)
         self.assertIn("worker-evidence.md", prompt)
         self.assertIn("Available worker tool(s) for this run: none available for this run", prompt)
 
@@ -49,11 +49,15 @@ class PromptRenderingTests(McTestCase):
         prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
         self.assertIn("Mode B counterpart of the Mode A", prompt)
         self.assertIn("Prefer delegating this as a hostile, independent audit to the available worker", prompt)
-        self.assertIn("Prefer delegating this as an independent review to the available worker", prompt)
+        self.assertIn("Prefer delegating code review as an independent review to the available worker", prompt)
         self.assertIn("perform the drift-audit locally yourself", prompt)
         self.assertIn("perform the review locally yourself", prompt)
         self.assertIn("You still hold every gate", prompt)
         self.assertIn("Independent audit required: yes", prompt)
+        self.assertIn("do not launch code review unless the authorization verdict is `PASS`", prompt)
+        self.assertIn("Do not launch drift-audit and code-review workers in parallel", prompt)
+        self.assertIn("final code-review verdict to be exactly `PASS`", prompt)
+        self.assertIn("residual_findings", prompt)
 
     def test_prompt_local_audit_is_valid_when_no_worker_available(self):
         state = self.init_run()
@@ -84,7 +88,7 @@ class PromptRenderingTests(McTestCase):
         self.assertIn('"effort": "low"', prompt)
         self.assertIn("Do not construct or invoke a worker harness command yourself", prompt)
 
-    def test_prompt_rendering_embeds_ai_orchestrator_instead_of_worker_flag_guidance(self):
+    def test_prompt_rendering_embeds_compact_mc_delegation_contract(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
@@ -98,11 +102,13 @@ class PromptRenderingTests(McTestCase):
             "some-model",
             "medium",
         )
-        self.assertIn("BEGIN EMBEDDED SKILL FILE:", prompt)
-        self.assertIn("name: ai-orchestrator", prompt)
+        self.assertIn("Master Controller Slice Delegation Contract", prompt)
         self.assertIn('"model": "some-model"', prompt)
         self.assertIn('"effort": "medium"', prompt)
         self.assertNotIn("Worker model/effort guidance:", prompt)
+        self.assertNotIn("references/claude.md", prompt)
+        self.assertNotIn("references/codex.md", prompt)
+        self.assertLess(len(prompt.split()), 4000)
 
     def test_repair_prompt_covers_every_repairable_signature(self):
         # Every repairable signature must render a complete prompt (no
@@ -148,6 +154,8 @@ class PromptRenderingTests(McTestCase):
             self.assertIn("orchestrator-result.json", prompt)
             self.assertIn("git rev-parse HEAD", prompt)
             self.assertIn("Slice 1", prompt)
+            self.assertIn("Delegation posture remains unchanged", prompt)
+            self.assertIn("Preserve and update `residual_findings`", prompt)
 
     def test_repair_prompt_worker_evidence_preserves_existing_work(self):
         plan_slice = mc.parse_plan(self.plan)[0]

@@ -154,6 +154,7 @@ def write_fake_harness(path):
                 "commit": {"requested": True, "created": True, "hash": commit_hash},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             }
             (artifact / "orchestrator-result.json").write_text(json.dumps(result), encoding="utf-8")
             time.sleep(5)
@@ -246,6 +247,7 @@ def write_usage_limit_resume_harness(path):
                 "commit": {"requested": True, "created": True, "hash": commit_hash},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             }), encoding="utf-8")
             time.sleep(2)
             """
@@ -282,6 +284,7 @@ def write_repairable_then_pass_harness(path):
                     "commit": {"requested": False, "created": False, "hash": None},
                     "next_action": "retry",
                     "blockers": [],
+                    "residual_findings": [],
                 }), encoding="utf-8")
                 time.sleep(1)
                 raise SystemExit(0)
@@ -305,6 +308,7 @@ def write_repairable_then_pass_harness(path):
                 "commit": {"requested": True, "created": True, "hash": commit_hash},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             }), encoding="utf-8")
             time.sleep(1)
             """
@@ -345,6 +349,7 @@ def write_failing_validation_result():
         "commit": {"requested": False, "created": False, "hash": None},
         "next_action": "",
         "blockers": [],
+        "residual_findings": [],
     }), encoding="utf-8")
 
 
@@ -411,6 +416,7 @@ def write_in_session_repair_harness(path):
                 "commit": {"requested": True, "created": True, "hash": commit_hash},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             }), encoding="utf-8")
             time.sleep(2)
             """
@@ -462,6 +468,7 @@ def write_alternating_failure_harness(path):
                     "commit": {"requested": False, "created": False, "hash": None},
                     "next_action": "",
                     "blockers": [],
+                    "residual_findings": [],
                 }), encoding="utf-8")
 
             round_index = 0
@@ -530,6 +537,7 @@ def write_wrong_slice_id_harness(path):
                 "commit": {"requested": False, "created": False, "hash": None},
                 "next_action": "",
                 "blockers": [],
+                "residual_findings": [],
             }), encoding="utf-8")
             time.sleep(5)
             """
@@ -584,7 +592,7 @@ class McTestCase(unittest.TestCase):
         policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
         worker_run = artifact / "worker-runs" / "workers-1"
         worker_run.mkdir(parents=True)
-        contract = {
+        base_contract = {
             "status": "pass",
             "policy_sha256": policy_sha,
             "slice_id": "Slice 1",
@@ -601,30 +609,32 @@ class McTestCase(unittest.TestCase):
         # always creates outfile/errfile via `.open("wb")` before the child
         # process starts, inside worker_artifact_root. The gate now requires
         # that real footprint, so a genuine-launch fixture must match it.
-        outfile = worker_run / f"{label}-out.txt"
-        errfile = worker_run / f"{label}-err.txt"
-        outfile.write_text("", encoding="utf-8")
-        errfile.write_text("", encoding="utf-8")
+        labels = {
+            label.replace("readonly-check", "drift-audit"): "drift-audit",
+            label.replace("readonly-check", "code-review"): "code-review",
+        }
+        workers = {}
+        for audit_label, required_skill in labels.items():
+            outfile = worker_run / f"{audit_label}-out.txt"
+            errfile = worker_run / f"{audit_label}-err.txt"
+            outfile.write_text("", encoding="utf-8")
+            errfile.write_text("", encoding="utf-8")
+            workers[audit_label] = {
+                "tool": tool,
+                "command": [tool, "run"],
+                "pid": 4242,
+                "outfile": str(outfile),
+                "errfile": str(errfile),
+                "launch_contract": {**base_contract, "required_skills": [required_skill]},
+            }
         (worker_run / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "workers": {
-                        label: {
-                            "tool": tool,
-                            "command": [tool, "run"],
-                            "pid": 4242,
-                            "outfile": str(outfile),
-                            "errfile": str(errfile),
-                            "launch_contract": contract,
-                        }
-                    }
-                }
-            ),
+            json.dumps({"workers": workers}),
             encoding="utf-8",
         )
-        (worker_run / f"{label}-status.json").write_text(
-            json.dumps({"label": label, "state": state, "returncode": returncode}), encoding="utf-8"
-        )
+        for audit_label in labels:
+            (worker_run / f"{audit_label}-status.json").write_text(
+                json.dumps({"label": audit_label, "state": state, "returncode": returncode}), encoding="utf-8"
+            )
         mc.capture_worker_runs_summary(artifact)
 
     def attach_worker_policy_snapshot(self, state, artifact):
@@ -633,7 +643,17 @@ class McTestCase(unittest.TestCase):
             "worker_policy": mc.worker_policy_snapshot(artifact / "worker-policy.json"),
         }
 
-    def write_gate_result(self, artifact, *, changed_files, validation_result="pass", drift="PASS", review="PASS", commit_hash=None):
+    def write_gate_result(
+        self,
+        artifact,
+        *,
+        changed_files,
+        validation_result="pass",
+        drift="PASS",
+        review="PASS",
+        commit_hash=None,
+        residual_findings=None,
+    ):
         artifact.mkdir(parents=True, exist_ok=True)
         (artifact / "validation-summary.md").write_text("validation\n", encoding="utf-8")
         (artifact / "drift-audit.md").write_text("drift\n", encoding="utf-8")
@@ -650,6 +670,7 @@ class McTestCase(unittest.TestCase):
             "commit": {"requested": True, "created": bool(commit_hash), "hash": commit_hash},
             "next_action": "",
             "blockers": [],
+            "residual_findings": list(residual_findings or []),
         }
         (artifact / "orchestrator-result.json").write_text(json.dumps(result), encoding="utf-8")
 
@@ -682,6 +703,7 @@ class McTestCase(unittest.TestCase):
                     "commit": {"requested": False, "created": False, "hash": None},
                     "next_action": "",
                     "blockers": [],
+                    "residual_findings": [],
                 }
             ),
             encoding="utf-8",

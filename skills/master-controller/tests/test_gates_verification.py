@@ -382,6 +382,43 @@ class GateVerificationTests(McTestCase):
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("residual_findings is missing", decision.reason)
 
+    def test_gate_repairs_empty_residual_ledger_when_review_lists_observation(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "code-review.md").write_text(
+            "## Findings\n\n1. [P3] Non-blocking observation about a pre-existing helper.\n\n## Verdict\n\nPASS\n",
+            encoding="utf-8",
+        )
+        state = self.init_run()
+        decision = mc.verify_gate(
+            self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo)
+        )
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "residual-ledger-mismatch")
+
+    def test_gate_accepts_explicitly_empty_or_resolved_review_findings(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        for body in ("- none", "1. [P2] Fixed in the reviewed commit", "1. Addressed by the reviewed refactor"):
+            artifact = self.repo / ".ai-mc" / "runs" / body.replace(" ", "-") / "slices" / "slice-001"
+            self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+            (artifact / "code-review.md").write_text(f"## Findings\n\n{body}\n", encoding="utf-8")
+            state = self.init_run()
+            decision = mc.verify_gate(
+                self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, after, mc.git_status_text(self.repo)
+            )
+            self.assertEqual(decision.status, "pass")
+
     def test_slice_and_run_reports_propagate_residual_findings(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
@@ -431,6 +468,31 @@ class GateVerificationTests(McTestCase):
         report = (run_dir / "run-report.md").read_text(encoding="utf-8")
         self.assertIn("Legacy helper could be clarified later", report)
         self.assertIn("Consider a separate cleanup plan", report)
+
+    def test_run_report_groups_superseded_and_authoritative_outcomes(self):
+        state = {
+            "run_id": "test",
+            "status": "partial",
+            "branch": "main",
+            "plan_path": "plan.md",
+            "stop_reason": None,
+            "plan": {"slice_count": 1},
+            "slices": [
+                {"slice_id": "Slice 1", "title": "Work", "status": "blocked", "residual_findings": []},
+                {
+                    "slice_id": "Slice 1",
+                    "title": "Work",
+                    "status": "pass",
+                    "commit": {"hash": "a" * 40},
+                    "residual_findings": [],
+                },
+            ],
+        }
+        report = mc_state.render_run_report(state)
+        self.assertEqual(report.count("### Slice 1 — Work"), 1)
+        self.assertIn("Recorded outcome 1 — superseded", report)
+        self.assertIn("Recorded outcome 2 — authoritative", report)
+        self.assertIn("Completed slices: 1/1", report)
 
     def test_gate_opt_in_without_available_worker_stops_terminally(self):
         # An opt-in slice with no worker made available is an operator/plan

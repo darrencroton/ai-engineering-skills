@@ -35,6 +35,12 @@ def load_run(run_path: Path) -> dict[str, Any]:
         raise McError(f"run.json not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise McError(f"invalid run.json: {path}: {exc}") from exc
+    supervision = state.get("supervision") if isinstance(state.get("supervision"), dict) else None
+    if supervision is not None:
+        # Additive schema-v2 compatibility for runs created before bounded
+        # idle-stall supervision was introduced.
+        supervision.setdefault("max_observe_staleness_seconds", DEFAULT_SUPERVISION["max_observe_staleness_seconds"])
+        supervision.setdefault("min_idle_observation_windows", DEFAULT_SUPERVISION["min_idle_observation_windows"])
     return validate_run_state(state, path)
 
 
@@ -104,10 +110,23 @@ def render_slice_summary(entry: dict[str, Any]) -> str:
 
 def render_run_report(state: dict[str, Any]) -> str:
     slices = state.get("slices") if isinstance(state.get("slices"), list) else []
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    group_index: dict[str, int] = {}
+    for entry in slices:
+        if not isinstance(entry, dict):
+            continue
+        slice_id = str(entry.get("slice_id") or "Unknown")
+        if slice_id not in group_index:
+            group_index[slice_id] = len(groups)
+            groups.append((slice_id, []))
+        groups[group_index[slice_id]][1].append(entry)
+    authoritative = [entries[-1] for _, entries in groups if entries]
+    authoritative_completed = sum(
+        1 for entry in authoritative if str(entry.get("status") or "").lower() in {"pass", "assumed-complete"}
+    )
     all_residuals = [
         (entry, finding)
-        for entry in slices
-        if isinstance(entry, dict)
+        for entry in authoritative
         for finding in (entry.get("residual_findings") if isinstance(entry.get("residual_findings"), list) else [])
         if isinstance(finding, dict)
     ]
@@ -118,7 +137,7 @@ def render_run_report(state: dict[str, Any]) -> str:
         f"- Status: {state.get('status', 'unknown')}",
         f"- Branch: `{state.get('branch', 'unknown')}`",
         f"- Plan: `{state.get('plan_path', '')}`",
-        f"- Completed slices: {len(completed_slice_ids(state))}/{(state.get('plan') or {}).get('slice_count', 0)}",
+        f"- Completed slices: {authoritative_completed}/{(state.get('plan') or {}).get('slice_count', 0)}",
         f"- Stop reason: {state.get('stop_reason') or 'none'}",
         "",
         "## Slice Results",
@@ -126,32 +145,35 @@ def render_run_report(state: dict[str, Any]) -> str:
     ]
     if not slices:
         lines.append("- No slices have run.")
-    for entry in slices:
-        if not isinstance(entry, dict):
+    for slice_id, entries in groups:
+        if not entries:
             continue
-        commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
-        validation = entry.get("validation") if isinstance(entry.get("validation"), list) else []
-        validation_summary = "; ".join(
-            f"{item.get('command', '')}: {item.get('result', 'unknown')}"
-            for item in validation
-            if isinstance(item, dict)
-        ) or "none recorded"
-        artifact = entry.get("artifact_dir") or "none"
-        lines.extend(
-            [
-                f"### {entry.get('slice_id', 'Unknown')} — {entry.get('title', '')}",
-                "",
-                f"- Status: {entry.get('status', 'unknown')}",
-                f"- Summary: {entry.get('summary', '') or 'none recorded'}",
-                f"- Validation: {validation_summary}",
-                f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
-                f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
-                f"- Commit: {commit.get('hash') or 'none'}",
-                f"- Artifacts: `{artifact}`",
-                f"- Slice summary: `{entry.get('slice_summary') or 'not generated'}`",
-                "",
-            ]
-        )
+        lines.extend([f"### {slice_id} — {entries[-1].get('title', '')}", ""])
+        for outcome_number, entry in enumerate(entries, start=1):
+            authoritative_label = "authoritative" if outcome_number == len(entries) else "superseded"
+            commit = entry.get("commit") if isinstance(entry.get("commit"), dict) else {}
+            validation = entry.get("validation") if isinstance(entry.get("validation"), list) else []
+            validation_summary = "; ".join(
+                f"{item.get('command', '')}: {item.get('result', 'unknown')}"
+                for item in validation
+                if isinstance(item, dict)
+            ) or "none recorded"
+            artifact = entry.get("artifact_dir") or "none"
+            lines.extend(
+                [
+                    f"#### Recorded outcome {outcome_number} — {authoritative_label}",
+                    "",
+                    f"- Status: {entry.get('status', 'unknown')}",
+                    f"- Summary: {entry.get('summary', '') or 'none recorded'}",
+                    f"- Validation: {validation_summary}",
+                    f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
+                    f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
+                    f"- Commit: {commit.get('hash') or 'none'}",
+                    f"- Artifacts: `{artifact}`",
+                    f"- Slice summary: `{entry.get('slice_summary') or 'not generated'}`",
+                    "",
+                ]
+            )
     lines.extend(["## Residual Findings / Post-Plan Considerations", ""])
     if not all_residuals:
         lines.append("- none")
@@ -166,9 +188,7 @@ def render_run_report(state: dict[str, Any]) -> str:
             lines.append(f"  - Suggested follow-up: {finding.get('suggested_follow_up')}")
     lines.extend(["", "## Run Blockers and Next Actions", ""])
     any_actions = False
-    for entry in slices:
-        if not isinstance(entry, dict):
-            continue
+    for entry in authoritative:
         blockers = entry.get("blockers") if isinstance(entry.get("blockers"), list) else []
         next_action = str(entry.get("next_action") or "")
         for blocker in blockers:
@@ -393,6 +413,8 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
         "max_consecutive_pauses_per_slice",
         "max_cumulative_pause_seconds_per_run",
         "max_transient_retries_per_slice",
+        "max_observe_staleness_seconds",
+        "min_idle_observation_windows",
     ):
         _require_integer(state["supervision"][field], f"supervision.{field}", path)
     for field in DEFAULT_SUPERVISION["pause_counters"]:
@@ -430,6 +452,16 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
         _validate_commit_hash(current["before_head"], "current_slice.before_head", path)
         _require_string_list(current["worker_tools"], "current_slice.worker_tools", path)
         _validate_worker_policy(current["worker_policy"], "current_slice.worker_policy", path)
+        launch_config = current.get("launch_config")
+        if launch_config is not None:
+            if not isinstance(launch_config, dict):
+                raise McError(f"invalid schema-v2 run state at {path}: current_slice.launch_config must be an object")
+            for field in ("allow_profile_command", "allow_unattended_default"):
+                if not isinstance(launch_config.get(field), bool):
+                    raise McError(f"invalid schema-v2 run state at {path}: current_slice.launch_config.{field} must be a boolean")
+            for field in ("harness_command", "harness_model", "harness_effort"):
+                if launch_config.get(field) is not None:
+                    _require_string(launch_config[field], f"current_slice.launch_config.{field}", path)
         _require_integer(current["attempt"], "current_slice.attempt", path, minimum=1)
         for field in ("slice_id", "title", "artifact_dir", "tmux_session", "started_at"):
             _require_string(current[field], f"current_slice.{field}", path)
@@ -571,6 +603,7 @@ def current_slice_state(
     worker_tools: tuple[str, ...] = (),
     repair: dict[str, Any] | None = None,
     worker_policy: dict[str, Any] | None = None,
+    launch_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not before_head:
         raise McError("cannot start a schema-v2 slice without a recorded before_head")
@@ -599,6 +632,8 @@ def current_slice_state(
     }
     if orchestrator_session_id:
         state["orchestrator_session_id"] = orchestrator_session_id
+    if launch_config is not None:
+        state["launch_config"] = copy.deepcopy(launch_config)
     return state
 
 

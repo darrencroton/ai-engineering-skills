@@ -133,6 +133,7 @@ class PromptRenderingTests(McTestCase):
             "commit-missing": "commit skill",
             "dirty-worktree": "uncommitted changes outside `.ai-mc/`",
             "orchestrator-repairable": "You reported status `repairable` yourself",
+            "residual-ledger-mismatch": "copy every legitimate non-blocking post-plan consideration",
         }
         self.assertEqual(set(stanza_markers), set(REPAIRABLE_SIGNATURES))
 

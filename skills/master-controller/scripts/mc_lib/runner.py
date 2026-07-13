@@ -13,11 +13,18 @@ from .git_ops import git, git_head, git_status_text, require_clean_worktree, wri
 from .models import GateDecision, McError, PlanSlice
 from .observation import _current_adapter, _slice_artifact_dir, wait_observing
 from .plan import eligibility
-from .profiles import parse_worker_tools, resolve_harness_command
+from .profiles import (
+    current_allow_unattended_default,
+    parse_worker_tools,
+    query_profile_model_identity,
+    resolve_current_harness_command,
+    resolve_harness_command,
+)
 from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
     ensure_slice_runtime_dirs,
+    extract_operational_hints,
     render_orchestrator_prompt,
     render_repair_prompt,
     slice_dir_name,
@@ -166,6 +173,35 @@ def resolve_repair_action(
     return "fresh-session", None
 
 
+def reclassify_high_confidence_transient_stop(gate: GateDecision, hints: list[dict[str, Any]]) -> GateDecision:
+    """Route only a narrow, high-confidence transient terminal report to repair.
+
+    This changes retry policy, never acceptance: the complete deterministic
+    gate still has to pass after the bounded repair loop.
+    """
+    if gate.status not in {"blocked", "fail"}:
+        return gate
+    matched = any(
+        isinstance(hint, dict)
+        and hint.get("kind") == "service_unavailable"
+        and hint.get("subtype") == "transient"
+        and hint.get("confidence") == "high"
+        and hint.get("hard_stop") is False
+        and hint.get("recovery_guidance") == "bounded-retry"
+        for hint in hints
+    )
+    if not matched:
+        return gate
+    return GateDecision(
+        "repairable",
+        f"orchestrator reported {gate.status}, but current-attempt evidence shows a high-confidence transient "
+        "service-unavailable condition",
+        gate.result,
+        gate.actual_changed_files,
+        "transient-service-unavailable",
+    )
+
+
 def _announce_launch(adapter: TmuxHarnessAdapter, args: argparse.Namespace) -> None:
     if getattr(args, "allow_profile_command", False) and not getattr(args, "harness_command", None):
         print(f"Using MC profile command for harness {adapter.harness_name!r}: {adapter.command!r}")
@@ -207,8 +243,15 @@ def start_model_supervised_slice(
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
     harness_model = getattr(args, "harness_model", None)
     harness_effort = getattr(args, "harness_effort", None)
+    harness_identity = None
     if harness_model:
+        harness_identity = query_profile_model_identity(harness_name, harness_model)
         state.setdefault("harness", {})["model_requested"] = harness_model
+        state["harness"]["model_identity"] = {
+            **(harness_identity or {"requested": harness_model, "resolved_id": harness_model, "display_name": ""}),
+            "catalog_verified": harness_identity is not None,
+            "checked_at": utc_now(),
+        }
     if harness_effort:
         state.setdefault("harness", {})["effort_requested"] = harness_effort
     if harness_model or harness_effort:
@@ -225,6 +268,26 @@ def start_model_supervised_slice(
         configured_worker_tools,
         getattr(args, "worker_model", None),
         getattr(args, "worker_effort", None),
+    )
+    worker_identities: dict[str, dict[str, str]] = {}
+    worker_model = getattr(args, "worker_model", None)
+    if worker_model:
+        for tool in configured_worker_tools:
+            identity = query_profile_model_identity(tool, worker_model)
+            if identity is not None:
+                worker_identities[tool] = identity
+    (slice_artifact_dir / "model-identities.json").write_text(
+        json.dumps(
+            {
+                "orchestrator": state.get("harness", {}).get("model_identity"),
+                "workers": worker_identities,
+                "recorded_at": utc_now(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
@@ -253,6 +316,7 @@ def start_model_supervised_slice(
         resolve_harness_command(args, repo, state, orchestrator_session_id),
         getattr(args, "allow_unattended_default", False),
         configured_worker_tools,
+        expected_model_display=(harness_identity or {}).get("display_name"),
     )
     reaped_stale_sessions = _reap_stale_sessions(adapter, run_dir, str(state["run_id"]))
     _announce_launch(adapter, args)
@@ -286,6 +350,13 @@ def start_model_supervised_slice(
         configured_worker_tools,
         initial_repair,
         worker_policy_snapshot(policy_path),
+        launch_config={
+            "harness_command": getattr(args, "harness_command", None),
+            "harness_model": getattr(args, "harness_model", None),
+            "harness_effort": getattr(args, "harness_effort", None),
+            "allow_profile_command": bool(getattr(args, "allow_profile_command", False)),
+            "allow_unattended_default": bool(getattr(args, "allow_unattended_default", False)),
+        },
     )
     state.setdefault("supervision", {})["mode"] = supervision_mode
     reset_slice_pause_counters(state)
@@ -399,8 +470,8 @@ def finalize_model_supervised_slice(
     orchestrator_session_id = current.get("orchestrator_session_id")
     adapter = TmuxHarnessAdapter(
         harness_name,
-        resolve_harness_command(args, repo, state, str(orchestrator_session_id) if orchestrator_session_id else None),
-        getattr(args, "allow_unattended_default", False),
+        resolve_current_harness_command(args, repo, state, str(orchestrator_session_id) if orchestrator_session_id else None),
+        current_allow_unattended_default(args, state),
         parse_worker_tools(getattr(args, "worker_tools", None)),
     )
     before_head = str(current["before_head"])
@@ -417,6 +488,20 @@ def finalize_model_supervised_slice(
     capture_worker_runs_summary(slice_artifact_dir)
     after_head, after_status = _capture_git_evidence(repo, slice_artifact_dir, attempt, before_head)
     gate = verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status, worker_tools)
+    if gate.status in {"blocked", "fail"}:
+        # Use only the fresh current-attempt pane tail. A cumulative session
+        # transcript can retain an already-recovered outage from an earlier
+        # repair round and must not reclassify a later genuine terminal stop.
+        pane_text = (slice_artifact_dir / "pane-capture.txt").read_text(encoding="utf-8", errors="replace")[-4000:]
+        gate = reclassify_high_confidence_transient_stop(
+            gate,
+            extract_operational_hints(
+                pane_text,
+                process_running=adapter.session_exists(session_name),
+                process_active=False,
+                result_exists=True,
+            ),
+        )
 
     run_json = run_dir / "run.json"
     # Budget and circuit breaker are driven from the persisted
@@ -508,9 +593,10 @@ def finalize_model_supervised_slice(
     new_orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
     relaunch_adapter = TmuxHarnessAdapter(
         harness_name,
-        resolve_harness_command(args, repo, state, new_orchestrator_session_id),
-        getattr(args, "allow_unattended_default", False),
+        resolve_current_harness_command(args, repo, state, new_orchestrator_session_id),
+        current_allow_unattended_default(args, state),
         worker_tools,
+        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
     )
     new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
     prompt_path = slice_artifact_dir / "prompt.md"
@@ -575,6 +661,195 @@ def finalize_model_supervised_slice(
         "tmux_session": new_session_name,
         "repair_prompt_path": relative_artifact_path(repo, fresh_prompt_path),
         "next_action": "wait for a fresh result from the relaunched session, then finalize again",
+    }
+
+
+def handle_idle_stall(
+    args: argparse.Namespace,
+    repo: Path,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    run_dir: Path,
+) -> dict[str, Any]:
+    """Apply the shared repair budget and circuit breaker to a proven idle stall."""
+    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+    if not current:
+        raise McError("run has no current slice")
+    artifact_dir = _slice_artifact_dir(repo, current)
+    session_name = str(current.get("tmux_session") or "")
+    worker_tools = tuple(str(tool) for tool in current.get("worker_tools") or ())
+    before_head = str(current.get("before_head") or "") or None
+    started_at = str(current.get("started_at") or utc_now())
+    harness_name = state["harness"]["name"]
+    adapter = _current_adapter(args, repo, state)
+    repair = repair_state(current)
+    gate = GateDecision(
+        "repairable",
+        "harness made no visible progress across the configured observation ceiling",
+        signature="idle-no-progress",
+    )
+    mode, terminal_gate = resolve_repair_action(
+        repair,
+        gate.signature,
+        adapter.session_exists(session_name),
+        int(state.get("policy", {}).get("max_repair_attempts", DEFAULT_MAX_REPAIR_ATTEMPTS)),
+        gate,
+        plan_slice.slice_id,
+    )
+    run_json = run_dir / "run.json"
+
+    def finalize_terminal(decision: GateDecision) -> dict[str, Any]:
+        adapter.capture(session_name, artifact_dir / "pane-capture.txt")
+        capture_orchestrator_transcript(
+            harness_name,
+            repo,
+            str(current.get("orchestrator_session_id")) if current.get("orchestrator_session_id") else None,
+            artifact_dir,
+        )
+        after_head, after_status = _capture_git_evidence(
+            repo, artifact_dir, int(current.get("attempt") or 1), before_head
+        )
+        objective = GateDecision(
+            decision.status,
+            decision.reason,
+            result={
+                "commit": {
+                    "requested": bool(state.get("policy", {}).get("commit_required", True)),
+                    "created": bool(after_head and after_head != before_head),
+                    "hash": after_head if after_head and after_head != before_head else None,
+                }
+            },
+            actual_changed_files=decision.actual_changed_files,
+            signature=decision.signature,
+        )
+        return _finalize_terminal(
+            adapter,
+            repo=repo,
+            run_json=run_json,
+            state=state,
+            plan_slice=plan_slice,
+            slice_artifact_dir=artifact_dir,
+            session_name=session_name,
+            started_at=started_at,
+            before_head=before_head,
+            worker_tools=worker_tools,
+            repair=repair,
+            terminal_gate=objective,
+        )
+
+    if terminal_gate is not None:
+        return finalize_terminal(terminal_gate)
+
+    round_number = int(repair["round"])
+    after_status = git_status_text(repo)
+    _record_repair_round_evidence(adapter, session_name, artifact_dir, round_number, after_status)
+    append_operational_event(
+        repo,
+        state,
+        {
+            "kind": "repair",
+            "slice_id": plan_slice.slice_id,
+            "round": round_number,
+            "signature": gate.signature,
+            "mode": mode,
+            "tmux_session": session_name,
+            "gate_reason": gate.reason,
+        },
+    )
+    repair_prompt_text = render_repair_prompt(plan_slice, artifact_dir, gate, before_head=before_head)
+    repair_prompt_path = artifact_dir / f"repair-prompt-repair-{round_number}.md"
+    repair_prompt_path.write_text(repair_prompt_text, encoding="utf-8")
+    (artifact_dir / "repair-prompt.md").write_text(repair_prompt_text, encoding="utf-8")
+
+    if mode == "in-session":
+        current["repair"] = dict(repair)
+        state["status"] = "resuming"
+        state["stop_reason"] = None
+        write_run(run_json, state)
+        nudge = str(state.get("supervision", {}).get("default_resume_prompt") or "Review your state and continue.")
+        try:
+            adapter.send_literal(session_name, nudge)
+        except McError as exc:
+            return finalize_terminal(
+                GateDecision("blocked", f"idle-stall repair nudge could not be delivered: {exc}", signature=gate.signature)
+            )
+        append_operational_event(
+            repo,
+            state,
+            {
+                "kind": "send",
+                "status": "sent",
+                "slice_id": plan_slice.slice_id,
+                "attempt": current.get("attempt"),
+                "tmux_session": session_name,
+                "text": nudge,
+                "reason": "automatic bounded idle-stall repair",
+            },
+        )
+        state["status"] = "running"
+        write_run(run_json, state)
+        return {
+            "status": "repairable",
+            "mode": mode,
+            "reason": gate.reason,
+            "repair": dict(repair),
+            "tmux_session": session_name,
+            "automatic_nudge_sent": True,
+        }
+
+    adapter.force_stop(session_name)
+    repair["session_generation"] = int(repair["session_generation"]) + 1
+    generation = int(repair["session_generation"])
+    new_orchestrator_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
+    relaunch_adapter = TmuxHarnessAdapter(
+        harness_name,
+        resolve_current_harness_command(args, repo, state, new_orchestrator_session_id),
+        current_allow_unattended_default(args, state),
+        worker_tools,
+        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
+    )
+    new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
+    prompt_path = artifact_dir / "prompt.md"
+    fresh_prompt_path = artifact_dir / f"fresh-session-prompt-repair-{round_number}.md"
+    fresh_prompt_path.write_text(
+        _fresh_session_repair_prompt(prompt_path, repair_prompt_text, artifact_dir, round_number), encoding="utf-8"
+    )
+    current["tmux_session"] = new_session_name
+    current["attempt"] = generation
+    current["started_at"] = utc_now()
+    current["repair"] = dict(repair)
+    if new_orchestrator_session_id:
+        current["orchestrator_session_id"] = new_orchestrator_session_id
+    else:
+        current.pop("orchestrator_session_id", None)
+    state["status"] = "running"
+    state["stop_reason"] = None
+    write_run(run_json, state)
+    try:
+        relaunch_adapter.start(repo, new_session_name, artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
+        relaunch_adapter.send_prompt(new_session_name, fresh_prompt_path)
+    except Exception as exc:
+        _capture_failure_evidence(
+            relaunch_adapter,
+            session_name=new_session_name,
+            harness_name=harness_name,
+            repo=repo,
+            orchestrator_session_id=new_orchestrator_session_id,
+            slice_artifact_dir=artifact_dir,
+            attempt=generation,
+            before_head=before_head,
+        )
+        relaunch_adapter.force_stop(new_session_name)
+        return finalize_terminal(
+            GateDecision("failed", f"failed to relaunch stalled orchestrator session: {exc}", signature=gate.signature)
+        )
+    return {
+        "status": "repairable",
+        "mode": mode,
+        "reason": gate.reason,
+        "repair": dict(repair),
+        "tmux_session": new_session_name,
+        "automatic_nudge_sent": False,
     }
 
 
@@ -778,6 +1053,7 @@ def execute_slice(args: argparse.Namespace, repo: Path, state: dict[str, Any], p
                 max(0.0, deadline - time.monotonic()),
                 activity_log=slice_artifact_dir / f"activity-attempt-{attempt}.jsonl",
                 stop_on_hard_signals=False,
+                stop_on_idle_stall=False,
             )
             if reason == "timeout":
                 # Legacy timeout evidence order: final pane state and

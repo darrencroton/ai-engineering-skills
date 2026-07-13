@@ -48,6 +48,8 @@ DEFAULT_SUPERVISION: dict[str, Any] = {
     "max_consecutive_pauses_per_slice": 2,
     "max_cumulative_pause_seconds_per_run": 43200,
     "max_transient_retries_per_slice": 3,
+    "max_observe_staleness_seconds": 600,
+    "min_idle_observation_windows": 3,
     "pause_counters": {
         "consecutive_pauses_current_slice": 0,
         "cumulative_pause_seconds_run": 0,
@@ -113,6 +115,8 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "base_command": ["opencode", "--auto"],
         "model_flag": "-m",
         "effort_flag": "--variant",
+        "model_inventory_command": ["opencode", "models", "{provider}", "--verbose"],
+        "model_inventory_verbose_json": True,
         "notes": [
             "Mechanically validated as an MC orchestrator harness: bare interactive TUI shows a stable 'Ask "
             "anything...' idle placeholder as a ready marker and accepts the same tmux paste-buffer plus "

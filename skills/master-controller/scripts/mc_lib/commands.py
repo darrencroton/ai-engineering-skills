@@ -54,7 +54,15 @@ from .plan import (
     plan_slice_by_id,
     verify_plan_unchanged,
 )
-from .profiles import harness_supports_role, parse_worker_tools, profile_command, resolve_harness_command
+from .profiles import (
+    current_allow_unattended_default,
+    harness_supports_role,
+    parse_worker_tools,
+    profile_command,
+    query_profile_model_identity,
+    resolve_current_harness_command,
+    resolve_harness_command,
+)
 from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
@@ -67,7 +75,13 @@ from .runtime import (
     worker_delegation_overview,
     worker_jobs_path,
 )
-from .runner import _capture_git_evidence, execute_slice, finalize_model_supervised_slice, start_model_supervised_slice
+from .runner import (
+    _capture_git_evidence,
+    execute_slice,
+    finalize_model_supervised_slice,
+    handle_idle_stall,
+    start_model_supervised_slice,
+)
 from .state import (
     append_operational_event,
     approved_slice_ids,
@@ -405,8 +419,15 @@ def summarize(args: argparse.Namespace) -> int:
     if not state.get("slices"):
         print("No slices have run yet.")
     else:
-        for entry in state["slices"]:
-            print(f"- {entry.get('slice_id', 'unknown')}: {entry.get('status', 'unknown')}")
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for candidate_entry in state["slices"]:
+            if isinstance(candidate_entry, dict):
+                grouped.setdefault(str(candidate_entry.get("slice_id") or "unknown"), []).append(candidate_entry)
+        for slice_id, entries in grouped.items():
+            entry = entries[-1]
+            print(f"- {slice_id}: {entry.get('status', 'unknown')} (authoritative; {len(entries)} recorded outcome(s))")
+            for superseded in entries[:-1]:
+                print(f"  superseded: {superseded.get('status', 'unknown')}")
             residuals = entry.get("residual_findings") if isinstance(entry.get("residual_findings"), list) else []
             if residuals:
                 print(f"  residual findings / post-plan considerations: {len(residuals)}")
@@ -556,8 +577,21 @@ def wait(args: argparse.Namespace) -> int:
             "evidence_event_id": final_snapshot.get("operational_event_id"),
         },
     )
-    _json_print({"wait_status": reason, "observation": final_snapshot})
-    return 0
+    payload: dict[str, Any] = {"wait_status": reason, "observation": final_snapshot}
+    if reason == "idle-stall":
+        state = load_run(run_dir)
+        current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+        if not current:
+            raise McError("idle stall was observed but the run has no current slice")
+        plan = resolve_plan(Path(state["plan_path"]))
+        verify_plan_unchanged(state, plan)
+        plan_slice = plan_slice_by_id(parse_plan(plan), str(current.get("slice_id") or ""))
+        if plan_slice is None:
+            raise McError(f"current slice is not present in plan: {current.get('slice_id')}")
+        payload["stall_recovery"] = handle_idle_stall(args, repo, state, plan_slice, run_dir)
+    _json_print(payload)
+    recovery = payload.get("stall_recovery") if isinstance(payload.get("stall_recovery"), dict) else {}
+    return 2 if recovery.get("status") in {"blocked", "needs-human", "failed", "fail"} else 0
 
 
 def pause_until(args: argparse.Namespace) -> int:
@@ -611,7 +645,7 @@ def pause_until(args: argparse.Namespace) -> int:
             }
 
     update_run_locked(run_dir / "run.json", mark_paused)
-    wait_reason, wait_snapshot = wait_observing(args, repo, run_dir, pause_seconds)
+    wait_reason, wait_snapshot = wait_observing(args, repo, run_dir, pause_seconds, stop_on_idle_stall=False)
     append_operational_event(
         repo,
         load_run(run_dir),
@@ -883,8 +917,8 @@ def stop(args: argparse.Namespace) -> int:
     if session_name:
         adapter = TmuxHarnessAdapter(
             state["harness"]["name"],
-            resolve_harness_command(args, repo, state),
-            getattr(args, "allow_unattended_default", False),
+            resolve_current_harness_command(args, repo, state),
+            current_allow_unattended_default(args, state),
         )
         adapter.request_stop(str(session_name))
         time.sleep(0.5)
@@ -953,6 +987,34 @@ def preflight(args: argparse.Namespace) -> int:
     check("harness executable", shutil.which(executable) is not None, f"{executable}: {shutil.which(executable) or 'not found'}")
     check("harness orchestrator role", harness_supports_role(harness_name, "orchestrator"), harness_name)
 
+    harness_model = getattr(args, "harness_model", None)
+    if harness_model:
+        try:
+            identity = query_profile_model_identity(harness_name, harness_model)
+            if identity is not None:
+                check(
+                    "harness model identity",
+                    True,
+                    f"{identity['resolved_id']} ({identity['display_name']}; via {identity['inventory_command']})",
+                )
+        except McError as exc:
+            check("harness model identity", False, str(exc))
+
+    worker_model = getattr(args, "worker_model", None)
+    worker_tools = parse_worker_tools(args.worker_tools)
+    if worker_model:
+        for worker_tool in worker_tools:
+            try:
+                identity = query_profile_model_identity(worker_tool, worker_model)
+                if identity is not None:
+                    check(
+                        f"{worker_tool} worker model identity",
+                        True,
+                        f"{identity['resolved_id']} ({identity['display_name']}; via {identity['inventory_command']})",
+                    )
+            except McError as exc:
+                check(f"{worker_tool} worker model identity", False, str(exc))
+
     # Resolve and preflight the exact launch command run-next would use, so
     # preflight cannot pass a configuration the run then refuses (for example a
     # bare interactive `codex`/`claude` that would deadlock without
@@ -1001,7 +1063,6 @@ def preflight(args: argparse.Namespace) -> int:
         except McError as exc:
             check("git directory writable", False, str(exc))
 
-    worker_tools = parse_worker_tools(args.worker_tools)
     if candidate is not None and candidate.independent_audit_required and not worker_tools:
         # Fail fast at setup: an opt-in slice's mechanical independence gate
         # cannot be satisfied with no worker available. Catch it here rather

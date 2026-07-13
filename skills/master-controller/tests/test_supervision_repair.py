@@ -4,6 +4,18 @@ from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harne
 
 
 class SupervisionRepairTests(McTestCase):
+    def test_idle_stall_signature_uses_shared_repair_escalation(self):
+        repair = mc_state.default_repair_state()
+        gate = mc.GateDecision("repairable", "idle", signature="idle-no-progress")
+        first, terminal = mc.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        self.assertEqual((first, terminal), ("in-session", None))
+        second, terminal = mc.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        self.assertEqual((second, terminal), ("fresh-session", None))
+        third, terminal = mc.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        self.assertEqual(third, "terminal")
+        self.assertEqual(terminal.status, "needs-human")
+        self.assertIn("circuit breaker", terminal.reason)
+
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_model_supervised_start_wait_finalize_records_pass(self):
         self.prepare_committed_repo()
@@ -35,10 +47,13 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(running["status"], "running")
         self.assertEqual(running["supervision"]["mode"], "model-supervised")
         self.assertEqual(running["current_slice"]["before_head"], before_start)
+        self.assertEqual(running["current_slice"]["launch_config"]["harness_command"], command_args.harness_command)
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(mc.wait(command_args), 0)
-        with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(mc.finalize_slice(command_args), 0)
+        final_output = io.StringIO()
+        with contextlib.redirect_stdout(final_output):
+            final_code = mc.finalize_slice(command_args)
+        self.assertEqual(final_code, 0, final_output.getvalue())
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
         self.assertIsNone(state["current_slice"])

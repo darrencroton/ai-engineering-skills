@@ -289,14 +289,15 @@ def extract_operational_hints(
                 )
             )
 
-        service_match = re.search(r"\b(?:service unavailable|temporarily unavailable|try again later|overloaded|server error)\b", lowered)
+        explicit_service_match = re.search(r"\b(?:service unavailable|temporarily unavailable)\b", lowered)
+        service_match = explicit_service_match or re.search(r"\b(?:try again later|overloaded|server error)\b", lowered)
         if service_match:
             retry_after = _parse_duration_seconds(text)
             hints.append(
                 _hint(
                     kind="service_unavailable",
                     subtype="transient",
-                    confidence="medium",
+                    confidence="high" if explicit_service_match else "medium",
                     hard_stop=False,
                     source=source,
                     evidence_excerpt=_excerpt(text, service_match.start(), service_match.end()),
@@ -772,6 +773,25 @@ def _repair_stanza(
             "You reported status `repairable` yourself. Resume this same slice: complete the remaining work inside "
             "the frozen contract, re-run validation, the drift-audit skill, and the code-review skill, and write a "
             "fresh `orchestrator-result.json`."
+        )
+    if signature == "transient-service-unavailable":
+        return (
+            "MC found a current-attempt, high-confidence transient service-unavailable signal alongside your "
+            "terminal self-report. Retry the interrupted operation within this same frozen slice, then complete "
+            "the normal validation, audit, review, commit, and structured-result contract. Do not relax any gate."
+        )
+    if signature == "residual-ledger-mismatch":
+        return (
+            "An audit or review artifact visibly contains non-empty findings or observations while your structured "
+            "`residual_findings` ledger is empty. Reconcile the reporting artifacts: fix any material slice-caused "
+            "defect, and copy every legitimate non-blocking post-plan consideration into the ledger with its "
+            "disposition, rationale, and suggested follow-up. Then rewrite the result without weakening a verdict."
+        )
+    if signature == "idle-no-progress":
+        return (
+            "MC observed no pane progress across the configured observation ceiling. Re-establish your current "
+            "slice state from the frozen prompt and repository evidence, continue the interrupted work, and write "
+            "the normal structured result only after every unchanged gate has completed."
         )
     raise McError(f"no repair stanza defined for gate signature: {signature!r}")
 

@@ -4,6 +4,16 @@ from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harne
 
 
 class PlanStateTests(McTestCase):
+    def test_load_run_backfills_additive_idle_supervision_defaults_for_schema_v2(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        state["supervision"].pop("max_observe_staleness_seconds")
+        state["supervision"].pop("min_idle_observation_windows")
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        loaded = mc.load_run(run_json)
+        self.assertEqual(loaded["supervision"]["max_observe_staleness_seconds"], 600)
+        self.assertEqual(loaded["supervision"]["min_idle_observation_windows"], 3)
     def test_cli_rejects_unsupported_python_before_parsing(self):
         with mock.patch.object(sys, "version_info", (3, 12)), contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(mc.main([]), 1)

@@ -19,7 +19,7 @@ from typing import Any
 
 from .git_ops import git_status_text, meaningful_status_lines
 from .models import McError
-from .profiles import parse_worker_tools, resolve_harness_command
+from .profiles import current_allow_unattended_default, parse_worker_tools, resolve_current_harness_command
 from .runtime import extract_operational_hints, relative_artifact_path
 from .state import append_operational_event, load_run, operational_events_file
 from .tmux_adapter import TmuxHarnessAdapter
@@ -39,9 +39,10 @@ def _current_adapter(args: argparse.Namespace, repo: Path, state: dict[str, Any]
     session_id = current.get("orchestrator_session_id") if isinstance(current, dict) else None
     return TmuxHarnessAdapter(
         state["harness"]["name"],
-        resolve_harness_command(args, repo, state, str(session_id) if session_id else None),
-        getattr(args, "allow_unattended_default", False),
+        resolve_current_harness_command(args, repo, state, str(session_id) if session_id else None),
+        current_allow_unattended_default(args, state),
         parse_worker_tools(getattr(args, "worker_tools", None)),
+        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
     )
 
 
@@ -207,6 +208,11 @@ def record_observation(repo: Path, state: dict[str, Any], snapshot: dict[str, An
             "result_exists": snapshot.get("result", {}).get("exists"),
             "hard_prompt": snapshot.get("prompt_on_screen", {}),
             "hard_stop_hints": _hard_stop_hint_kinds(snapshot),
+            "operational_hint_kinds": [
+                str(hint.get("kind"))
+                for hint in snapshot.get("operational_hints", [])
+                if isinstance(hint, dict) and hint.get("kind")
+            ],
         },
     )
     snapshot["operational_event_id"] = event["event_id"]
@@ -215,6 +221,41 @@ def record_observation(repo: Path, state: dict[str, Any], snapshot: dict[str, An
         artifact_dir = _slice_artifact_dir(repo, current_snapshot)
         (artifact_dir / "observation-latest.json").write_text(json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return snapshot
+
+
+def idle_stall_due(repo: Path, state: dict[str, Any], snapshot: dict[str, Any]) -> bool:
+    """Return true only after repeated idle windows span the configured ceiling."""
+    current = snapshot.get("current_slice") if isinstance(snapshot.get("current_slice"), dict) else None
+    if not current:
+        return False
+    event_path = operational_events_file(repo, state)
+    if not event_path.is_file():
+        return False
+    observations: list[dict[str, Any]] = []
+    for line in reversed(event_path.read_text(encoding="utf-8", errors="replace").splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("slice_id") != current.get("slice_id") or event.get("attempt") != current.get("attempt"):
+            continue
+        if event.get("kind") in {"repair", "send"}:
+            break
+        if event.get("kind") != "observation":
+            continue
+        if "idle_no_progress" not in (event.get("operational_hint_kinds") or []):
+            break
+        observations.append(event)
+    supervision = state.get("supervision", {})
+    minimum = int(supervision.get("min_idle_observation_windows", 3))
+    if len(observations) < minimum:
+        return False
+    try:
+        newest = parse_iso_datetime(str(observations[0]["detected_at"]))
+        oldest = parse_iso_datetime(str(observations[-1]["detected_at"]))
+    except (KeyError, ValueError):
+        return False
+    return (newest - oldest).total_seconds() >= int(supervision.get("max_observe_staleness_seconds", 600))
 
 
 def _observation_signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
@@ -243,6 +284,7 @@ def wait_observing(
     *,
     activity_log: Path | None = None,
     stop_on_hard_signals: bool = True,
+    stop_on_idle_stall: bool = True,
 ) -> tuple[str, dict[str, Any]]:
     """Observe the live slice until a decision-relevant condition or timeout.
 
@@ -301,6 +343,9 @@ def wait_observing(
             last_recorded_at = time.monotonic()
         if final_snapshot.get("result", {}).get("exists"):
             reason = "result-ready"
+            break
+        if stop_on_idle_stall and final_snapshot.get("operational_event_id") and idle_stall_due(repo, state, final_snapshot):
+            reason = "idle-stall"
             break
         if not final_snapshot.get("process", {}).get("running"):
             reason = "process-exited"

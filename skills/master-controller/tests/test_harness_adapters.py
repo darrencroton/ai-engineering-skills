@@ -1,6 +1,7 @@
 """Tmux adapter, harness profile, readiness, preflight, and credential tests."""
 
 from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harnesses, and the mc module
+from mc_lib import profiles as mc_profiles
 
 
 class HarnessAdapterProfileTests(McTestCase):
@@ -69,6 +70,31 @@ class HarnessAdapterProfileTests(McTestCase):
         with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
             mc.resolve_harness_command(args, self.repo, state)
 
+    def test_active_slice_persists_profile_launch_flags_for_later_wait_relaunch(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        state["current_slice"] = {
+            "launch_config": {
+                "harness_command": None,
+                "harness_model": "persisted-model",
+                "harness_effort": "high",
+                "allow_profile_command": True,
+                "allow_unattended_default": False,
+            }
+        }
+        later_args = argparse.Namespace(
+            harness_command=None,
+            harness_model=None,
+            harness_effort=None,
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            worker_tools="",
+        )
+        effective = mc.effective_launch_args(later_args, state)
+        self.assertTrue(effective.allow_profile_command)
+        self.assertEqual(effective.harness_model, "persisted-model")
+        self.assertEqual(effective.harness_effort, "high")
+
     def test_copilot_profile_composes_orchestrator_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
@@ -90,6 +116,44 @@ class HarnessAdapterProfileTests(McTestCase):
             parts,
             ["opencode", "--auto", "-m", "macstudio/qwen/qwen3.6-27b-q8", "--variant", "high"],
         )
+
+    def test_opencode_model_inventory_resolves_exact_id_and_display_name(self):
+        output = 'macstudio/qwen/qwen3.6-27b-q8\n{"name":"Mac Studio - Qwen3.6 27B Q8"}\n'
+        with mock.patch.object(mc_profiles, "run_command", return_value=mc.CommandResult(0, output, "")) as run:
+            identity = mc.query_profile_model_identity("opencode", "macstudio/qwen/qwen3.6-27b-q8")
+        self.assertEqual(identity["display_name"], "Mac Studio - Qwen3.6 27B Q8")
+        self.assertEqual(run.call_args.args[0], ["opencode", "models", "macstudio", "--verbose"])
+
+    def test_opencode_model_inventory_rejects_unqualified_or_typoed_id(self):
+        output = 'macstudio/qwen/qwen3.6-27b-q8\n{"name":"Mac Studio - Qwen3.6 27B Q8"}\n'
+        with mock.patch.object(mc_profiles, "run_command", return_value=mc.CommandResult(0, output, "")):
+            for requested in ("qwen/qwen3.6-27b-q8", "macstudio/qwen/qwen3.6-27b-q9"):
+                with self.subTest(requested=requested), self.assertRaisesRegex(mc.McError, "not present"):
+                    mc.query_profile_model_identity("opencode", requested)
+
+    def test_opencode_model_inventory_query_failure_is_fail_closed(self):
+        with mock.patch.object(mc_profiles, "run_command", return_value=mc.CommandResult(1, "", "config error")):
+            with self.assertRaisesRegex(mc.McError, "inventory query failed"):
+                mc.query_profile_model_identity("opencode", "provider/model")
+
+    def test_opencode_runtime_model_display_rejects_silent_fallback_fixture(self):
+        adapter = mc.TmuxHarnessAdapter(
+            "opencode", "opencode --auto -m provider/requested", expected_model_display="Requested Model"
+        )
+        with mock.patch.object(adapter, "_wait_opencode_ready"), mock.patch.object(
+            adapter, "_pane_text", return_value="Build auto · Fallback Model\nAsk anything..."
+        ):
+            with self.assertRaisesRegex(mc.McError, "possible silent fallback"):
+                adapter.wait_until_prompt_ready("session")
+
+    def test_opencode_runtime_model_display_accepts_matching_fixture(self):
+        adapter = mc.TmuxHarnessAdapter(
+            "opencode", "opencode --auto -m provider/requested", expected_model_display="Requested Model"
+        )
+        with mock.patch.object(adapter, "_wait_opencode_ready"), mock.patch.object(
+            adapter, "_pane_text", return_value="Build auto · Requested Model\nAsk anything..."
+        ):
+            adapter.wait_until_prompt_ready("session")
 
     def test_codex_unattended_default_uses_no_alt_screen(self):
         adapter = mc.TmuxHarnessAdapter("codex", None, allow_unattended_default=True)

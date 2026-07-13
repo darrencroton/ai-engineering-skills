@@ -93,6 +93,8 @@ python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 
 Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, and the structured residual findings that Mode A would preserve through its slice summary and handoff, while `run.json` remains Mode B's continuation authority.
 
+Repeated terminal outcomes for the same slice are grouped together in the run report. Earlier outcomes remain visible as superseded evidence and the final recorded outcome is marked authoritative; aggregate residual findings, blockers, and next actions come from the authoritative outcome.
+
 List harness and worker capability profiles:
 
 ```bash
@@ -221,6 +223,10 @@ Two operational rules worth repeating here because they bite in practice (detail
 
 `observe` and `wait` expose `operational_hints` in their JSON output. These hints summarize common pane/transcript evidence such as rolling usage limits, weekly/monthly/account limits, service unavailable messages, network transients, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result. Ordinary hints are evidence for the MC model, not commands. Hard-stop hints are deterministic guards: `send`, `pause-until`, and wait/retry/resume paths refuse unattended continuation when weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect evidence is present.
 
+MC automatically routes only an explicit high-confidence transient service-unavailable terminal report into the existing repair loop. Generic server/network text is not enough. Repeated idle observations spanning the configured ten-minute ceiling likewise use the existing repair signature streak: automatic in-session nudge, fresh-session retry, then terminal circuit breaker. This is operational recovery only; acceptance still requires every normal gate.
+
+Every idle escalation requires a fresh ten-minute no-progress window after the previous repair/send boundary. The launch configuration is persisted with the active slice, so a wait-triggered fresh session reuses the same harness command, model, and effort even when the later `wait` invocation omits those flags.
+
 Reset parsing is intentionally narrow. Relative durations such as `try again in 3 hours` are preferred. Absolute local reset times are accepted only when they are unambiguously near-future in the controller timezone or include an explicit timezone; otherwise MC reports an unknown-limit hard stop for human judgment.
 
 ## Profiles and Launch Requirements
@@ -233,6 +239,7 @@ At runtime, MC composes the launch command from the selected harness plus explic
 - `--allow-profile-command` tells MC to use the tested profile command instead of requiring a hand-written `--harness-command`.
 - `--allow-unattended-default` opts in to the harness profile's known unattended-safe base command without full profile composition (no model/effort/worker flags). Like `--allow-profile-command`, it disables per-action approval, so MC's post-hoc gates are the safety boundary; without any of the three launch flags, a bare harness name fails closed rather than deadlocking on an approval prompt.
 - `--harness-model` and `--harness-effort` are composed by MC only when the selected orchestrator profile supports them.
+- When a profile exposes a model inventory, `preflight` and slice start require the exact requested id to exist. OpenCode also compares the inventory-provided display name with its ready-state TUI before prompt injection, preventing its known silent fallback behavior.
 - `--worker-model` and `--worker-effort` are rendered into the slice prompt with per-tool command guidance; the orchestrator must preserve worker evidence and stop if the selected worker cannot honor them.
 - `commit_required=true` in run policy tells the Codex profile to add scoped git-directory access for local commits.
 

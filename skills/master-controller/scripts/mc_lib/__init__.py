@@ -79,7 +79,7 @@ from .git_ops import (
     write_git_diff,
 )
 from .models import CommandResult, GateDecision, McError, PlanSlice
-from .observation import build_observation, record_observation, wait_observing
+from .observation import build_observation, idle_stall_due, record_observation, wait_observing
 from .plan import (
     completed_slice_ids,
     duplicate_slice_numbers,
@@ -95,12 +95,23 @@ from .plan import (
 )
 from .process import run_command
 from .profiles import (
+    current_allow_unattended_default,
+    effective_launch_args,
     harness_supports_role,
     parse_worker_tools,
     profile_command,
+    query_profile_model_identity,
+    resolve_current_harness_command,
     resolve_harness_command,
 )
-from .runner import execute_slice, finalize_model_supervised_slice, resolve_repair_action, start_model_supervised_slice
+from .runner import (
+    execute_slice,
+    finalize_model_supervised_slice,
+    handle_idle_stall,
+    reclassify_high_confidence_transient_stop,
+    resolve_repair_action,
+    start_model_supervised_slice,
+)
 from .runtime import (
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
@@ -195,6 +206,7 @@ __all__ = [
     "execute_slice",
     "extract_operational_hints",
     "finalize_model_supervised_slice",
+    "handle_idle_stall",
     "finalize_slice",
     "git",
     "git_access_path",
@@ -203,6 +215,7 @@ __all__ = [
     "git_status_text",
     "harness_supports_role",
     "idle_status_after_pass",
+    "idle_stall_due",
     "init_run",
     "is_authorized_path",
     "is_full_commit_hash",
@@ -231,6 +244,10 @@ __all__ = [
     "validate_run_state",
     "print_check",
     "profile_command",
+    "current_allow_unattended_default",
+    "effective_launch_args",
+    "query_profile_model_identity",
+    "resolve_current_harness_command",
     "real_tool_home",
     "reconcile",
     "record_observation",
@@ -239,6 +256,7 @@ __all__ = [
     "require_clean_worktree",
     "reset_slice_pause_counters",
     "resolve_repair_action",
+    "reclassify_high_confidence_transient_stop",
     "resolve_harness_command",
     "resolve_plan",
     "resolve_repo",

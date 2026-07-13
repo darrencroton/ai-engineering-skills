@@ -4,6 +4,78 @@ from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harne
 
 
 class ObservationHintTests(McTestCase):
+    def test_idle_stall_requires_separate_windows_spanning_configured_ceiling(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        state["current_slice"] = {"slice_id": "Slice 1", "attempt": 1}
+        snapshot = {"current_slice": {"slice_id": "Slice 1", "attempt": 1}}
+        base = datetime(2026, 7, 13, tzinfo=timezone.utc)
+        for offset in (0, 300, 600):
+            mc.append_operational_event(
+                self.repo,
+                state,
+                {
+                    "kind": "observation",
+                    "slice_id": "Slice 1",
+                    "attempt": 1,
+                    "operational_hint_kinds": ["idle_no_progress"],
+                    "detected_at": (base + timedelta(seconds=offset)).isoformat(),
+                },
+            )
+        self.assertTrue(mc.idle_stall_due(self.repo, state, snapshot))
+        mc.append_operational_event(
+            self.repo,
+            state,
+            {
+                "kind": "observation",
+                "slice_id": "Slice 1",
+                "attempt": 1,
+                "operational_hint_kinds": [],
+                "detected_at": (base + timedelta(seconds=601)).isoformat(),
+            },
+        )
+        self.assertFalse(mc.idle_stall_due(self.repo, state, snapshot))
+
+    def test_idle_stall_window_resets_after_automatic_repair_send(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        state["current_slice"] = {"slice_id": "Slice 1", "attempt": 1}
+        snapshot = {"current_slice": {"slice_id": "Slice 1", "attempt": 1}}
+        base = datetime(2026, 7, 13, tzinfo=timezone.utc)
+        for offset in (0, 300, 600):
+            mc.append_operational_event(
+                self.repo,
+                state,
+                {
+                    "kind": "observation",
+                    "slice_id": "Slice 1",
+                    "attempt": 1,
+                    "operational_hint_kinds": ["idle_no_progress"],
+                    "detected_at": (base + timedelta(seconds=offset)).isoformat(),
+                },
+            )
+        mc.append_operational_event(
+            self.repo,
+            state,
+            {
+                "kind": "send",
+                "slice_id": "Slice 1",
+                "attempt": 1,
+                "detected_at": (base + timedelta(seconds=601)).isoformat(),
+            },
+        )
+        mc.append_operational_event(
+            self.repo,
+            state,
+            {
+                "kind": "observation",
+                "slice_id": "Slice 1",
+                "attempt": 1,
+                "operational_hint_kinds": ["idle_no_progress"],
+                "detected_at": (base + timedelta(seconds=602)).isoformat(),
+            },
+        )
+        self.assertFalse(mc.idle_stall_due(self.repo, state, snapshot))
     def test_observe_without_current_slice_returns_snapshot_and_event(self):
         state = self.init_run()
         args = argparse.Namespace(
@@ -313,7 +385,12 @@ class ObservationHintTests(McTestCase):
         )
         service_hint = next(hint for hint in service if hint["kind"] == "service_unavailable")
         self.assertFalse(service_hint["hard_stop"])
+        self.assertEqual(service_hint["confidence"], "high")
         self.assertEqual(service_hint["retry_after_seconds"], 600)
+
+        generic = mc.extract_operational_hints("Unexpected server error", process_running=True, now=now)
+        generic_hint = next(hint for hint in generic if hint["kind"] == "service_unavailable")
+        self.assertEqual(generic_hint["confidence"], "medium")
 
         ambiguous = mc.extract_operational_hints(
             "Session limit reached and will reset at 11:55pm.",
@@ -324,6 +401,26 @@ class ObservationHintTests(McTestCase):
         usage = next(hint for hint in ambiguous if hint["kind"] == "usage_limit")
         self.assertEqual(usage["subtype"], "unknown_limit")
         self.assertTrue(usage["hard_stop"])
+
+    def test_only_high_confidence_service_unavailable_reclassifies_terminal_report(self):
+        terminal = mc.GateDecision("blocked", "orchestrator reported blocked", {"status": "blocked"})
+        high = {
+            "kind": "service_unavailable",
+            "subtype": "transient",
+            "confidence": "high",
+            "hard_stop": False,
+            "recovery_guidance": "bounded-retry",
+        }
+        repaired = mc.reclassify_high_confidence_transient_stop(terminal, [high])
+        self.assertEqual(repaired.status, "repairable")
+        self.assertEqual(repaired.signature, "transient-service-unavailable")
+        for changed in (
+            {**high, "confidence": "medium"},
+            {**high, "kind": "network_transient"},
+            {**high, "hard_stop": True},
+        ):
+            with self.subTest(changed=changed):
+                self.assertIs(mc.reclassify_high_confidence_transient_stop(terminal, [changed]), terminal)
 
     def test_operational_hints_distinguish_live_and_exited_rolling_limit_guidance(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone.utc)

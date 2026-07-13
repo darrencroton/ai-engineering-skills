@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ REPAIRABLE_SIGNATURES = frozenset(
         "unauthorized-files",
         "changed-files-mismatch",
         "result-malformed",
+        "residual-ledger-mismatch",
         "commit-missing",
         "dirty-worktree",
         "orchestrator-repairable",
@@ -393,6 +395,42 @@ def _residual_findings_status(findings: Any) -> str | None:
     return None
 
 
+def _artifact_has_unledgered_finding_shape(path: Path) -> bool:
+    """Detect narrow Markdown shapes that visibly claim non-empty findings.
+
+    This is deliberately syntactic. It does not decide whether an observation
+    is material or re-review the diff; it only catches the contradictory shape
+    "artifact lists observations, structured ledger says none".
+    """
+    if not path.is_file():
+        return False
+    text = path.read_text(encoding="utf-8", errors="replace")
+    heading_re = re.compile(
+        r"(?im)^#{1,6}\s+.*(?:findings|observations|non[- ]blocking recommendations|remaining accepted risk).*$"
+    )
+    headings = list(heading_re.finditer(text))
+    for heading in headings:
+        next_heading = re.search(r"(?m)^#{1,6}\s+", text[heading.end() :])
+        end = heading.end() + next_heading.start() if next_heading else len(text)
+        body = text[heading.end() : end]
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            lowered = line.lower()
+            if not line or re.fullmatch(r"[-|:\s]+", line):
+                continue
+            if lowered in {"- none", "none", "- no findings", "no findings", "- none.", "none."}:
+                continue
+            if any(marker in lowered for marker in ("resolved", "fixed in", "already fixed", "addressed", "no longer applicable", "n/a after")):
+                continue
+            if re.match(r"^(?:\d+\.|[-*])\s+", line) and (
+                re.search(r"\[p[0-3]\]", lowered)
+                or "non-blocking" in lowered
+                or "observation" in lowered
+            ):
+                return True
+    return False
+
+
 def _apply_commit_hash_reconciliation(
     result: dict[str, Any],
     result_path: Path,
@@ -511,6 +549,16 @@ def verify_gate(
     residual_failure = _residual_findings_status(result.get("residual_findings"))
     if residual_failure:
         return gate_failure("result-malformed", residual_failure, result, changed_evidence)
+    if not result.get("residual_findings") and (
+        _artifact_has_unledgered_finding_shape(slice_artifact_dir / "drift-audit.md")
+        or _artifact_has_unledgered_finding_shape(slice_artifact_dir / "code-review.md")
+    ):
+        return gate_failure(
+            "residual-ledger-mismatch",
+            "audit/review artifact contains a non-empty findings or observations shape but residual_findings is empty",
+            result,
+            changed_evidence,
+        )
 
     # Independence (delegating drift-audit and code-review to a separate model)
     # is a degradable *preference* by default: a slice audited locally by a

@@ -77,11 +77,13 @@ class TmuxHarnessAdapter:
         command_override: str | None = None,
         allow_unattended_default: bool = False,
         worker_tools: tuple[str, ...] = (),
+        expected_model_display: str | None = None,
     ):
         self.harness_name = harness_name
         self.command_override = command_override
         self.allow_unattended_default = allow_unattended_default
         self.worker_tools = worker_tools
+        self.expected_model_display = expected_model_display
         if command_override:
             self.command = command_override
         elif allow_unattended_default and harness_name in KNOWN_UNATTENDED_HARNESS_COMMANDS:
@@ -199,6 +201,19 @@ class TmuxHarnessAdapter:
             self._wait_copilot_ready(session_name)
         # Any other executable (a custom --harness-command, a non-TUI harness)
         # has no interactive readiness handshake to perform.
+        if executable == "opencode" and self.expected_model_display:
+            self._verify_opencode_model_display(session_name)
+
+    def _verify_opencode_model_display(self, session_name: str) -> None:
+        """Fail closed when OpenCode's resolved TUI model differs from inventory metadata."""
+        capture = self._pane_text(session_name)
+        expected = re.sub(r"\s+", " ", self.expected_model_display or "").strip().lower()
+        observed = re.sub(r"\s+", " ", capture).lower()
+        if expected and expected not in observed:
+            raise McError(
+                "opencode did not display the requested model identity before prompt injection: "
+                f"expected {self.expected_model_display!r}; refusing possible silent fallback"
+            )
 
     def _wait_stable_pane_ready(self, session_name: str, executable: str, deadline: float) -> None:
         # Readiness inferred from the TUI finishing its draw: a non-empty pane

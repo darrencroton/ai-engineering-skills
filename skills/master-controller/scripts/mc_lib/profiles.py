@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,7 @@ from typing import Any
 from .constants import HARNESS_PROFILES
 from .git_ops import git_access_path
 from .models import McError
+from .process import run_command
 
 
 def parse_worker_tools(value: str | None) -> tuple[str, ...]:
@@ -18,6 +20,51 @@ def parse_worker_tools(value: str | None) -> tuple[str, ...]:
 
 def harness_supports_role(harness_name: str, role: str) -> bool:
     return role in HARNESS_PROFILES.get(harness_name, {}).get("roles", [])
+
+
+def query_profile_model_identity(harness_name: str, model: str) -> dict[str, str] | None:
+    """Resolve an exact model id through a harness-owned inventory when available.
+
+    ``None`` means the profile has no queryable inventory contract. A configured
+    inventory is fail-closed: a failed query, typo, alias, or unparseable identity
+    is rejected before the harness can silently select a different model.
+    """
+    profile = HARNESS_PROFILES.get(harness_name) or {}
+    command_template = profile.get("model_inventory_command")
+    if not command_template:
+        return None
+    provider = model.split("/", 1)[0] if "/" in model else model
+    command = [str(part).format(provider=provider) for part in command_template]
+    result = run_command(command, allow_failure=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise McError(f"{harness_name} model inventory query failed: {detail}")
+
+    lines = result.stdout.splitlines()
+    try:
+        model_line = next(index for index, line in enumerate(lines) if line.strip() == model)
+    except StopIteration as exc:
+        raise McError(
+            f"requested {harness_name} model {model!r} is not present in the harness model inventory; "
+            "use the exact configured model id"
+        ) from exc
+
+    display_name = model
+    if profile.get("model_inventory_verbose_json"):
+        remainder = "\n".join(lines[model_line + 1 :]).lstrip()
+        try:
+            metadata, _ = json.JSONDecoder().raw_decode(remainder)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise McError(f"could not parse {harness_name} model metadata for {model!r}") from exc
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
+            raise McError(f"{harness_name} model metadata has no display name for {model!r}")
+        display_name = metadata["name"].strip()
+    return {
+        "requested": model,
+        "resolved_id": model,
+        "display_name": display_name,
+        "inventory_command": shlex.join(command),
+    }
 
 
 def _append_model_override(command: list[str], profile: dict[str, Any], model: str | None, tool_name: str) -> None:
@@ -111,3 +158,30 @@ def resolve_harness_command(
             getattr(args, "harness_effort", None),
         )
     return None
+
+
+def effective_launch_args(args: argparse.Namespace, state: dict[str, Any]) -> argparse.Namespace:
+    """Fill omitted per-invocation launch flags from the active slice snapshot."""
+    values = dict(vars(args))
+    current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
+    persisted = current.get("launch_config") if current and isinstance(current.get("launch_config"), dict) else {}
+    for field in ("harness_command", "harness_model", "harness_effort"):
+        if not values.get(field) and persisted.get(field):
+            values[field] = persisted[field]
+    for field in ("allow_profile_command", "allow_unattended_default"):
+        if not values.get(field) and persisted.get(field):
+            values[field] = True
+    return argparse.Namespace(**values)
+
+
+def resolve_current_harness_command(
+    args: argparse.Namespace,
+    repo: Path,
+    state: dict[str, Any],
+    orchestrator_session_id: str | None = None,
+) -> str | None:
+    return resolve_harness_command(effective_launch_args(args, state), repo, state, orchestrator_session_id)
+
+
+def current_allow_unattended_default(args: argparse.Namespace, state: dict[str, Any]) -> bool:
+    return bool(getattr(effective_launch_args(args, state), "allow_unattended_default", False))

@@ -109,13 +109,31 @@ class HarnessAdapterProfileTests(McTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         command = mc.profile_command(
-            "opencode", self.repo, state, (), harness_model="macstudio/qwen/qwen3.6-27b-q8", harness_effort="high"
+            "opencode", self.repo, state, (), harness_model="macstudio/qwen/qwen3.6-27b-q8"
         )
         parts = shlex.split(command)
         self.assertEqual(
             parts,
-            ["opencode", "--auto", "-m", "macstudio/qwen/qwen3.6-27b-q8", "--variant", "high"],
+            ["opencode", "--auto", "-m", "macstudio/qwen/qwen3.6-27b-q8"],
         )
+
+    def test_opencode_profile_rejects_effort_override(self):
+        # The bare 'opencode' TUI base command this profile launches has no
+        # reasoning-effort flag in the installed CLI (--variant exists only on
+        # the separate 'opencode run' single-shot subcommand). Requesting an
+        # effort override must fail closed at compose time, not launch a
+        # command that opencode itself rejects.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        with self.assertRaisesRegex(mc.McError, "does not support MC-composed effort overrides"):
+            mc.profile_command(
+                "opencode",
+                self.repo,
+                state,
+                (),
+                harness_model="macstudio/qwen/qwen3.6-27b-q8",
+                harness_effort="high",
+            )
 
     def test_opencode_model_inventory_resolves_exact_id_and_display_name(self):
         output = 'macstudio/qwen/qwen3.6-27b-q8\n{"name":"Mac Studio - Qwen3.6 27B Q8"}\n'

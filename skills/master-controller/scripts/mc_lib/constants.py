@@ -114,13 +114,15 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         "roles": ["orchestrator", "senior-worker", "junior-worker"],
         "base_command": ["opencode", "--auto"],
         "model_flag": "-m",
-        "effort_flag": "--variant",
         "model_inventory_command": ["opencode", "models", "{provider}", "--verbose"],
         "model_inventory_verbose_json": True,
         "notes": [
             "Mechanically validated as an MC orchestrator harness: bare interactive TUI shows a stable 'Ask "
             "anything...' idle placeholder as a ready marker and accepts the same tmux paste-buffer plus "
             "double-Enter prompt injection as codex/claude/copilot.",
+            "No effort_flag: the interactive TUI command this profile launches has no effort/reasoning flag, "
+            "so an effort request fails closed at command-compose time with "
+            "a clear McError instead of launching a broken command that exits before the prompt can be sent.",
             "Primarily backed by local/self-hosted models (see ~/.config/opencode/opencode.json, served via "
             "~/.llm/llama-server/); may also be configured with subscription models. Role fit depends entirely on "
             "the configured model's demonstrated capability, not on this profile — weak local models should stay "

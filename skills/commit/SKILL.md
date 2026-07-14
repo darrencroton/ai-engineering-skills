@@ -10,7 +10,7 @@ description: Use this skill whenever creating or staging a git commit.
 
 ## Steps
 1. Run `git status` and `git diff` to review all changes
-2. When it would save meaningful top-tier context, you may delegate routine commit mechanics to the least expensive reliable available worker, but the main agent must verify the staged files, final commit hash, and post-commit status.
+2. Keep all staging and commit mechanics with the Developer. Reviewers are read-only and must never perform Git or GitHub mutations.
 3. Stage specific files by name — never `git add -A` or `git add .`
 4. Commit using a HEREDOC:
 

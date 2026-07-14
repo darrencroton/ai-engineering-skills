@@ -84,12 +84,12 @@ class PlanSlice:
         """Whether this slice opts in to MC's mechanical independent-audit gate.
 
         Independence (delegating drift-audit and code-review to a separate
-        model) is a degradable *preference* expressed in the orchestrator
+        model) is a degradable *preference* expressed in the developer
         prompt, not a mechanical requirement: a slice audited locally by a
         single model is a valid accepted outcome. A plan may nonetheless opt a
         high-stakes slice into mechanical enforcement by adding
         ``Independent audit required: yes`` to its Risk Flags, which re-arms
-        MC's worker-launch verification as a blocking gate for that slice.
+        MC's reviewer-launch verification as a blocking gate for that slice.
 
         Unlike ``approval_needed`` (whose absence blocks), this fails *closed to
         off*: absent, blank, or anything that is not an exact ``yes`` means the

@@ -13,13 +13,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .constants import REQUIRED_AUDIT_SKILLS, SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
+from .constants import REQUIRED_AUDIT_SKILLS, SENSITIVE_ARTIFACT_NAMES, REVIEWER_CREDENTIAL_HOMES
 from .git_ops import meaningful_status_lines, normalize_authorized_entry, unauthorized_files
 from .models import GateDecision, McError, PlanSlice
 from .process import run_command
 
 
-_WORKER_JOBS_MODULE: Any = None
+_REVIEWER_JOBS_MODULE: Any = None
 
 
 def environment_preflight() -> dict[str, Any]:
@@ -40,8 +40,8 @@ def result_schema_path() -> Path:
     return skill_root() / "references" / "run-state-schema.md"
 
 
-def worker_jobs_path() -> Path:
-    return skill_root().parent / "ai-orchestrator" / "scripts" / "worker_jobs.py"
+def reviewer_jobs_path() -> Path:
+    return skill_root().parent / "orchestrator" / "scripts" / "reviewer_jobs.py"
 
 
 def _excerpt(text: str, start: int, end: int, context: int = 120) -> str:
@@ -363,7 +363,7 @@ def extract_operational_hints(
                 confidence="high",
                 hard_stop=False,
                 source="artifact",
-                evidence_excerpt="orchestrator-result.json exists",
+                evidence_excerpt="developer-result.json exists",
                 now=observed_at,
                 recovery_guidance="finalize-slice",
             )
@@ -376,7 +376,7 @@ def extract_operational_hints(
                 confidence="high",
                 hard_stop=True,
                 source="process",
-                evidence_excerpt="harness process is not running and orchestrator-result.json is absent",
+                evidence_excerpt="harness process is not running and developer-result.json is absent",
                 now=observed_at,
                 recovery_guidance="stop-for-user-or-restart-only-from-clean-authorized-state",
             )
@@ -397,31 +397,31 @@ def extract_operational_hints(
     return hints
 
 
-def worker_jobs_module() -> Any:
-    """Load ai-orchestrator's worker_jobs.py as a library module.
+def reviewer_jobs_module() -> Any:
+    """Load orchestrator's reviewer_jobs.py as a library module.
 
     Reused (not reimplemented) here for its session-path conventions, e.g.
     claude_project_root, which already correctly match how Claude Code and
-    Codex lay out their on-disk session transcripts for worker sessions.
+    Codex lay out their on-disk session transcripts for reviewer sessions.
     """
-    global _WORKER_JOBS_MODULE
-    if _WORKER_JOBS_MODULE is None:
-        path = worker_jobs_path()
-        spec = importlib.util.spec_from_file_location("mc_worker_jobs", path)
+    global _REVIEWER_JOBS_MODULE
+    if _REVIEWER_JOBS_MODULE is None:
+        path = reviewer_jobs_path()
+        spec = importlib.util.spec_from_file_location("mc_reviewer_jobs", path)
         if spec is None or spec.loader is None:
-            raise McError(f"could not load worker_jobs module from {path}")
+            raise McError(f"could not load reviewer_jobs module from {path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        _WORKER_JOBS_MODULE = module
-    return _WORKER_JOBS_MODULE
+        _REVIEWER_JOBS_MODULE = module
+    return _REVIEWER_JOBS_MODULE
 
 
-def claude_orchestrator_transcript_path(repo: Path, session_id: str) -> Path:
-    return worker_jobs_module().claude_project_root(repo.resolve()) / f"{session_id}.jsonl"
+def claude_developer_transcript_path(repo: Path, session_id: str) -> Path:
+    return reviewer_jobs_module().claude_project_root(repo.resolve()) / f"{session_id}.jsonl"
 
 
-def capture_orchestrator_transcript(harness_name: str, repo: Path, session_id: str | None, slice_artifact_dir: Path) -> None:
-    """Copy the orchestrator's own structured session transcript into the slice artifacts.
+def capture_developer_transcript(harness_name: str, repo: Path, session_id: str | None, slice_artifact_dir: Path) -> None:
+    """Copy the developer's own structured session transcript into the slice artifacts.
 
     This is a full-fidelity complement to pane-capture.txt, not a replacement:
     the tmux pane capture is still required to detect harness-level stuck/
@@ -433,19 +433,19 @@ def capture_orchestrator_transcript(harness_name: str, repo: Path, session_id: s
     """
     if harness_name != "claude" or not session_id:
         return
-    destination = slice_artifact_dir / "orchestrator-transcript.jsonl"
-    note_path = slice_artifact_dir / "orchestrator-transcript-note.txt"
+    destination = slice_artifact_dir / "developer-transcript.jsonl"
+    note_path = slice_artifact_dir / "developer-transcript-note.txt"
     try:
-        source = claude_orchestrator_transcript_path(repo, session_id)
+        source = claude_developer_transcript_path(repo, session_id)
     except McError as exc:
-        note_path.write_text(f"orchestrator transcript lookup failed: {exc}\n", encoding="utf-8")
+        note_path.write_text(f"developer transcript lookup failed: {exc}\n", encoding="utf-8")
         return
     if source.exists():
         shutil.copy2(source, destination)
         note_path.unlink(missing_ok=True)
     else:
         note_path.write_text(
-            "orchestrator transcript not found at expected path: "
+            "developer transcript not found at expected path: "
             f"{source}\n"
             "This can happen if the launched command did not honor --session-id "
             "(e.g. a custom --harness-command without --session-id).\n",
@@ -460,8 +460,8 @@ def real_tool_home(env_var: str, default_dirname: str) -> Path:
     return Path.home() / default_dirname
 
 
-def worker_credential_source(tool: str) -> tuple[Path, str] | None:
-    entry = WORKER_CREDENTIAL_HOMES.get(tool)
+def reviewer_credential_source(tool: str) -> tuple[Path, str] | None:
+    entry = REVIEWER_CREDENTIAL_HOMES.get(tool)
     if not entry:
         return None
     env_var, default_dirname, filename = entry
@@ -471,7 +471,7 @@ def worker_credential_source(tool: str) -> tuple[Path, str] | None:
 def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
     return {
         "artifact_dir": slice_artifact_dir,
-        "worker_artifact_root": slice_artifact_dir / "worker-runs",
+        "reviewer_artifact_root": slice_artifact_dir / "reviewer-runs",
         "tmp_dir": slice_artifact_dir / "tmp",
         "tool_home_root": slice_artifact_dir / "tool-homes",
         "copilot_home": slice_artifact_dir / "copilot-home",
@@ -480,62 +480,57 @@ def slice_paths(slice_artifact_dir: Path) -> dict[str, Path]:
     }
 
 
-def seed_worker_credentials(paths: dict[str, Path], worker_tools: tuple[str, ...], orchestrator_harness_name: str) -> list[str]:
+def seed_reviewer_credentials(paths: dict[str, Path], reviewer_tools: tuple[str, ...], developer_harness_name: str) -> list[str]:
     warnings: list[str] = []
     home_by_tool = {"codex": "codex_home"}
     for tool, home_key in home_by_tool.items():
-        if tool not in worker_tools or tool == orchestrator_harness_name:
+        if tool not in reviewer_tools or tool == developer_harness_name:
             continue
-        source = worker_credential_source(tool)
+        source = reviewer_credential_source(tool)
         if source is None:
             continue
         source_dir, filename = source
         source_path = source_dir / filename
         destination = paths[home_key] / filename
         if not source_path.exists():
-            warnings.append(f"{tool} worker credential source not found: {source_path}")
+            warnings.append(f"{tool} reviewer credential source not found: {source_path}")
             continue
         shutil.copy2(source_path, destination)
         os.chmod(destination, 0o600)
     return warnings
 
 
-def ensure_slice_runtime_dirs(slice_artifact_dir: Path, worker_tools: tuple[str, ...] = (), orchestrator_harness_name: str = "") -> list[str]:
+def ensure_slice_runtime_dirs(slice_artifact_dir: Path, reviewer_tools: tuple[str, ...] = (), developer_harness_name: str = "") -> list[str]:
     paths = slice_paths(slice_artifact_dir)
     for path in paths.values():
         path.mkdir(parents=True, exist_ok=True)
-    return seed_worker_credentials(paths, worker_tools, orchestrator_harness_name)
+    return seed_reviewer_credentials(paths, reviewer_tools, developer_harness_name)
 
 
-def write_worker_policy(
+def write_reviewer_policy(
     state: dict[str, Any],
     plan_slice: PlanSlice,
     slice_artifact_dir: Path,
-    worker_tools: tuple[str, ...],
-    worker_model: str | None,
-    worker_effort: str | None,
+    reviewer_tools: tuple[str, ...],
+    reviewer_model: str | None,
+    reviewer_effort: str | None,
 ) -> Path:
-    """Write the authoritative semantic boundary consumed by ai-orchestrator."""
-    policy_path = slice_artifact_dir / "worker-policy.json"
-    worker_requirement = plan_slice.sections.get("Validation Plan", "").lower()
-    allowed_access = ["read-only"] if "worker" in worker_requirement and "read-only" in worker_requirement else ["read-only", "workspace-write"]
+    """Write the authoritative semantic boundary consumed by orchestrator."""
+    policy_path = slice_artifact_dir / "reviewer-policy.json"
     policy = {
-        "schema_version": 1,
+        "schema_version": 2,
         "run_id": str(state["run_id"]),
         "slice_id": plan_slice.slice_id,
         "plan_sha256": str(state.get("plan", {}).get("sha256") or ""),
         "repo_path": str(Path(state["repo_path"]).resolve()),
-        "worker_artifact_root": str(slice_paths(slice_artifact_dir)["worker_artifact_root"]),
-        "required_tools": list(worker_tools),
-        "required_model": worker_model or "default",
-        "required_effort": worker_effort or "default",
-        "allowed_access": allowed_access,
-        "allowed_roles": ["junior-worker", "senior-worker"],
-        "authorized_files": [normalize_authorized_entry(entry) for entry in plan_slice.authorized_files],
+        "reviewer_artifact_root": str(slice_paths(slice_artifact_dir)["reviewer_artifact_root"]),
+        "required_tools": list(reviewer_tools),
+        "required_model": reviewer_model or "default",
+        "required_effort": reviewer_effort or "default",
         # Pre-launch companion to gates.py's finalize-time exact-match check:
         # any request whose required_skills touches drift-audit or code-review
         # must equal exactly one of these sets, not a mix or an empty list. An
-        # empty required_skills stays valid (a legitimate ad hoc worker task
+        # empty required_skills stays valid (a legitimate ad hoc reviewer task
         # unrelated to either audit), so this cannot catch every misdraft —
         # only a request that already names a reserved skill incorrectly.
         "reserved_skill_sets": [[skill] for skill in REQUIRED_AUDIT_SKILLS] if plan_slice.independent_audit_required else [],
@@ -544,17 +539,17 @@ def write_worker_policy(
     return policy_path
 
 
-def worker_policy_snapshot(policy_path: Path) -> dict[str, Any]:
+def reviewer_policy_snapshot(policy_path: Path) -> dict[str, Any]:
     policy = json.loads(policy_path.read_text(encoding="utf-8"))
     return {"sha256": hashlib.sha256(policy_path.read_bytes()).hexdigest(), "policy": policy}
 
 
-def ai_orchestrator_embedded_instructions() -> str:
+def orchestrator_embedded_instructions() -> str:
     # A slice needs the MC-specific semantic delegation contract, not the full
-    # general-purpose ai-orchestrator bundle and every linked harness reference.
+    # general-purpose orchestrator bundle and every linked harness reference.
     # The validated launcher owns harness flags, while this compact reference is
     # the single source for the instructions a skill-less slice harness needs.
-    path = skill_root().parent / "ai-orchestrator" / "references" / "mc-slice-contract.md"
+    path = skill_root().parent / "orchestrator" / "references" / "mc-slice-contract.md"
     return path.read_text(encoding="utf-8").rstrip()
 
 
@@ -563,58 +558,58 @@ def slice_environment(
     run_json: Path,
     plan_path: Path,
     plan_slice: PlanSlice,
-    orchestrator_harness_name: str = "",
-    worker_tools: tuple[str, ...] = (),
+    developer_harness_name: str = "",
+    reviewer_tools: tuple[str, ...] = (),
 ) -> dict[str, str]:
     del run_json  # Controller state is intentionally not exposed to the harness.
     paths = slice_paths(slice_artifact_dir)
     env = {
-        "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
+        "ORCHESTRATOR_ARTIFACT_ROOT": str(paths["reviewer_artifact_root"]),
         "MC_RESULT_SCHEMA_PATH": str(result_schema_path()),
         "MC_PLAN_PATH": str(plan_path),
         "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
         "MC_SLICE_ID": plan_slice.slice_id,
         "MC_SLICE_TMP_DIR": str(paths["tmp_dir"]),
         "MC_TOOL_HOME_ROOT": str(paths["tool_home_root"]),
-        "MC_WORKER_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
-        "MC_WORKER_JOBS_PATH": str(worker_jobs_path()),
-        "MC_WORKER_POLICY_PATH": str(slice_artifact_dir / "worker-policy.json"),
+        "MC_REVIEWER_ARTIFACT_ROOT": str(paths["reviewer_artifact_root"]),
+        "MC_REVIEWER_JOBS_PATH": str(reviewer_jobs_path()),
+        "MC_REVIEWER_POLICY_PATH": str(slice_artifact_dir / "reviewer-policy.json"),
         "TMPDIR": str(paths["tmp_dir"]),
     }
-    # Only redirect a tool's own home when that tool is a *worker* for this
-    # run, and never when it is also the orchestrator harness itself — a
-    # Copilot or Codex orchestrator must keep its real config/session state.
-    # Codex worker auth is currently portable via auth.json. Copilot only needs
+    # Only redirect a tool's own home when that tool is a *reviewer* for this
+    # run, and never when it is also the developer harness itself — a
+    # Copilot or Codex developer must keep its real config/session state.
+    # Codex reviewer auth is currently portable via auth.json. Copilot only needs
     # a writable isolated dir (its GitHub credential lives outside ~/.copilot).
     # Claude Code subscription OAuth is not portable by copying
     # .credentials.json into CLAUDE_CONFIG_DIR, so MC deliberately leaves
-    # Claude workers on the operator's normal config unless the caller supplied
+    # Claude reviewers on the operator's normal config unless the caller supplied
     # standard Claude auth environment variables.
-    if "copilot" in worker_tools and orchestrator_harness_name != "copilot":
+    if "copilot" in reviewer_tools and developer_harness_name != "copilot":
         env["COPILOT_HOME"] = str(paths["copilot_home"])
-    if "codex" in worker_tools and orchestrator_harness_name != "codex":
+    if "codex" in reviewer_tools and developer_harness_name != "codex":
         env["CODEX_HOME"] = str(paths["codex_home"])
     return env
 
 
-def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
-    if not worker_tools:
-        return "No worker tool is configured for this run."
+def reviewer_auth_policy_text(reviewer_tools: tuple[str, ...]) -> str:
+    if not reviewer_tools:
+        return "No reviewer tool is configured for this run."
     policies: list[str] = []
-    if "copilot" in worker_tools:
+    if "copilot" in reviewer_tools:
         policies.append(
-            "Copilot gets an isolated per-slice COPILOT_HOME for writable session state when Copilot is a worker "
-            "and not the orchestrator."
+            "Copilot gets an isolated per-slice COPILOT_HOME for writable session state when Copilot is a reviewer "
+            "and not the developer."
         )
-    if "codex" in worker_tools:
-        policies.append("Codex gets an isolated per-slice CODEX_HOME seeded with auth.json when Codex is a worker and not the orchestrator.")
-    if "claude" in worker_tools:
+    if "codex" in reviewer_tools:
+        policies.append("Codex gets an isolated per-slice CODEX_HOME seeded with auth.json when Codex is a reviewer and not the developer.")
+    if "claude" in reviewer_tools:
         policies.append(
-            "Claude workers use the operator's normal Claude Code auth/config; MC does not set CLAUDE_CONFIG_DIR because "
+            "Claude reviewers use the operator's normal Claude Code auth/config; MC does not set CLAUDE_CONFIG_DIR because "
             "copying .credentials.json into an isolated config dir is not a valid portable login. For non-interactive "
             "isolated auth, provide ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN in the environment."
         )
-    unknown = [tool for tool in worker_tools if tool not in {"copilot", "codex", "claude"}]
+    unknown = [tool for tool in reviewer_tools if tool not in {"copilot", "codex", "claude"}]
     for tool in unknown:
         policies.append(f"{tool} uses its configured profile; no credential isolation policy is defined by MC.")
     return " ".join(policies)
@@ -622,44 +617,41 @@ def worker_auth_policy_text(worker_tools: tuple[str, ...]) -> str:
 
 def load_prompt_template() -> str:
     # The extracted template is rendered with str.format in
-    # render_orchestrator_prompt, so any literal `{`/`}` added to the template
-    # block in references/orchestrator-prompt.md (a JSON example, a shell
+    # render_developer_prompt, so any literal `{`/`}` added to the template
+    # block in references/developer-prompt.md (a JSON example, a shell
     # `${var}`) would raise at runtime. Keep placeholders as the only braces in
     # that block, or escape literals as `{{`/`}}`. The template file carries the
     # same warning for editors.
-    path = skill_root() / "references" / "orchestrator-prompt.md"
+    path = skill_root() / "references" / "developer-prompt.md"
     text = path.read_text(encoding="utf-8")
     match = re.search(r"```md\n(?P<template>.*?)\n```", text, flags=re.DOTALL)
     if not match:
-        raise McError(f"orchestrator prompt template not found in {path}")
+        raise McError(f"developer prompt template not found in {path}")
     return match.group("template")
 
 
-def render_orchestrator_prompt(
+def render_developer_prompt(
     state: dict[str, Any],
     plan_slice: PlanSlice,
     slice_artifact_dir: Path,
     run_json: Path,
-    worker_tools: tuple[str, ...] = (),
-    worker_model: str | None = None,
-    worker_effort: str | None = None,
+    reviewer_tools: tuple[str, ...] = (),
+    reviewer_model: str | None = None,
+    reviewer_effort: str | None = None,
 ) -> str:
     del run_json  # The rendered prompt must not disclose controller state.
     template = load_prompt_template()
     paths = slice_paths(slice_artifact_dir)
-    example_tool = worker_tools[0] if len(worker_tools) == 1 else "<one required tool; create one request per tool>"
-    example_role = "senior-worker" if example_tool in {"claude", "codex"} else "junior-worker"
+    example_tool = reviewer_tools[0] if len(reviewer_tools) == 1 else "<one required tool; create one request per tool>"
     request_example = {
-        "schema_version": 1,
+        "schema_version": 2,
         "label": "01-<tool>-<subtask>",
         "slice_id": plan_slice.slice_id,
         "plan_sha256": str(state.get("plan", {}).get("sha256") or ""),
         "tool": example_tool,
-        "model": worker_model or "default",
-        "effort": worker_effort or "default",
-        "role": example_role,
-        "access": "read-only",
-        "task": "<bounded worker task>",
+        "model": reviewer_model or "default",
+        "effort": reviewer_effort or "default",
+        "task": "<bounded reviewer task>",
         "context": "<task-specific context>",
         "required_skills": [],
         "files": [normalize_authorized_entry(entry) for entry in plan_slice.authorized_files],
@@ -670,16 +662,16 @@ def render_orchestrator_prompt(
         "plan_path": state["plan_path"],
         "slice_artifact_dir": str(slice_artifact_dir),
         "result_schema_path": str(result_schema_path()),
-        "worker_jobs_path": str(worker_jobs_path()),
-        "worker_artifact_root": str(paths["worker_artifact_root"]),
+        "reviewer_jobs_path": str(reviewer_jobs_path()),
+        "reviewer_artifact_root": str(paths["reviewer_artifact_root"]),
         "slice_tmp_dir": str(paths["tmp_dir"]),
         "tool_home_root": str(paths["tool_home_root"]),
         "copilot_home": str(paths["copilot_home"]),
         "codex_home": str(paths["codex_home"]),
         "claude_config_dir": str(paths["claude_config_dir"]),
-        "worker_auth_policy": worker_auth_policy_text(worker_tools),
-        "worker_policy_path": str(slice_artifact_dir / "worker-policy.json"),
-        "worker_request_example": json.dumps(request_example, indent=2, sort_keys=True),
+        "reviewer_auth_policy": reviewer_auth_policy_text(reviewer_tools),
+        "reviewer_policy_path": str(slice_artifact_dir / "reviewer-policy.json"),
+        "reviewer_request_example": json.dumps(request_example, indent=2, sort_keys=True),
         "audit_skill_reminder": (
             "This slice is opt-in (`Independent audit required: yes`): the drift-audit and code-review requests "
             "must each set `required_skills` to exactly `[\"drift-audit\"]` or exactly `[\"code-review\"]` — never "
@@ -687,10 +679,10 @@ def render_orchestrator_prompt(
             if plan_slice.independent_audit_required
             else ""
         ),
-        "ai_orchestrator_embedded_instructions": ai_orchestrator_embedded_instructions(),
-        "worker_tools": ", ".join(worker_tools) if worker_tools else "none available for this run",
-        "worker_model": worker_model or "default",
-        "worker_effort": worker_effort or "default",
+        "orchestrator_embedded_instructions": orchestrator_embedded_instructions(),
+        "reviewer_tools": ", ".join(reviewer_tools) if reviewer_tools else "none available for this run",
+        "reviewer_model": reviewer_model or "default",
+        "reviewer_effort": reviewer_effort or "default",
         "slice_id": plan_slice.slice_id,
         "slice_title": plan_slice.title,
         "intended_change": plan_slice.sections.get("Intended Change", ""),
@@ -707,7 +699,7 @@ def render_orchestrator_prompt(
 def load_repair_template() -> str:
     # Same str.format constraint as load_prompt_template: only the documented
     # placeholders may appear as braces in the repair block.
-    path = skill_root() / "references" / "orchestrator-prompt.md"
+    path = skill_root() / "references" / "developer-prompt.md"
     text = path.read_text(encoding="utf-8")
     match = re.search(r"## Repair Template\n.*?```md\n(?P<template>.*?)\n```", text, flags=re.DOTALL)
     if not match:
@@ -721,7 +713,7 @@ _EVIDENCE_GATE_LABELS = {
     "validation": "validation",
     "drift": "drift audit",
     "review": "code review",
-    "worker-evidence": "worker evidence",
+    "reviewer-evidence": "reviewer evidence",
 }
 
 
@@ -738,14 +730,14 @@ def _repair_stanza(
             "Your code changes and any commit you already created are present and correct as far as MC verified; "
             f"do NOT re-implement the slice and do NOT redo work that already passed. Fix only the {label} gap "
             f"quoted above: re-run that gate properly, write its evidence artifact under the slice artifact "
-            "directory, and record the passing outcome in `orchestrator-result.json`."
+            "directory, and record the passing outcome in `developer-result.json`."
         )
     if signature == "unauthorized-files":
         offending = unauthorized_files(set(gate.actual_changed_files), plan_slice.authorized_files)
         start = before_head or "<the slice starting commit recorded by MC>"
         if offending:
             # shlex-quoted so a path with spaces or metacharacters stays one
-            # argument when the orchestrator copies the command literally.
+            # argument when the developer copies the command literally.
             restore_command = shlex.join(["git", "checkout", start, "--", *offending])
         else:
             restore_command = f"git checkout {start} -- <the files named in the gate reason>"
@@ -760,12 +752,12 @@ def _repair_stanza(
         actual = ", ".join(gate.actual_changed_files) if gate.actual_changed_files else "(no changed files)"
         return (
             "Your self-reported `changed_files` does not match git evidence. No file edits are needed: correct the "
-            f"`changed_files` list in `orchestrator-result.json` to exactly match the actual diff: {actual}."
+            f"`changed_files` list in `developer-result.json` to exactly match the actual diff: {actual}."
         )
     if signature == "commit-missing":
         return (
             "Your gates passed but the required commit was never created. use the commit skill for this slice's "
-            "work only, then record the commit in `orchestrator-result.json`."
+            "work only, then record the commit in `developer-result.json`."
         )
     if signature == "dirty-worktree":
         status_path = slice_artifact_dir / "git-status-after.txt"
@@ -779,15 +771,15 @@ def _repair_stanza(
         )
     if signature == "result-malformed":
         return (
-            "Your `orchestrator-result.json` is unreadable or invalid (see the gate reason above). Your file edits "
-            "may be fine; rewrite `orchestrator-result.json` so it is valid JSON matching the required schema, "
+            "Your `developer-result.json` is unreadable or invalid (see the gate reason above). Your file edits "
+            "may be fine; rewrite `developer-result.json` so it is valid JSON matching the required schema, "
             "reporting this same slice honestly."
         )
-    if signature == "orchestrator-repairable":
+    if signature == "developer-repairable":
         return (
             "You reported status `repairable` yourself. Resume this same slice: complete the remaining work inside "
             "the frozen contract, re-run validation, the drift-audit skill, and the code-review skill, and write a "
-            "fresh `orchestrator-result.json`."
+            "fresh `developer-result.json`."
         )
     if signature == "transient-service-unavailable":
         return (
@@ -833,10 +825,10 @@ def render_repair_prompt(
         "category_stanza": _repair_stanza(plan_slice, slice_artifact_dir, gate, before_head),
         "authorized_files": authorized,
         "delegation_posture": (
-            "This slice is opt-in (`Independent audit required: yes`): use separate validated read-only worker requests for "
+            "This slice is opt-in (`Independent audit required: yes`): use separate validated read-only reviewer requests for "
             "`drift-audit` and `code-review`, wait for drift `PASS` before launching review, and retain both successful contracts."
             if plan_slice.independent_audit_required
-            else "This slice uses the default posture: independent delegation remains preferred when a worker is available, "
+            else "This slice uses the default posture: independent delegation remains preferred when a reviewer is available, "
             "but a local audit is accepted. In either case, drift must return `PASS` before code review starts."
         ),
         "slice_artifact_dir": str(slice_artifact_dir),
@@ -864,13 +856,13 @@ def relative_artifact_path(repo: Path, path: Path) -> str:
         return str(path)
 
 
-def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
-    worker_root = slice_artifact_dir / "worker-runs"
-    if not worker_root.exists():
+def capture_reviewer_runs_summary(slice_artifact_dir: Path) -> None:
+    reviewer_root = slice_artifact_dir / "reviewer-runs"
+    if not reviewer_root.exists():
         return
     runs: list[dict[str, Any]] = []
-    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
-        run_entry: dict[str, Any] = {"run_dir": str(run_dir), "workers": []}
+    for run_dir in sorted(path for path in reviewer_root.iterdir() if path.is_dir() and not path.is_symlink()):
+        run_entry: dict[str, Any] = {"run_dir": str(run_dir), "reviewers": []}
         manifest_path = run_dir / "manifest.json"
         if manifest_path.exists():
             try:
@@ -883,24 +875,24 @@ def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
                 status = json.loads(status_path_obj.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 status = {"path": str(status_path_obj), "error": str(exc)}
-            run_entry["workers"].append(status)
+            run_entry["reviewers"].append(status)
         runs.append(run_entry)
     if not runs:
         return
-    (slice_artifact_dir / "worker-runs-summary.json").write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    (slice_artifact_dir / "reviewer-runs-summary.json").write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def cancel_worker_runs(slice_artifact_dir: Path) -> list[dict[str, Any]]:
-    """Idempotently stop every helper-tracked worker for a terminal slice."""
-    worker_root = slice_artifact_dir / "worker-runs"
+def cancel_reviewer_runs(slice_artifact_dir: Path) -> list[dict[str, Any]]:
+    """Idempotently stop every helper-tracked reviewer for a terminal slice."""
+    reviewer_root = slice_artifact_dir / "reviewer-runs"
     results: list[dict[str, Any]] = []
-    if not worker_root.exists():
+    if not reviewer_root.exists():
         return results
-    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
+    for run_dir in sorted(path for path in reviewer_root.iterdir() if path.is_dir() and not path.is_symlink()):
         if not (run_dir / "manifest.json").is_file():
             continue
         result = run_command(
-            [sys.executable, str(worker_jobs_path()), "cancel", "--run-dir", str(run_dir), "--json"],
+            [sys.executable, str(reviewer_jobs_path()), "cancel", "--run-dir", str(run_dir), "--json"],
             allow_failure=True,
         )
         results.append(
@@ -912,41 +904,41 @@ def cancel_worker_runs(slice_artifact_dir: Path) -> list[dict[str, Any]]:
             }
         )
     if results:
-        (slice_artifact_dir / "worker-cancel-summary.json").write_text(
+        (slice_artifact_dir / "reviewer-cancel-summary.json").write_text(
             json.dumps({"runs": results}, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
     return results
 
 
-def cancel_run_workers(run_dir: Path) -> list[dict[str, Any]]:
-    """Cancel tracked workers across every slice, including stale prior slices."""
+def cancel_run_reviewers(run_dir: Path) -> list[dict[str, Any]]:
+    """Cancel tracked reviewers across every slice, including stale prior slices."""
     results: list[dict[str, Any]] = []
     slices_dir = run_dir / "slices"
     if not slices_dir.exists():
         return results
     for artifact_dir in sorted(path for path in slices_dir.glob("slice-*") if path.is_dir() and not path.is_symlink()):
-        results.extend(cancel_worker_runs(artifact_dir))
-        capture_worker_runs_summary(artifact_dir)
+        results.extend(cancel_reviewer_runs(artifact_dir))
+        capture_reviewer_runs_summary(artifact_dir)
     return results
 
 
-def worker_delegation_overview(slice_artifact_dir: Path) -> list[dict[str, Any]]:
-    """Per-worker delegation visibility for summaries.
+def reviewer_delegation_overview(slice_artifact_dir: Path) -> list[dict[str, Any]]:
+    """Per-reviewer delegation visibility for summaries.
 
-    Reports every worker launch found under the slice's worker-runs tree:
-    label, tool, process state/returncode, and whether the worker's output
+    Reports every reviewer launch found under the slice's reviewer-runs tree:
+    label, tool, process state/returncode, and whether the reviewer's output
     contains the marker its own request's expected_output contracted
     (``RESULT:`` / ``SECTION:``). Observability only — never part of gate
     acceptance. This surfaces failed-then-retried delegations (for example a
-    worker that refused its task but exited 0) that the process-level
-    worker-evidence gate has no reason to reject.
+    reviewer that refused its task but exited 0) that the process-level
+    reviewer-evidence gate has no reason to reject.
     """
-    worker_root = slice_artifact_dir / "worker-runs"
+    reviewer_root = slice_artifact_dir / "reviewer-runs"
     overview: list[dict[str, Any]] = []
-    if not worker_root.exists():
+    if not reviewer_root.exists():
         return overview
-    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
+    for run_dir in sorted(path for path in reviewer_root.iterdir() if path.is_dir() and not path.is_symlink()):
         manifest: dict[str, Any] = {}
         manifest_path = run_dir / "manifest.json"
         if manifest_path.exists():
@@ -955,8 +947,8 @@ def worker_delegation_overview(slice_artifact_dir: Path) -> list[dict[str, Any]]
                 manifest = loaded if isinstance(loaded, dict) else {}
             except json.JSONDecodeError:
                 manifest = {}
-        workers = manifest.get("workers") if isinstance(manifest.get("workers"), dict) else {}
-        for label, entry in sorted(workers.items()):
+        reviewers = manifest.get("reviewers") if isinstance(manifest.get("reviewers"), dict) else {}
+        for label, entry in sorted(reviewers.items()):
             if not isinstance(entry, dict):
                 continue
             status: dict[str, Any] = {}

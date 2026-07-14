@@ -20,26 +20,26 @@ Each contract lives in exactly one place; everything else points at it. Before e
 | Plan format and machine-consumed fields | `skills/implementation-plan/SKILL.md` |
 | MC trust boundary and safety rules | `skills/master-controller/SKILL.md` → "Safety Rules" |
 | Run-state schema | `skills/master-controller/references/run-state-schema.md` |
-| Orchestrator and repair prompt contracts | `skills/master-controller/references/orchestrator-prompt.md` |
+| Developer and repair prompt contracts | `skills/master-controller/references/developer-prompt.md` |
 | Harness adapter/profile contract | `skills/master-controller/references/harness-adapter-contract.md` |
-| Worker policy/request contract and access modes | `skills/ai-orchestrator/references/worker-contract.md` |
-| Per-harness CLI capabilities | `skills/ai-orchestrator/references/<harness>.md` |
+| Reviewer request contract and read-only semantics | `skills/orchestrator/references/reviewer-contract.md` |
+| Per-harness CLI capabilities | `skills/orchestrator/references/<harness>.md` |
 | Privacy and data flows, artifact sensitivity | `skills/master-controller/README.md` → "Privacy and Data Flows" |
-| Maintainer guides | `skills/ai-orchestrator/AGENTS.md`, `skills/master-controller/AGENTS.md` |
+| Maintainer guides | `skills/orchestrator/AGENTS.md`, `skills/master-controller/AGENTS.md` |
 
 Each skill's `SKILL.md` is the source of truth for its own triggers, workflow, and output format; the top-level README only indexes them.
 
 ## Tests
 
 - Master Controller: `python3 -m unittest discover -s skills/master-controller/tests -p 'test_*.py'`. Tests needing `tmux` self-skip when it is absent; no test needs a real coding CLI (runtime tests inject fake harnesses). Themed modules and what belongs where: see `skills/master-controller/AGENTS.md` → "Test Matrix".
-- AI Orchestrator: `python3 -m unittest discover -s skills/ai-orchestrator/tests -p 'test_*.py'`.
+- Orchestrator: `python3 -m unittest discover -s skills/orchestrator/tests -p 'test_*.py'`.
 - CI runs both suites plus compile checks on every push and pull request using the minimum supported MC runtime, Python 3.13. Keep them green; never weaken a failing test to make it pass — a failing test is evidence of a real problem.
 - New behavior lands with a regression test pinned beside it. Keep tests boundary-focused rather than permutation-heavy.
 
 ## Change Conventions
 
 - **Fail closed by default.** Ambiguity stops a run; new paths must not accept work from narration, pane text, or hints.
-- **Fix the owning layer.** Root-cause first; strengthen the contract layer that owns the problem (one definition, all harnesses) rather than patching a symptom where it appeared. Do not migrate slice-orchestrator responsibilities into MC.
+- **Fix the owning layer.** Root-cause first; strengthen the contract layer that owns the problem (one definition, all harnesses) rather than patching a symptom where it appeared. Do not migrate slice Developer responsibilities into MC.
 - **Replace, don't shadow.** When a stronger deterministic contract replaces an older path, remove the obsolete path and update tests and docs in the same change.
 - **Be honest about enforcement.** Every documented guarantee names its layer: mechanical, evidence-checked, or heuristic. Overclaiming is a defect.
 - **Never bypass hooks** (`--no-verify` is off the table); fix the issue and commit again.

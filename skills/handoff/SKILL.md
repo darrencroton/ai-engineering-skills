@@ -39,7 +39,7 @@ When relevant:
 - commands that succeeded or failed
 - design constraints from the user
 - links to local docs or plans
-- orchestrator session details
+- Developer session and Reviewer-run details
 
 Never:
 - chatty narrative or repeated background
@@ -97,8 +97,8 @@ Use this structure. For Quick Mode, omit sections that do not apply.
 ## Files That Matter
 - Paths to files changed, created, or heavily inspected, with a brief reason each matters.
 
-## Orchestrator State (only if called as part of an orchestrator session)
-- Active run dir, list of workers, model ratings so far, next planned workers
+## Developer / Reviewer State (only if called as part of an orchestrator workflow)
+- Active run dir, Developer session, Reviewer runs and tool/labels, audit provenance, and any planned Reviewer work
 
 ## Validation
 - Tests, lint, builds, or manual checks already run, with results.
@@ -193,11 +193,12 @@ Add only when they provide real value:
 - `src/routes/admin.ts`: still using legacy path.
 - `tests/auth/integration.test.ts`: primary regression coverage.
 
-## Orchestrator State
-- Run dir: `.ai-orchestrator/current/`
-- Workers: `01-claude-refactor-auth` (completed), `02-codex-add-tests` (in-progress)
-- Model ratings so far: codex 8/10 targeted edits, claude 7/10 review
-- Next planned workers: `03-copilot-git-ops` — pending 02 completion
+## Developer / Reviewer State
+- Run dir: `.orchestrator/current/`
+- Developer: `codex` — implementation and validation complete
+- Reviewers: `01-claude-drift-audit` (PASS), `02-opencode-code-review` (in progress)
+- Audit provenance: drift audit by Reviewer `01-claude-drift-audit`; code review pending Reviewer `02-opencode-code-review`
+- Next planned Reviewer work: complete code review; no Reviewer mutation work is permitted
 
 ## Validation
 - Targeted auth unit tests passed.

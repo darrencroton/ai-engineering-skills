@@ -66,7 +66,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope; prepares the receipt for drift audit. |
 | [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Runs before any quality review. |
 | [`code-review`](skills/code-review/) | Senior-level quality review after drift audit passes: correctness, edge cases, tests, error handling, domain-specific risks. |
-| [`ai-orchestrator`](skills/ai-orchestrator/) | Manages delegation to external AI CLI workers through a validated semantic contract; the orchestrator retains planning, verification, and final responsibility. |
+| [`orchestrator`](skills/orchestrator/) | Manages read-only Reviewer delegation through validated semantic contracts; the Developer retains implementation, verification, gates, commits, and final responsibility. |
 | [`code-simplifier`](skills/code-simplifier/) | Behaviour-preserving clarity pass over working code; a separate cleanup step, not part of the default chain. |
 | [`handoff`](skills/handoff/) | Compact continuation state for the next session: status, blockers, frozen contract, exact next action. |
 | [`commit`](skills/commit/) | Disciplined commits: stage by name, never skip hooks, message lists every file with reasons. |
@@ -90,7 +90,7 @@ Each launcher template lives in exactly one place: both Mode A launchers (checkp
 
 ## Privacy and Data Flows
 
-Everything the system produces — run state, artifacts, transcripts, worker evidence — stays on your machine, and local/self-hosted models are first-class citizens at every rung. What leaves the machine is determined entirely by which models you place in which seats; the per-mode breakdown, the fully-local configurations, and the artifact sensitivity map are in [`skills/master-controller/README.md`](skills/master-controller/README.md) → "Privacy and Data Flows".
+Everything the system produces — run state, artifacts, transcripts, Reviewer evidence — stays on your machine, and local/self-hosted models are first-class citizens at every rung. What leaves the machine is determined entirely by which models you place in which seats; the per-mode breakdown, the fully-local configurations, and the artifact sensitivity map are in [`skills/master-controller/README.md`](skills/master-controller/README.md) → "Privacy and Data Flows".
 
 ## Glossary
 
@@ -100,9 +100,9 @@ Everything the system produces — run state, artifacts, transcripts, worker evi
 - **Drift audit** — the authorization gate: compares actual changes against the frozen contract, before any quality judgment.
 - **Gate** — a check that must pass before work advances: validation, drift audit, code review, commit evidence, clean worktree.
 - **Harness** — a coding-agent CLI (Codex CLI, Claude Code, OpenCode, Copilot CLI, …) that MC or you run a session in.
-- **Orchestrating assistant** — the human-facing agent that owns a task end-to-end and delegates through `ai-orchestrator`.
-- **Slice orchestrator** — the per-slice session MC launches and supervises; same discipline, no final authority.
-- **Worker** — a bounded, single-purpose helper launched through a validated contract; owns no gates, never commits, never re-delegates.
+- **Orchestrator** — the skill and workflow that coordinates Developer execution with optional read-only Reviewer evidence.
+- **Developer** — the context-rich agent that owns implementation, validation, session management, gates, commits, and delivery. Under MC it is the supervised per-slice session and has no authority above MC.
+- **Reviewer** — a read-only helper for investigation, evidence gathering, drift audit, and code review. It owns no gates, never mutates the repository, never commits, and never re-delegates.
 - **Supervising model** — in Mode B, the model that drives MC's commands and handles operational judgment; it never decides acceptance.
 - **Master Controller (MC)** — the deterministic supervisor: run state, gates, repair loop, stop authority.
 - **Repair loop** — MC's bounded self-correction: a fixable gate failure is steered back into the live session and re-verified at full rigor; budgets and a circuit breaker cap it.

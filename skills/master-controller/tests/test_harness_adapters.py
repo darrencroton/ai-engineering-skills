@@ -5,13 +5,23 @@ from mc_lib import profiles as mc_profiles
 
 
 class HarnessAdapterProfileTests(McTestCase):
+    def test_profiles_are_mechanical_and_all_harnesses_are_operator_selectable(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        self.assertEqual(set(mc.HARNESS_PROFILES), {"claude", "codex", "copilot", "opencode"})
+        for harness, profile in mc.HARNESS_PROFILES.items():
+            with self.subTest(harness=harness):
+                self.assertNotIn("roles", profile)
+                self.assertTrue(mc.profile_command(harness, self.repo, state, ()))
+                self.assertTrue(mc.profile_command(harness, self.repo, state, (harness,)))
+
     def test_adapter_command_construction_exports_mc_environment(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         adapter = mc.TmuxHarnessAdapter("codex", "python fake.py")
         command = adapter.build_shell_command(Path("/tmp/artifacts"), Path("/tmp/run.json"), self.plan, plan_slice)
-        self.assertIn("AI_ORCHESTRATOR_ARTIFACT_ROOT=/tmp/artifacts/worker-runs", command)
-        # Tool homes are redirected only for that tool as a worker; with no
-        # worker tools configured no home redirect may leak into the launch.
+        self.assertIn("ORCHESTRATOR_ARTIFACT_ROOT=/tmp/artifacts/reviewer-runs", command)
+        # Tool homes are redirected only for that tool as a reviewer; with no
+        # reviewer tools configured no home redirect may leak into the launch.
         self.assertNotIn("COPILOT_HOME=", command)
         self.assertNotIn("CODEX_HOME=", command)
         self.assertIn("MC_RESULT_SCHEMA_PATH=", command)
@@ -20,12 +30,12 @@ class HarnessAdapterProfileTests(McTestCase):
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
         self.assertIn("MC_SLICE_TMP_DIR=/tmp/artifacts/tmp", command)
         self.assertIn("MC_TOOL_HOME_ROOT=/tmp/artifacts/tool-homes", command)
-        self.assertIn("MC_WORKER_JOBS_PATH=", command)
-        self.assertIn("MC_WORKER_POLICY_PATH=/tmp/artifacts/worker-policy.json", command)
+        self.assertIn("MC_REVIEWER_JOBS_PATH=", command)
+        self.assertIn("MC_REVIEWER_POLICY_PATH=/tmp/artifacts/reviewer-policy.json", command)
         self.assertIn("TMPDIR=/tmp/artifacts/tmp", command)
         self.assertTrue(command.endswith("python fake.py"))
 
-    def test_codex_profile_command_composes_worker_and_commit_requirements(self):
+    def test_codex_profile_command_composes_reviewer_and_commit_requirements(self):
         self.prepare_committed_repo()
         state = self.init_run()
         command = mc.profile_command("codex", self.repo, state, ("copilot",))
@@ -60,14 +70,14 @@ class HarnessAdapterProfileTests(McTestCase):
     def test_harness_model_requires_profile_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
-        args = argparse.Namespace(harness_command=None, allow_profile_command=False, worker_tools="", harness_model="sonnet")
+        args = argparse.Namespace(harness_command=None, allow_profile_command=False, reviewer_tools="", harness_model="sonnet")
         with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
             mc.resolve_harness_command(args, self.repo, state)
 
     def test_harness_effort_requires_profile_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
-        args = argparse.Namespace(harness_command=None, allow_profile_command=False, worker_tools="", harness_effort="medium")
+        args = argparse.Namespace(harness_command=None, allow_profile_command=False, reviewer_tools="", harness_effort="medium")
         with self.assertRaisesRegex(mc.McError, "only supported with --allow-profile-command"):
             mc.resolve_harness_command(args, self.repo, state)
 
@@ -89,23 +99,23 @@ class HarnessAdapterProfileTests(McTestCase):
             harness_effort=None,
             allow_profile_command=False,
             allow_unattended_default=False,
-            worker_tools="",
+            reviewer_tools="",
         )
         effective = mc.effective_launch_args(later_args, state)
         self.assertTrue(effective.allow_profile_command)
         self.assertEqual(effective.harness_model, "persisted-model")
         self.assertEqual(effective.harness_effort, "high")
 
-    def test_run_launch_configuration_persists_harness_and_worker_identity_across_slices(self):
+    def test_run_launch_configuration_persists_harness_and_reviewer_identity_across_slices(self):
         self.prepare_committed_repo()
         state = self.init_run()
         first = argparse.Namespace(
             harness_command=None,
-            harness_model="provider/orchestrator",
+            harness_model="provider/developer",
             harness_effort="high",
-            worker_tools="claude",
-            worker_model="sonnet",
-            worker_effort="high",
+            reviewer_tools="claude",
+            reviewer_model="sonnet",
+            reviewer_effort="high",
             allow_profile_command=True,
             allow_unattended_default=False,
         )
@@ -114,20 +124,20 @@ class HarnessAdapterProfileTests(McTestCase):
             harness_command=None,
             harness_model=None,
             harness_effort=None,
-            worker_tools="",
-            worker_model=None,
-            worker_effort=None,
+            reviewer_tools="",
+            reviewer_model=None,
+            reviewer_effort=None,
             allow_profile_command=False,
             allow_unattended_default=False,
         )
 
         effective = mc.effective_run_launch_args(later, state)
 
-        self.assertEqual(effective.harness_model, "provider/orchestrator")
+        self.assertEqual(effective.harness_model, "provider/developer")
         self.assertEqual(effective.harness_effort, "high")
-        self.assertEqual(effective.worker_tools, "claude")
-        self.assertEqual(effective.worker_model, "sonnet")
-        self.assertEqual(effective.worker_effort, "high")
+        self.assertEqual(effective.reviewer_tools, "claude")
+        self.assertEqual(effective.reviewer_model, "sonnet")
+        self.assertEqual(effective.reviewer_effort, "high")
         self.assertTrue(effective.allow_profile_command)
 
     def test_run_launch_configuration_rejects_cross_slice_model_change(self):
@@ -137,9 +147,9 @@ class HarnessAdapterProfileTests(McTestCase):
             harness_command=None,
             harness_model="provider/original",
             harness_effort=None,
-            worker_tools="opencode",
-            worker_model="provider/worker",
-            worker_effort=None,
+            reviewer_tools="opencode",
+            reviewer_model="provider/reviewer",
+            reviewer_effort=None,
             allow_profile_command=True,
             allow_unattended_default=False,
         )
@@ -150,7 +160,7 @@ class HarnessAdapterProfileTests(McTestCase):
         with self.assertRaisesRegex(mc.McError, "frozen run launch configuration"):
             mc.effective_run_launch_args(changed, state)
 
-    def test_copilot_profile_composes_orchestrator_command(self):
+    def test_copilot_profile_composes_developer_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
         command = mc.profile_command("copilot", self.repo, state, (), harness_model="claude-sonnet-4.6")
@@ -160,7 +170,7 @@ class HarnessAdapterProfileTests(McTestCase):
             ["copilot", "--allow-all-tools", "--autopilot", "--model", "claude-sonnet-4.6"],
         )
 
-    def test_opencode_profile_composes_orchestrator_command(self):
+    def test_opencode_profile_composes_developer_command(self):
         self.prepare_committed_repo()
         state = self.init_run()
         command = mc.profile_command(
@@ -366,7 +376,7 @@ class HarnessAdapterProfileTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=sys.executable,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
         )
         output = io.StringIO()
@@ -374,7 +384,7 @@ class HarnessAdapterProfileTests(McTestCase):
             self.assertEqual(mc.preflight(args), 0)
         self.assertIn("Preflight passed.", output.getvalue())
 
-    def test_seed_worker_credentials_copies_codex_auth_when_requested(self):
+    def test_seed_reviewer_credentials_copies_codex_auth_when_requested(self):
         fake_codex_home = Path(self.tmp.name) / "fake-codex-home"
         fake_codex_home.mkdir()
         (fake_codex_home / "auth.json").write_text('{"token": "secret"}', encoding="utf-8")
@@ -383,13 +393,13 @@ class HarnessAdapterProfileTests(McTestCase):
         for path in paths.values():
             path.mkdir(parents=True, exist_ok=True)
         with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
-            warnings = mc.seed_worker_credentials(paths, ("codex",), "claude")
+            warnings = mc.seed_reviewer_credentials(paths, ("codex",), "claude")
         self.assertEqual(warnings, [])
         seeded = paths["codex_home"] / "auth.json"
         self.assertEqual(seeded.read_text(encoding="utf-8"), '{"token": "secret"}')
         self.assertEqual(seeded.stat().st_mode & 0o777, 0o600)
 
-    def test_seed_worker_credentials_skips_when_tool_is_orchestrator_itself(self):
+    def test_seed_reviewer_credentials_skips_when_tool_is_developer_itself(self):
         fake_codex_home = Path(self.tmp.name) / "fake-codex-home"
         fake_codex_home.mkdir()
         (fake_codex_home / "auth.json").write_text('{"token": "secret"}', encoding="utf-8")
@@ -398,38 +408,38 @@ class HarnessAdapterProfileTests(McTestCase):
         for path in paths.values():
             path.mkdir(parents=True, exist_ok=True)
         with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
-            warnings = mc.seed_worker_credentials(paths, ("codex",), "codex")
+            warnings = mc.seed_reviewer_credentials(paths, ("codex",), "codex")
         self.assertEqual(warnings, [])
         self.assertFalse((paths["codex_home"] / "auth.json").exists())
 
-    def test_seed_worker_credentials_warns_when_source_missing(self):
+    def test_seed_reviewer_credentials_warns_when_source_missing(self):
         fake_codex_home = Path(self.tmp.name) / "missing-codex-home"
         slice_artifact_dir = Path(self.tmp.name) / "slice-001"
         paths = mc.slice_paths(slice_artifact_dir)
         for path in paths.values():
             path.mkdir(parents=True, exist_ok=True)
         with mock.patch.dict("os.environ", {"CODEX_HOME": str(fake_codex_home)}):
-            warnings = mc.seed_worker_credentials(paths, ("codex",), "claude")
+            warnings = mc.seed_reviewer_credentials(paths, ("codex",), "claude")
         self.assertEqual(len(warnings), 1)
-        self.assertIn("codex worker credential source not found", warnings[0])
+        self.assertIn("codex reviewer credential source not found", warnings[0])
 
-    def test_slice_environment_isolates_worker_home_but_not_orchestrators_own(self):
+    def test_slice_environment_isolates_reviewer_home_but_not_developers_own(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         artifact_dir = Path("/tmp/artifacts")
         run_json = Path("/tmp/run.json")
-        claude_orchestrator_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "claude", ("codex",))
-        self.assertEqual(claude_orchestrator_env["CODEX_HOME"], str(artifact_dir / "codex-home"))
-        self.assertNotIn("CLAUDE_CONFIG_DIR", claude_orchestrator_env)
+        claude_developer_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "claude", ("codex",))
+        self.assertEqual(claude_developer_env["CODEX_HOME"], str(artifact_dir / "codex-home"))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", claude_developer_env)
 
-        codex_orchestrator_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("codex",))
-        self.assertNotIn("CODEX_HOME", codex_orchestrator_env)
+        codex_developer_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("codex",))
+        self.assertNotIn("CODEX_HOME", codex_developer_env)
 
-        codex_with_claude_worker_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("claude",))
-        self.assertNotIn("CLAUDE_CONFIG_DIR", codex_with_claude_worker_env)
+        codex_with_claude_reviewer_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice, "codex", ("claude",))
+        self.assertNotIn("CLAUDE_CONFIG_DIR", codex_with_claude_reviewer_env)
 
-        no_worker_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice)
-        self.assertNotIn("CODEX_HOME", no_worker_env)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", no_worker_env)
+        no_reviewer_env = mc.slice_environment(artifact_dir, run_json, self.plan, plan_slice)
+        self.assertNotIn("CODEX_HOME", no_reviewer_env)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", no_reviewer_env)
 
     def test_profile_command_claude_appends_session_id(self):
         self.prepare_committed_repo()
@@ -453,39 +463,39 @@ class HarnessAdapterProfileTests(McTestCase):
         self.assertIn("--effort medium", command)
         self.assertIn("--session-id fixed-session-id", command)
 
-    def test_capture_orchestrator_transcript_copies_existing_session_file(self):
+    def test_capture_developer_transcript_copies_existing_session_file(self):
         slice_artifact_dir = Path(self.tmp.name) / "slice-001"
         slice_artifact_dir.mkdir()
         session_id = "abc-123"
         expected_source = Path(self.tmp.name) / "claude-project" / f"{session_id}.jsonl"
         expected_source.parent.mkdir(parents=True)
         expected_source.write_text('{"type": "user"}\n', encoding="utf-8")
-        with mock.patch.object(mc_runtime, "claude_orchestrator_transcript_path", return_value=expected_source):
-            mc.capture_orchestrator_transcript("claude", self.repo, session_id, slice_artifact_dir)
+        with mock.patch.object(mc_runtime, "claude_developer_transcript_path", return_value=expected_source):
+            mc.capture_developer_transcript("claude", self.repo, session_id, slice_artifact_dir)
         self.assertEqual(
-            (slice_artifact_dir / "orchestrator-transcript.jsonl").read_text(encoding="utf-8"),
+            (slice_artifact_dir / "developer-transcript.jsonl").read_text(encoding="utf-8"),
             '{"type": "user"}\n',
         )
-        self.assertFalse((slice_artifact_dir / "orchestrator-transcript-note.txt").exists())
+        self.assertFalse((slice_artifact_dir / "developer-transcript-note.txt").exists())
 
-    def test_capture_orchestrator_transcript_notes_when_session_file_missing(self):
+    def test_capture_developer_transcript_notes_when_session_file_missing(self):
         slice_artifact_dir = Path(self.tmp.name) / "slice-001"
         slice_artifact_dir.mkdir()
         missing_source = Path(self.tmp.name) / "claude-project" / "missing.jsonl"
-        with mock.patch.object(mc_runtime, "claude_orchestrator_transcript_path", return_value=missing_source):
-            mc.capture_orchestrator_transcript("claude", self.repo, "some-id", slice_artifact_dir)
-        self.assertFalse((slice_artifact_dir / "orchestrator-transcript.jsonl").exists())
-        note = (slice_artifact_dir / "orchestrator-transcript-note.txt").read_text(encoding="utf-8")
-        self.assertIn("orchestrator transcript not found", note)
+        with mock.patch.object(mc_runtime, "claude_developer_transcript_path", return_value=missing_source):
+            mc.capture_developer_transcript("claude", self.repo, "some-id", slice_artifact_dir)
+        self.assertFalse((slice_artifact_dir / "developer-transcript.jsonl").exists())
+        note = (slice_artifact_dir / "developer-transcript-note.txt").read_text(encoding="utf-8")
+        self.assertIn("developer transcript not found", note)
 
-    def test_capture_orchestrator_transcript_noop_for_non_claude_harness(self):
+    def test_capture_developer_transcript_noop_for_non_claude_harness(self):
         slice_artifact_dir = Path(self.tmp.name) / "slice-001"
         slice_artifact_dir.mkdir()
-        mc.capture_orchestrator_transcript("codex", self.repo, "some-id", slice_artifact_dir)
-        self.assertFalse((slice_artifact_dir / "orchestrator-transcript.jsonl").exists())
-        self.assertFalse((slice_artifact_dir / "orchestrator-transcript-note.txt").exists())
+        mc.capture_developer_transcript("codex", self.repo, "some-id", slice_artifact_dir)
+        self.assertFalse((slice_artifact_dir / "developer-transcript.jsonl").exists())
+        self.assertFalse((slice_artifact_dir / "developer-transcript-note.txt").exists())
 
-    def test_preflight_checks_worker_credential_source(self):
+    def test_preflight_checks_reviewer_credential_source(self):
         self.prepare_committed_repo()
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="claude", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
@@ -495,7 +505,7 @@ class HarnessAdapterProfileTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="codex",
+            reviewer_tools="codex",
             allow_profile_command=True,
         )
         output = io.StringIO()
@@ -503,9 +513,9 @@ class HarnessAdapterProfileTests(McTestCase):
             with contextlib.redirect_stdout(output):
                 result = mc.preflight(preflight_args)
         self.assertEqual(result, 2)
-        self.assertIn("codex worker credential source", output.getvalue())
+        self.assertIn("codex reviewer credential source", output.getvalue())
 
-    def test_preflight_skips_credential_check_when_worker_tool_is_orchestrator(self):
+    def test_preflight_skips_credential_check_when_reviewer_tool_is_developer(self):
         self.prepare_committed_repo()
         state = self.init_run()
         missing_codex_home = Path(self.tmp.name) / "missing-codex-home"
@@ -513,18 +523,18 @@ class HarnessAdapterProfileTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="codex",
+            reviewer_tools="codex",
             allow_profile_command=True,
         )
         output = io.StringIO()
         with mock.patch.dict("os.environ", {"CODEX_HOME": str(missing_codex_home)}):
             with contextlib.redirect_stdout(output):
                 mc.preflight(preflight_args)
-        self.assertNotIn("codex worker credential source", output.getvalue())
+        self.assertNotIn("codex reviewer credential source", output.getvalue())
 
-    def test_preflight_fails_when_opt_in_slice_has_no_worker(self):
+    def test_preflight_fails_when_opt_in_slice_has_no_reviewer(self):
         # An opt-in slice ("Independent audit required: yes") with no
-        # --worker-tools configured must fail at preflight, so the operator
+        # --reviewer-tools configured must fail at preflight, so the operator
         # learns at setup time instead of only at the finalize gate.
         self.plan.write_text(
             self.plan.read_text(encoding="utf-8").replace(
@@ -540,14 +550,14 @@ class HarnessAdapterProfileTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=True,
         )
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = mc.preflight(preflight_args)
         self.assertEqual(result, 2)
-        self.assertIn("independent-audit worker available", output.getvalue())
+        self.assertIn("independent-audit reviewer available", output.getvalue())
 
 
     # --- Review fixes: fail-closed parsing -------------------------------
@@ -573,7 +583,7 @@ class HarnessAdapterProfileTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
         )
@@ -602,8 +612,8 @@ class HarnessAdapterProfileTests(McTestCase):
                 with mock.patch.object(adapter, "_pane_text", return_value="new codex ui without the old banner"):
                     adapter.wait_until_prompt_ready("some-session")
 
-    def test_worker_jobs_module_exposes_claude_project_root(self):
-        module = mc.worker_jobs_module()
+    def test_reviewer_jobs_module_exposes_claude_project_root(self):
+        module = mc.reviewer_jobs_module()
         self.assertTrue(hasattr(module, "claude_project_root"))
 
 

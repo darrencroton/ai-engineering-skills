@@ -35,10 +35,10 @@ jobs:
       - name: Compile check
         run: |
           python3 -m py_compile skills/master-controller/scripts/mc.py skills/master-controller/scripts/mc_lib/*.py
-          python3 -m py_compile skills/ai-orchestrator/scripts/worker_contract.py skills/ai-orchestrator/scripts/worker_sessions.py skills/ai-orchestrator/scripts/worker_jobs.py
+          python3 -m py_compile skills/orchestrator/scripts/reviewer_contract.py skills/orchestrator/scripts/reviewer_sessions.py skills/orchestrator/scripts/reviewer_jobs.py
 
       - name: Master Controller tests
         run: python3 -m unittest discover -s skills/master-controller/tests -p 'test_*.py'
 
-      - name: AI Orchestrator tests
-        run: python3 -m unittest discover -s skills/ai-orchestrator/tests -p 'test_*.py'
+      - name: Orchestrator tests
+        run: python3 -m unittest discover -s skills/orchestrator/tests -p 'test_*.py'

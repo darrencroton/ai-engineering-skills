@@ -143,7 +143,7 @@ def write_fake_harness(path):
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
             result = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": f"{slice_id} done",
@@ -156,7 +156,7 @@ def write_fake_harness(path):
                 "blockers": [],
                 "residual_findings": [],
             }
-            (artifact / "orchestrator-result.json").write_text(json.dumps(result), encoding="utf-8")
+            (artifact / "developer-result.json").write_text(json.dumps(result), encoding="utf-8")
             time.sleep(5)
             """
         ).strip()
@@ -235,8 +235,8 @@ def write_usage_limit_resume_harness(path):
             (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
-            (artifact / "orchestrator-result.json").write_text(json.dumps({
-                "schema_version": 2,
+            (artifact / "developer-result.json").write_text(json.dumps({
+                "schema_version": 3,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "resumed after rolling limit",
@@ -272,8 +272,8 @@ def write_repairable_then_pass_harness(path):
             slice_id = os.environ["MC_SLICE_ID"]
             if not marker.exists():
                 marker.write_text("seen\\n", encoding="utf-8")
-                (artifact / "orchestrator-result.json").write_text(json.dumps({
-                    "schema_version": 2,
+                (artifact / "developer-result.json").write_text(json.dumps({
+                    "schema_version": 3,
                     "slice_id": slice_id,
                     "status": "repairable",
                     "summary": "retry",
@@ -296,8 +296,8 @@ def write_repairable_then_pass_harness(path):
             (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
-            (artifact / "orchestrator-result.json").write_text(json.dumps({
-                "schema_version": 2,
+            (artifact / "developer-result.json").write_text(json.dumps({
+                "schema_version": 3,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "repaired",
@@ -337,8 +337,8 @@ termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
 
 
 def write_failing_validation_result():
-    (artifact / "orchestrator-result.json").write_text(json.dumps({
-        "schema_version": 2,
+    (artifact / "developer-result.json").write_text(json.dumps({
+        "schema_version": 3,
         "slice_id": slice_id,
         "status": "pass",
         "summary": "no validation yet",
@@ -404,8 +404,8 @@ def write_in_session_repair_harness(path):
             (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
-            (artifact / "orchestrator-result.json").write_text(json.dumps({
-                "schema_version": 2,
+            (artifact / "developer-result.json").write_text(json.dumps({
+                "schema_version": 3,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "repaired in session",
@@ -456,8 +456,8 @@ def write_alternating_failure_harness(path):
             def write_failing_review_result():
                 (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
                 (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
-                (artifact / "orchestrator-result.json").write_text(json.dumps({
-                    "schema_version": 2,
+                (artifact / "developer-result.json").write_text(json.dumps({
+                    "schema_version": 3,
                     "slice_id": slice_id,
                     "status": "pass",
                     "summary": "review failed",
@@ -525,8 +525,8 @@ def write_wrong_slice_id_harness(path):
             from pathlib import Path
 
             artifact = Path(os.environ["MC_SLICE_ARTIFACT_DIR"])
-            (artifact / "orchestrator-result.json").write_text(json.dumps({
-                "schema_version": 2,
+            (artifact / "developer-result.json").write_text(json.dumps({
+                "schema_version": 3,
                 "slice_id": "Slice 99",
                 "status": "pass",
                 "summary": "worked the wrong slice",
@@ -578,7 +578,7 @@ class McTestCase(unittest.TestCase):
         before_head=None,
         commit=None,
     ):
-        """Return a complete schema-v2 terminal entry for state-focused tests."""
+        """Return a complete schema-v3 terminal entry for state-focused tests."""
         ordinal = int(slice_id.rsplit(" ", 1)[-1])
         return {
             "slice_id": slice_id,
@@ -593,42 +593,48 @@ class McTestCase(unittest.TestCase):
             "validation": [],
             "drift_audit": {"verdict": None, "path": ""},
             "code_review": {"verdict": None, "path": ""},
+            "audit_provenance": {
+                audit: {
+                    "performed_by": "not-observed",
+                    "reviewer_tool": None,
+                    "reviewer_label": None,
+                    "fallback_context": "test fixture did not observe audit execution",
+                }
+                for audit in ("drift-audit", "code-review")
+            },
             "commit": commit or {"requested": False, "created": False, "hash": None},
             "next_action": "",
             "blockers": [],
             "residual_findings": [],
             "gate_reason": "test fixture",
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
             "slice_summary": f".ai-mc/runs/{state['run_id']}/slices/slice-{ordinal:03d}/slice-summary.md",
         }
 
-    def write_worker_policy(self, artifact, *, tool="opencode"):
+    def write_reviewer_policy(self, artifact, *, tool="opencode"):
         artifact.mkdir(parents=True, exist_ok=True)
         policy = {
-            "schema_version": 1,
+            "schema_version": 2,
             "run_id": "test",
             "slice_id": "Slice 1",
             "plan_sha256": "a" * 64,
             "repo_path": str(self.repo.resolve()),
-            "worker_artifact_root": str(artifact / "worker-runs"),
+            "reviewer_artifact_root": str(artifact / "reviewer-runs"),
             "required_tools": [tool],
             "required_model": "default",
             "required_effort": "default",
-            "allowed_access": ["read-only", "workspace-write"],
-            "allowed_roles": ["junior-worker", "senior-worker"],
-            "authorized_files": ["README.md"],
         }
-        policy_path = artifact / "worker-policy.json"
+        policy_path = artifact / "reviewer-policy.json"
         policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         return policy_path, policy
 
-    def write_validated_worker_run(self, artifact, *, tool="opencode", label="01-opencode-readonly-check", state="completed", returncode=0):
-        policy_path, policy = self.write_worker_policy(artifact, tool=tool)
+    def write_validated_reviewer_run(self, artifact, *, tool="opencode", label="01-opencode-readonly-check", state="completed", returncode=0):
+        policy_path, policy = self.write_reviewer_policy(artifact, tool=tool)
         policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
         base_contract = {
             "status": "pass",
             "policy_sha256": policy_sha,
@@ -637,26 +643,26 @@ class McTestCase(unittest.TestCase):
             "tool": tool,
             "model": "default",
             "effort": "default",
-            "role": "junior-worker",
+            "role": "reviewer",
             "access": "read-only",
             "repo_path": str(self.repo.resolve()),
             "cwd": str(self.repo.resolve()),
         }
-        # start_tracked_worker always records a positive subprocess pid and
+        # start_tracked_reviewer always records a positive subprocess pid and
         # always creates outfile/errfile via `.open("wb")` before the child
-        # process starts, inside worker_artifact_root. The gate now requires
+        # process starts, inside reviewer_artifact_root. The gate now requires
         # that real footprint, so a genuine-launch fixture must match it.
         labels = {
             label.replace("readonly-check", "drift-audit"): "drift-audit",
             label.replace("readonly-check", "code-review"): "code-review",
         }
-        workers = {}
+        reviewers = {}
         for audit_label, required_skill in labels.items():
-            outfile = worker_run / f"{audit_label}-out.txt"
-            errfile = worker_run / f"{audit_label}-err.txt"
+            outfile = reviewer_run / f"{audit_label}-out.txt"
+            errfile = reviewer_run / f"{audit_label}-err.txt"
             outfile.write_text("", encoding="utf-8")
             errfile.write_text("", encoding="utf-8")
-            workers[audit_label] = {
+            reviewers[audit_label] = {
                 "tool": tool,
                 "command": [tool, "run"],
                 "pid": 4242,
@@ -664,12 +670,12 @@ class McTestCase(unittest.TestCase):
                 "errfile": str(errfile),
                 "launch_contract": {**base_contract, "required_skills": [required_skill]},
             }
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": workers}),
+        (reviewer_run / "manifest.json").write_text(
+            json.dumps({"reviewers": reviewers}),
             encoding="utf-8",
         )
         for audit_label, required_skill in labels.items():
-            (worker_run / f"{audit_label}-status.json").write_text(
+            (reviewer_run / f"{audit_label}-status.json").write_text(
                 json.dumps(
                     {
                         "label": audit_label,
@@ -681,12 +687,12 @@ class McTestCase(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
 
-    def attach_worker_policy_snapshot(self, state, artifact):
+    def attach_reviewer_policy_snapshot(self, state, artifact):
         state["current_slice"] = {
             "slice_id": "Slice 1",
-            "worker_policy": mc.worker_policy_snapshot(artifact / "worker-policy.json"),
+            "reviewer_policy": mc.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
         }
 
     def write_gate_result(
@@ -705,7 +711,7 @@ class McTestCase(unittest.TestCase):
         (artifact / "drift-audit.md").write_text("drift\n", encoding="utf-8")
         (artifact / "code-review.md").write_text("review\n", encoding="utf-8")
         result = {
-            "schema_version": 2,
+            "schema_version": 3,
             "slice_id": "Slice 1",
             "status": "pass",
             "summary": "",
@@ -718,14 +724,14 @@ class McTestCase(unittest.TestCase):
             "blockers": [],
             "residual_findings": list(residual_findings or []),
         }
-        (artifact / "orchestrator-result.json").write_text(json.dumps(result), encoding="utf-8")
+        (artifact / "developer-result.json").write_text(json.dumps(result), encoding="utf-8")
 
     def write_gate_result_data(self, artifact, result):
         artifact.mkdir(parents=True, exist_ok=True)
         (artifact / "validation-summary.md").write_text("validation\n", encoding="utf-8")
         (artifact / "drift-audit.md").write_text("drift\n", encoding="utf-8")
         (artifact / "code-review.md").write_text("review\n", encoding="utf-8")
-        (artifact / "orchestrator-result.json").write_text(json.dumps(result), encoding="utf-8")
+        (artifact / "developer-result.json").write_text(json.dumps(result), encoding="utf-8")
 
     def prepare_committed_repo(self):
         configure_git_identity(self.repo)
@@ -735,10 +741,10 @@ class McTestCase(unittest.TestCase):
 
     def _write_failing_validation_result(self, artifact, slice_id="Slice 1"):
         artifact.mkdir(parents=True, exist_ok=True)
-        (artifact / "orchestrator-result.json").write_text(
+        (artifact / "developer-result.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "slice_id": slice_id,
                     "status": "pass",
                     "summary": "",
@@ -766,10 +772,10 @@ class McTestCase(unittest.TestCase):
             "attempt": 1,
             "started_at": mc.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
-            "worker_tools": [],
+            "reviewer_tools": [],
             "pause": None,
             "repair": dict(repair) if repair is not None else mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         state["status"] = "running"
         state["supervision"]["mode"] = "model-supervised"
@@ -782,7 +788,7 @@ class McTestCase(unittest.TestCase):
             repo=str(self.repo),
             run="current",
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,

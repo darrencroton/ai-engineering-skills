@@ -19,7 +19,7 @@ from typing import Any
 
 from .git_ops import git_status_text, meaningful_status_lines
 from .models import McError
-from .profiles import current_allow_unattended_default, parse_worker_tools, resolve_current_harness_command
+from .profiles import current_allow_unattended_default, parse_reviewer_tools, resolve_current_harness_command
 from .runtime import extract_operational_hints, relative_artifact_path
 from .state import append_operational_event, load_run, operational_events_file
 from .tmux_adapter import TmuxHarnessAdapter
@@ -36,12 +36,12 @@ def _slice_artifact_dir(repo: Path, current: dict[str, Any]) -> Path:
 
 def _current_adapter(args: argparse.Namespace, repo: Path, state: dict[str, Any]) -> TmuxHarnessAdapter:
     current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else {}
-    session_id = current.get("orchestrator_session_id") if isinstance(current, dict) else None
+    session_id = current.get("developer_session_id") if isinstance(current, dict) else None
     return TmuxHarnessAdapter(
         state["harness"]["name"],
         resolve_current_harness_command(args, repo, state, str(session_id) if session_id else None),
         current_allow_unattended_default(args, state),
-        parse_worker_tools(getattr(args, "worker_tools", None)),
+        parse_reviewer_tools(getattr(args, "reviewer_tools", None)),
         expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
     )
 
@@ -141,8 +141,8 @@ def build_observation(args: argparse.Namespace, repo: Path, run_dir: Path, state
         live_capture_path.write_text(capture, encoding="utf-8")
         previous_path.write_text(capture, encoding="utf-8")
     hard_prompt = adapter.detect_hard_prompt(capture)
-    result_path = artifact_dir / "orchestrator-result.json"
-    transcript_path = artifact_dir / "orchestrator-transcript.jsonl"
+    result_path = artifact_dir / "developer-result.json"
+    transcript_path = artifact_dir / "developer-transcript.jsonl"
     result = _result_status(result_path)
     transcript_tail = _read_tail(transcript_path)
     hints = extract_operational_hints(

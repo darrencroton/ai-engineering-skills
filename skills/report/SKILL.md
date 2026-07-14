@@ -55,7 +55,8 @@ For comparisons, include the decision criteria before the recommendation. For fi
 - Separate confirmed facts from assumptions.
 - State what was not checked when that affects confidence.
 - Keep conclusions proportional to the evidence available.
-- When synthesizing outputs from multiple workers or contributors, define the judgment criteria before making evaluative claims.
+- When synthesizing outputs from multiple Reviewers or contributors, define the judgment criteria before making evaluative claims.
+- When reporting an audit chain, identify whether each drift audit and code review was performed by a Reviewer or by Developer self-audit; include the Reviewer tool/label or self-audit fallback context when available.
 
 ## Output Rules
 

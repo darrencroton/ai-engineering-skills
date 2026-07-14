@@ -1,12 +1,12 @@
-"""Per-vendor session-transcript heuristics for tracked workers.
+"""Per-vendor session-transcript heuristics for tracked reviewers.
 
 Claude Code and Codex CLI write their own on-disk session transcripts
 (~/.claude/projects/..., ~/.codex/sessions/...). This module owns everything
-that locates a worker's session file from its recorded launch command, reads
+that locates a reviewer's session file from its recorded launch command, reads
 lightweight activity signals from it, and extracts the final answer when the
-outfile alone is not enough. worker_jobs.py imports from here; the split keeps
+outfile alone is not enough. reviewer_jobs.py imports from here; the split keeps
 the launcher/lifecycle logic and the vendor transcript knowledge in separate
-files. Master Controller reuses `claude_project_root` through worker_jobs.
+files. Master Controller reuses `claude_project_root` through reviewer_jobs.
 """
 
 from __future__ import annotations

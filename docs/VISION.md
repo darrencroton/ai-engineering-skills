@@ -38,11 +38,11 @@ Choosing a rung is a function of stakes, plan length, model strength, and availa
 
 **Master Controller (MC) — the trust anchor.** A deterministic supervisor that owns run state and gates. It recomputes the highest-risk checks itself — the changed-file surface against the frozen authorization, commit ancestry, clean worktree — rather than trusting any report. It steers bounded repairs, holds sole authority to stop for a human, and never writes code, never plans, and never delegates. Where MC's verification is existence-and-consistency checking rather than full re-derivation, that boundary is documented, and the always-mechanical checks are chosen to cover the changes most likely to cause real harm.
 
-**Orchestrator — the context-rich executor.** The agent that runs one slice through the constant chain, self-corrects first, and delegates bounded sub-tasks when that improves quality, independence, or context economy. Standalone, the orchestrator is the human-facing assistant that owns planning, verification, and the final deliverable. Under MC, it is a per-slice implementing session that reports a structured result and holds no final authority. Same discipline, different boss.
+**Developer — the context-rich executor.** The agent that runs one slice through the constant chain and self-corrects first. The Developer owns planning, coding, validation, session management, semantic verification of Reviewer output, gate decisions, commits, and the final deliverable. Under MC, it is a per-slice implementing session that reports a structured result and holds no authority above MC. Same discipline, different boss.
 
-**Worker — bounded leverage without authority.** A single-purpose helper launched only through a validated semantic contract: the worker states no gates, creates no commits, and never re-delegates. The launcher — not any model — validates the request against policy, composes the harness command, embeds the instructions the worker needs, and records mechanical evidence of what actually ran. Verifying that a worker's *output* satisfied its task remains the orchestrator's job; the system's job is to make failures visible rather than silently absorbed.
+**Reviewer — read-only leverage without authority.** A single-purpose helper launched only through a validated semantic contract to investigate, gather evidence, perform drift audits, or perform code reviews. The Reviewer never edits files, mutates Git or GitHub state, commits, makes a final gate decision, or re-delegates. The launcher validates the request, composes the harness command, embeds the instructions, and records mechanical evidence of what ran. Every supported model and harness is eligible for the role; differences in how strongly a harness enforces read-only behaviour are documented as facts, not used as capability rankings. Verifying that a Reviewer's *output* satisfied its task remains the Developer's job.
 
-Delegating the drift-audit and code-review to a *separate* model is the strongest form of this leverage — a second model auditing the work is a better check than the author grading itself — and every rung prefers it. But independence is a degradable preference chosen in the prompt, not a mechanical requirement: sometimes only one model is available, and a slice audited locally is a valid outcome, not a failure. The orchestrator always holds the audit gate; whether it consulted an independent worker or reasoned locally, it reads the result and decides. What changes with the rung is only enforcement: a plan may opt a high-stakes slice into mechanical proof that an independent audit actually ran, which the external supervisor verifies. That is the constant chain again — the gate is "was this audited?"; raising autonomy changes who must *prove* the audit's independence, never whether the audit happens.
+Using a *separate* Reviewer for drift audit and code review is the strongest form of this leverage — a second model auditing the work is a better check than the author grading itself — and every rung prefers it. But independence is a degradable preference chosen in the plan or launcher, not a universal requirement: when no Reviewer is configured or available, Developer self-audit is a valid and explicitly reported outcome on default slices. A plan may opt a high-stakes slice into mechanical proof that distinct Reviewer audits ran, which the external supervisor verifies. That is the constant chain again — the gate is "was this audited?"; raising autonomy changes who must *prove* the audit's independence, never whether the audit happens.
 
 **The atomic skills — the shared vocabulary.** Planning, scoped implementation, drift audit, code review, simplification, commit, handoff, and reporting are each self-contained and harness-agnostic. Composition is what makes the system worth more than the sum of its parts: because the skills share frozen contract shapes, a plan written once is executable by a fresh chat, an orchestrated session, or MC's parser, and an authorization verdict means the same thing at every rung of the ladder.
 
@@ -60,7 +60,7 @@ The three personas below are distinguished by operating constraints — attentio
 
 **Constraints and risks.** Provider usage windows; supervision commands that outlive the tool-call limits of the assistant driving them; the documented trust boundary (verdicts are evidence-checked, not semantically re-derived); and the permanent ceiling: MC amplifies a good plan and stops on a bad one — it never fixes one.
 
-### The accountable developer
+### The accountable engineer
 
 **Context and goals.** A developer or scientist-developer using one coding assistant, on code where they answer personally for correctness — production services, or research code where subtle errors corrupt results. They want to delegate real implementation without losing track of what changed and why.
 
@@ -74,7 +74,7 @@ The three personas below are distinguished by operating constraints — attentio
 
 **Context and goals.** Someone whose code or data cannot leave their machines — proprietary work, pre-publication research, regulated data, or principle — running open-weight models on their own hardware. They also gain zero marginal token cost and offline capability. They want real multi-step engineering from mid-tier local models, safely, accepting slower wall-clock time.
 
-**How they use the system.** The same plans and the same supervised autonomy, with local models in the orchestrator and worker roles. They lean hardest on the structural machinery, because their models are the least reliable link: the validated launcher and embedded instructions (their harness may have no native skill support), precise rejection feedback that lets a weak model self-correct, the bounded repair loop for format slips, and MC's recomputed gates as the real mutation backstop when a harness's "read-only" mode turns out to be a suggestion rather than a mechanism. If they cannot or will not run a supervising model, the fail-closed unattended style still gives them deterministic gates with themselves as the fallback.
+**How they use the system.** The same plans and the same supervised autonomy, with local models in the Developer and Reviewer roles. They lean hardest on the structural machinery, because their models are the least reliable link: the validated launcher and embedded instructions (their harness may have no native skill support), precise rejection feedback that lets a weak model self-correct, the bounded repair loop for format slips, and MC's recomputed gates as the real mutation backstop when a harness's "read-only" mode turns out to be a suggestion rather than a mechanism. If they cannot or will not run a supervising model, the fail-closed unattended style still gives them deterministic gates with themselves as the fallback.
 
 **Value.** A disciplined engineering workflow, entirely on-premises, whose safety guarantees come from the architecture rather than from a vendor's guardrails — with an evidence trail that matters more to them than to anyone else.
 
@@ -84,7 +84,7 @@ The three personas below are distinguished by operating constraints — attentio
 
 1. **Trust the architecture, not the model.** Every acceptance claim traces to mechanical evidence. Anything resting on a model's narration or self-grading is named as such where users will read it.
 
-2. **One responsibility per layer, fixed at the owning layer.** Planning belongs to the planner, execution and self-correction to the orchestrator, verification and stop authority to MC, bounded help to workers. Fixes strengthen the layer that owns the problem; they never migrate an orchestrator responsibility into MC or a gate into a worker.
+2. **One responsibility per layer, fixed at the owning layer.** Planning belongs to the planner, execution and self-correction to the Developer, verification and stop authority to MC, and read-only investigation and review to Reviewers. Fixes strengthen the layer that owns the problem; they never migrate a Developer responsibility into MC or a gate into a Reviewer.
 
 3. **Graduated autonomy, constant chain.** Rungs vary who holds the gates — never what the gates are. A feature that weakens a gate at one rung breaks the promise at every rung.
 
@@ -92,7 +92,7 @@ The three personas below are distinguished by operating constraints — attentio
 
 5. **Atomic usefulness is non-negotiable.** Each skill stands alone, infrastructure-free, in any harness. Composition adds value through shared contract shapes, never through hidden coupling.
 
-6. **One source of truth per contract.** Every template, role definition, and capability judgment lives in exactly one place; everything else points at it. Duplicated guidance is treated as a defect even when the copies currently agree.
+6. **One source of truth per contract.** Every template, role definition, and harness-enforcement fact lives in exactly one place; everything else points at it. Duplicated guidance is treated as a defect even when the copies currently agree.
 
 7. **Fail closed; repair bounded; never relax a gate.** Unclear evidence stops the run. Fixable gaps earn a budgeted, in-session repair that is re-verified at full rigor. Integrity breaches — evidence that reality and the record disagree — are never steered, only stopped.
 
@@ -103,7 +103,7 @@ The three personas below are distinguished by operating constraints — attentio
 - **Not a planner-free autopilot.** Nothing in this system invents or repairs plans on the fly. Plan quality is the ceiling on everything above it, and keeping planning human-approved is a feature.
 - **Not a sandbox or container system.** Isolation, when needed, is the environment's job. The system's containment is contractual and evidential, not OS-level.
 - **Not adversary-proof.** The mechanical floor — recomputed file authorization, commit ancestry, clean-worktree checks — is chosen to cover the highest-harm failure shapes, and the residual gap is documented rather than papered over.
-- **Not tied to any vendor, harness, or model.** Harnesses are pluggable adapters; capability judgments are per-configured-model decisions made at run time, never hardcoded claims.
+- **Not tied to any vendor, harness, or model.** Harnesses are pluggable adapters and every supported tool is eligible for either agent role. Tool/model suitability belongs to the user, plan, or launcher; the repository documents factual enforcement differences without turning vendor names into rankings or role policy.
 
 ## Stability Note
 

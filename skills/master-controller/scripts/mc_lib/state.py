@@ -16,6 +16,7 @@ from .constants import (
     SCHEMA_VERSION,
 )
 from .models import GateDecision, McError, PlanSlice
+from .gates import reviewer_audit_provenance
 from .plan import completed_slice_ids
 from .runtime import relative_artifact_path
 from .utils import utc_now
@@ -60,12 +61,6 @@ def _read_run_file(path: Path) -> dict[str, Any]:
         raise McError(f"run.json not found: {path}") from exc
     except json.JSONDecodeError as exc:
         raise McError(f"invalid run.json: {path}: {exc}") from exc
-    supervision = state.get("supervision") if isinstance(state.get("supervision"), dict) else None
-    if supervision is not None:
-        # Additive schema-v2 compatibility for runs created before bounded
-        # idle-stall supervision was introduced.
-        supervision.setdefault("max_observe_staleness_seconds", DEFAULT_SUPERVISION["max_observe_staleness_seconds"])
-        supervision.setdefault("min_idle_observation_windows", DEFAULT_SUPERVISION["min_idle_observation_windows"])
     return validate_run_state(state, path)
 
 
@@ -153,6 +148,18 @@ def _residual_lines(findings: Any) -> list[str]:
     return lines or ["- none"]
 
 
+def _audit_provenance_text(entry: dict[str, Any], audit: str) -> str:
+    provenance = entry.get("audit_provenance") if isinstance(entry.get("audit_provenance"), dict) else {}
+    record = provenance.get(audit) if isinstance(provenance.get(audit), dict) else {}
+    performed_by = record.get("performed_by")
+    if performed_by == "reviewer":
+        return f"reviewer ({record.get('reviewer_tool')}/{record.get('reviewer_label')})"
+    if performed_by == "developer-self-audit":
+        context = record.get("fallback_context") or "no validated Reviewer evidence"
+        return f"developer-self-audit — {context}"
+    return f"not-observed — {record.get('fallback_context') or 'audit provenance was not observed by MC'}"
+
+
 def render_slice_summary(entry: dict[str, Any]) -> str:
     validation = entry.get("validation") if isinstance(entry.get("validation"), list) else []
     validation_lines = [
@@ -170,7 +177,9 @@ def render_slice_summary(entry: dict[str, Any]) -> str:
             f"- Summary: {entry.get('summary', '') or 'none recorded'}",
             f"- Gate reason: {entry.get('gate_reason', '')}",
             f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
+            f"- Drift audit performed by: {_audit_provenance_text(entry, 'drift-audit')}",
             f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
+            f"- Code review performed by: {_audit_provenance_text(entry, 'code-review')}",
             f"- Commit: {commit.get('hash') or 'none'}",
             "",
             "## Validation",
@@ -252,7 +261,9 @@ def render_run_report(state: dict[str, Any]) -> str:
                     f"- Summary: {entry.get('summary', '') or 'none recorded'}",
                     f"- Validation: {validation_summary}",
                     f"- Drift audit: {(entry.get('drift_audit') or {}).get('verdict') if isinstance(entry.get('drift_audit'), dict) else None}",
+                    f"- Drift audit performed by: {_audit_provenance_text(entry, 'drift-audit')}",
                     f"- Code review: {(entry.get('code_review') or {}).get('verdict') if isinstance(entry.get('code_review'), dict) else None}",
+                    f"- Code review performed by: {_audit_provenance_text(entry, 'code-review')}",
                     f"- Commit: {commit.get('hash') or 'none'}",
                     f"- Artifacts: `{artifact}`",
                     f"- Slice summary: `{entry.get('slice_summary') or 'not generated'}`",
@@ -321,10 +332,11 @@ _CURRENT_SLICE_FIELDS = {
     "started_at",
     "before_head",
     "pause",
-    "worker_tools",
+    "reviewer_tools",
     "repair",
-    "worker_policy",
+    "reviewer_policy",
 }
+_CURRENT_SLICE_OPTIONAL_FIELDS = {"developer_session_id", "launch_config"}
 _SLICE_ENTRY_FIELDS = {
     "slice_id",
     "title",
@@ -338,22 +350,30 @@ _SLICE_ENTRY_FIELDS = {
     "validation",
     "drift_audit",
     "code_review",
+    "audit_provenance",
     "commit",
     "next_action",
     "blockers",
     "residual_findings",
     "gate_reason",
-    "worker_tools",
+    "reviewer_tools",
     "repair",
 }
+_SLICE_ENTRY_OPTIONAL_FIELDS = {"reviewer_policy", "slice_summary"}
 _REPAIR_FIELDS = {"round", "last_signature", "signature_streak", "session_generation"}
 _HARNESS_FIELDS = {"name", "adapter", "preflight"}
+_HARNESS_OPTIONAL_FIELDS = {"launch_config", "model_identity", "model_requested", "effort_requested"}
 _PREFLIGHT_FIELDS = {"platform", "python", "python_version", "git", "tmux"}
 _POLICY_FIELDS = {"dirty_state", "approval_gated_slices", "max_repair_attempts", "commit_required"}
 _PLAN_FIELDS = {"slice_count", "parser", "sha256"}
-_WORKER_POLICY_FIELDS = {"sha256", "policy"}
-_LAUNCH_STRING_FIELDS = {"harness_command", "harness_model", "harness_effort", "worker_model", "worker_effort"}
+_REVIEWER_POLICY_FIELDS = {"sha256", "policy"}
+_AUDIT_PROVENANCE_FIELDS = {"drift-audit", "code-review"}
+_AUDIT_PROVENANCE_RECORD_FIELDS = {"performed_by", "reviewer_tool", "reviewer_label", "fallback_context"}
+_LAUNCH_STRING_FIELDS = {"harness_command", "harness_model", "harness_effort", "reviewer_model", "reviewer_effort"}
 _LAUNCH_BOOLEAN_FIELDS = {"allow_profile_command", "allow_unattended_default"}
+_LAUNCH_CONFIG_FIELDS = _LAUNCH_STRING_FIELDS | _LAUNCH_BOOLEAN_FIELDS | {"reviewer_tools"}
+_MODEL_IDENTITY_FIELDS = {"requested", "resolved_id", "display_name", "catalog_verified", "checked_at", "slice_id"}
+_MODEL_IDENTITY_OPTIONAL_FIELDS = {"inventory_command"}
 _PAUSE_FIELDS = {"paused_until", "reason", "evidence_event_id"}
 _APPROVAL_FIELDS = {"approved_at", "reason", "approved_by"}
 _RUN_STATUSES = RUN_ACTIVE_STATUSES | RUN_STOP_STATUSES | {"complete"}
@@ -363,13 +383,20 @@ _SLICE_STATUSES = {"pass", "assumed-complete", "needs-human", "blocked", "fail",
 def _require_fields(value: dict[str, Any], required: set[str], label: str, path: Path) -> None:
     missing = sorted(required - value.keys())
     if missing:
-        raise McError(f"invalid schema-v2 run state at {path}: {label} missing required field(s): {', '.join(missing)}")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} missing required field(s): {', '.join(missing)}")
+
+
+def _reject_unknown_fields(value: dict[str, Any], allowed: set[str], label: str, path: Path) -> None:
+    unknown = sorted(value.keys() - allowed)
+    if unknown:
+        raise McError(f"invalid schema-v3 run state at {path}: {label} contains unsupported field(s): {', '.join(unknown)}")
 
 
 def _require_mapping_shape(value: Any, template: dict[str, Any], label: str, path: Path) -> None:
     if not isinstance(value, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
     _require_fields(value, set(template), label, path)
+    _reject_unknown_fields(value, set(template), label, path)
     for key, expected in template.items():
         if isinstance(expected, dict):
             _require_mapping_shape(value[key], expected, f"{label}.{key}", path)
@@ -378,71 +405,118 @@ def _require_mapping_shape(value: Any, template: dict[str, Any], label: str, pat
 def _require_string(value: Any, label: str, path: Path, *, allow_empty: bool = False) -> None:
     if not isinstance(value, str) or (not allow_empty and not value):
         qualifier = "a string" if allow_empty else "a non-empty string"
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be {qualifier}")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be {qualifier}")
 
 
 def _require_integer(value: Any, label: str, path: Path, *, minimum: int = 0, maximum: int | None = None) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum or (maximum is not None and value > maximum):
         requirement = f"between {minimum} and {maximum}" if maximum is not None else f">= {minimum}"
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an integer {requirement}")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an integer {requirement}")
 
 
 def _require_string_list(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be a list of strings")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be a list of strings")
 
 
 def _validate_digest(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, str) or len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be a 64-character lowercase hex digest")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be a 64-character lowercase hex digest")
 
 
 def _validate_commit_hash(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, str) or not FULL_COMMIT_RE.fullmatch(value):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be a full lowercase Git commit hash")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be a full lowercase Git commit hash")
 
 
 def _validate_repair(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
     _require_fields(value, _REPAIR_FIELDS, label, path)
+    _reject_unknown_fields(value, _REPAIR_FIELDS, label, path)
     _require_integer(value["round"], f"{label}.round", path)
     _require_string(value["last_signature"], f"{label}.last_signature", path, allow_empty=True)
     _require_integer(value["signature_streak"], f"{label}.signature_streak", path, maximum=2)
     _require_integer(value["session_generation"], f"{label}.session_generation", path, minimum=1)
 
 
-def _validate_worker_policy(value: Any, label: str, path: Path) -> None:
+def _validate_reviewer_policy(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an object")
-    _require_fields(value, _WORKER_POLICY_FIELDS, label, path)
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
+    _require_fields(value, _REVIEWER_POLICY_FIELDS, label, path)
+    _reject_unknown_fields(value, _REVIEWER_POLICY_FIELDS, label, path)
     _validate_digest(value["sha256"], f"{label}.sha256", path)
     if not isinstance(value["policy"], dict):
-        raise McError(f"invalid schema-v2 run state at {path}: {label}.policy must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: {label}.policy must be an object")
+
+
+def _validate_audit_provenance(value: Any, label: str, path: Path) -> None:
+    if not isinstance(value, dict):
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
+    _require_fields(value, _AUDIT_PROVENANCE_FIELDS, label, path)
+    _reject_unknown_fields(value, _AUDIT_PROVENANCE_FIELDS, label, path)
+    for audit in _AUDIT_PROVENANCE_FIELDS:
+        record = value[audit]
+        if not isinstance(record, dict):
+            raise McError(f"invalid schema-v3 run state at {path}: {label}.{audit} must be an object")
+        _require_fields(record, _AUDIT_PROVENANCE_RECORD_FIELDS, f"{label}.{audit}", path)
+        _reject_unknown_fields(record, _AUDIT_PROVENANCE_RECORD_FIELDS, f"{label}.{audit}", path)
+        performed_by = record["performed_by"]
+        if performed_by not in {"reviewer", "developer-self-audit", "not-observed"}:
+            raise McError(f"invalid schema-v3 run state at {path}: {label}.{audit}.performed_by is unsupported")
+        if performed_by == "reviewer":
+            _require_string(record["reviewer_tool"], f"{label}.{audit}.reviewer_tool", path)
+            _require_string(record["reviewer_label"], f"{label}.{audit}.reviewer_label", path)
+            if record["fallback_context"] is not None:
+                raise McError(f"invalid schema-v3 run state at {path}: {label}.{audit}.fallback_context must be null for Reviewer provenance")
+        else:
+            if record["reviewer_tool"] is not None or record["reviewer_label"] is not None:
+                raise McError(f"invalid schema-v3 run state at {path}: {label}.{audit} cannot name Reviewer evidence for {performed_by}")
+            _require_string(record["fallback_context"], f"{label}.{audit}.fallback_context", path)
 
 
 def _validate_launch_config(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
+    _require_fields(value, _LAUNCH_CONFIG_FIELDS, label, path)
+    _reject_unknown_fields(value, _LAUNCH_CONFIG_FIELDS, label, path)
     for field in _LAUNCH_BOOLEAN_FIELDS:
         if not isinstance(value.get(field), bool):
-            raise McError(f"invalid schema-v2 run state at {path}: {label}.{field} must be a boolean")
+            raise McError(f"invalid schema-v3 run state at {path}: {label}.{field} must be a boolean")
     for field in _LAUNCH_STRING_FIELDS:
         if value.get(field) is not None:
             _require_string(value[field], f"{label}.{field}", path)
-    _require_string_list(value.get("worker_tools"), f"{label}.worker_tools", path)
+    _require_string_list(value.get("reviewer_tools"), f"{label}.reviewer_tools", path)
+
+
+def _validate_model_identity(value: Any, label: str, path: Path) -> None:
+    if not isinstance(value, dict):
+        raise McError(f"invalid schema-v3 run state at {path}: {label} must be an object")
+    _require_fields(value, _MODEL_IDENTITY_FIELDS, label, path)
+    _reject_unknown_fields(value, _MODEL_IDENTITY_FIELDS | _MODEL_IDENTITY_OPTIONAL_FIELDS, label, path)
+    for field in ("requested", "resolved_id"):
+        if value[field] is not None:
+            _require_string(value[field], f"{label}.{field}", path)
+    _require_string(value["display_name"], f"{label}.display_name", path, allow_empty=True)
+    if not isinstance(value["catalog_verified"], bool):
+        raise McError(f"invalid schema-v3 run state at {path}: {label}.catalog_verified must be a boolean")
+    _require_string(value["checked_at"], f"{label}.checked_at", path)
+    _require_string(value["slice_id"], f"{label}.slice_id", path)
+    if value.get("inventory_command") is not None:
+        _require_string(value["inventory_command"], f"{label}.inventory_command", path)
 
 
 def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
     """Validate the one supported durable run-state shape without migration."""
     if not isinstance(state, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: run must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: run must be an object")
     if state.get("schema_version") != SCHEMA_VERSION:
         raise McError(
             f"unsupported run-state schema at {path}: expected {SCHEMA_VERSION}, found {state.get('schema_version')!r}; "
             "initialize a new MC run"
         )
     _require_fields(state, _RUN_FIELDS, "run", path)
+    _reject_unknown_fields(state, _RUN_FIELDS, "run", path)
     for field in ("run_id", "created_at", "updated_at", "repo_path", "plan_path", "branch"):
         _require_string(state[field], field, path)
     if state["worktree_root"] is not None:
@@ -450,52 +524,62 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
     if state["stop_reason"] is not None:
         _require_string(state["stop_reason"], "stop_reason", path)
     if not isinstance(state["status"], str) or state["status"] not in _RUN_STATUSES:
-        raise McError(f"invalid schema-v2 run state at {path}: unsupported run status {state['status']!r}")
+        raise McError(f"invalid schema-v3 run state at {path}: unsupported run status {state['status']!r}")
 
     harness = state["harness"]
     if not isinstance(harness, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: harness must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: harness must be an object")
     _require_fields(harness, _HARNESS_FIELDS, "harness", path)
+    _reject_unknown_fields(harness, _HARNESS_FIELDS | _HARNESS_OPTIONAL_FIELDS, "harness", path)
     _require_string(harness["name"], "harness.name", path)
     if harness["adapter"] is not None:
         _require_string(harness["adapter"], "harness.adapter", path)
     if not isinstance(harness["preflight"], dict):
-        raise McError(f"invalid schema-v2 run state at {path}: harness.preflight must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: harness.preflight must be an object")
     _require_fields(harness["preflight"], _PREFLIGHT_FIELDS, "harness.preflight", path)
+    _reject_unknown_fields(harness["preflight"], _PREFLIGHT_FIELDS, "harness.preflight", path)
     for field in _PREFLIGHT_FIELDS:
         value = harness["preflight"][field]
         if value is not None:
             _require_string(value, f"harness.preflight.{field}", path)
     if harness.get("launch_config") is not None:
         _validate_launch_config(harness["launch_config"], "harness.launch_config", path)
+    if harness.get("model_identity") is not None:
+        _validate_model_identity(harness["model_identity"], "harness.model_identity", path)
+    for field in ("model_requested", "effort_requested"):
+        if harness.get(field) is not None:
+            _require_string(harness[field], f"harness.{field}", path)
 
     policy = state["policy"]
     if not isinstance(policy, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: policy must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: policy must be an object")
     _require_fields(policy, _POLICY_FIELDS, "policy", path)
+    _reject_unknown_fields(policy, _POLICY_FIELDS, "policy", path)
     if policy["dirty_state"] != "clean-required" or policy["approval_gated_slices"] != "stop":
-        raise McError(f"invalid schema-v2 run state at {path}: policy contains unsupported enforcement values")
+        raise McError(f"invalid schema-v3 run state at {path}: policy contains unsupported enforcement values")
     _require_integer(policy["max_repair_attempts"], "policy.max_repair_attempts", path)
     if not isinstance(policy["commit_required"], bool):
-        raise McError(f"invalid schema-v2 run state at {path}: policy.commit_required must be a boolean")
+        raise McError(f"invalid schema-v3 run state at {path}: policy.commit_required must be a boolean")
 
     plan = state["plan"]
     if not isinstance(plan, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: plan must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: plan must be an object")
     _require_fields(plan, _PLAN_FIELDS, "plan", path)
+    _reject_unknown_fields(plan, _PLAN_FIELDS, "plan", path)
     _require_integer(plan["slice_count"], "plan.slice_count", path, minimum=1)
     if plan["parser"] != PARSER_NAME:
-        raise McError(f"invalid schema-v2 run state at {path}: plan.parser must be {PARSER_NAME!r}")
+        raise McError(f"invalid schema-v3 run state at {path}: plan.parser must be {PARSER_NAME!r}")
     _validate_digest(plan["sha256"], "plan.sha256", path)
 
     approvals = state["approvals"]
     if not isinstance(approvals, dict):
-        raise McError(f"invalid schema-v2 run state at {path}: approvals must be an object")
+        raise McError(f"invalid schema-v3 run state at {path}: approvals must be an object")
     for slice_id, approval in approvals.items():
         _require_string(slice_id, "approvals key", path)
         if not isinstance(approval, dict):
-            raise McError(f"invalid schema-v2 run state at {path}: approvals[{slice_id!r}] must be an object")
+            raise McError(f"invalid schema-v3 run state at {path}: approvals[{slice_id!r}] must be an object")
         _require_fields(approval, _APPROVAL_FIELDS, f"approvals[{slice_id!r}]", path)
+        _reject_unknown_fields(approval, _APPROVAL_FIELDS, f"approvals[{slice_id!r}]", path)
         for field in _APPROVAL_FIELDS:
             _require_string(approval[field], f"approvals[{slice_id!r}].{field}", path)
 
@@ -504,10 +588,10 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
         "deterministic-batch",
         "model-supervised",
     }:
-        raise McError(f"invalid schema-v2 run state at {path}: supervision.mode is unsupported")
+        raise McError(f"invalid schema-v3 run state at {path}: supervision.mode is unsupported")
     _require_string(state["supervision"]["default_resume_prompt"], "supervision.default_resume_prompt", path)
     if state["supervision"]["pause_policy"] != DEFAULT_SUPERVISION["pause_policy"]:
-        raise McError(f"invalid schema-v2 run state at {path}: supervision.pause_policy is unsupported")
+        raise McError(f"invalid schema-v3 run state at {path}: supervision.pause_policy is unsupported")
     for field in (
         "default_reset_buffer_seconds",
         "max_single_pause_seconds",
@@ -521,38 +605,51 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
     for field in DEFAULT_SUPERVISION["pause_counters"]:
         _require_integer(state["supervision"]["pause_counters"][field], f"supervision.pause_counters.{field}", path)
     if not isinstance(state["operational_events_path"], str) or not state["operational_events_path"]:
-        raise McError(f"invalid schema-v2 run state at {path}: operational_events_path must be a non-empty string")
+        raise McError(f"invalid schema-v3 run state at {path}: operational_events_path must be a non-empty string")
     if not isinstance(state["slices"], list):
-        raise McError(f"invalid schema-v2 run state at {path}: slices must be a list")
+        raise McError(f"invalid schema-v3 run state at {path}: slices must be a list")
     for index, entry in enumerate(state["slices"]):
         if not isinstance(entry, dict):
-            raise McError(f"invalid schema-v2 run state at {path}: slices[{index}] must be an object")
+            raise McError(f"invalid schema-v3 run state at {path}: slices[{index}] must be an object")
         _require_fields(entry, _SLICE_ENTRY_FIELDS, f"slices[{index}]", path)
+        _reject_unknown_fields(
+            entry,
+            _SLICE_ENTRY_FIELDS | _SLICE_ENTRY_OPTIONAL_FIELDS,
+            f"slices[{index}]",
+            path,
+        )
         if not isinstance(entry["status"], str) or entry["status"] not in _SLICE_STATUSES:
-            raise McError(f"invalid schema-v2 run state at {path}: unsupported slices[{index}] status {entry['status']!r}")
+            raise McError(f"invalid schema-v3 run state at {path}: unsupported slices[{index}] status {entry['status']!r}")
         _validate_repair(entry["repair"], f"slices[{index}].repair", path)
+        _validate_audit_provenance(entry["audit_provenance"], f"slices[{index}].audit_provenance", path)
         if entry["repair"]["round"] > policy["max_repair_attempts"]:
-            raise McError(f"invalid schema-v2 run state at {path}: slices[{index}].repair.round exceeds policy budget")
-        _require_string_list(entry["worker_tools"], f"slices[{index}].worker_tools", path)
+            raise McError(f"invalid schema-v3 run state at {path}: slices[{index}].repair.round exceeds policy budget")
+        _require_string_list(entry["reviewer_tools"], f"slices[{index}].reviewer_tools", path)
         if entry["status"] == "assumed-complete":
             if entry["before_head"] is not None or entry["artifact_dir"] is not None:
-                raise McError(f"invalid schema-v2 run state at {path}: assumed-complete slice boundaries must be null")
+                raise McError(f"invalid schema-v3 run state at {path}: assumed-complete slice boundaries must be null")
         else:
             _validate_commit_hash(entry["before_head"], f"slices[{index}].before_head", path)
             _require_string(entry["artifact_dir"], f"slices[{index}].artifact_dir", path)
             _require_string(entry.get("slice_summary"), f"slices[{index}].slice_summary", path)
-            _validate_worker_policy(entry.get("worker_policy"), f"slices[{index}].worker_policy", path)
+            _validate_reviewer_policy(entry.get("reviewer_policy"), f"slices[{index}].reviewer_policy", path)
     current = state["current_slice"]
     if current is not None:
         if not isinstance(current, dict):
-            raise McError(f"invalid schema-v2 run state at {path}: current_slice must be an object or null")
+            raise McError(f"invalid schema-v3 run state at {path}: current_slice must be an object or null")
         _require_fields(current, _CURRENT_SLICE_FIELDS, "current_slice", path)
+        _reject_unknown_fields(
+            current,
+            _CURRENT_SLICE_FIELDS | _CURRENT_SLICE_OPTIONAL_FIELDS,
+            "current_slice",
+            path,
+        )
         _validate_repair(current["repair"], "current_slice.repair", path)
         if current["repair"]["round"] > policy["max_repair_attempts"]:
-            raise McError(f"invalid schema-v2 run state at {path}: current_slice.repair.round exceeds policy budget")
+            raise McError(f"invalid schema-v3 run state at {path}: current_slice.repair.round exceeds policy budget")
         _validate_commit_hash(current["before_head"], "current_slice.before_head", path)
-        _require_string_list(current["worker_tools"], "current_slice.worker_tools", path)
-        _validate_worker_policy(current["worker_policy"], "current_slice.worker_policy", path)
+        _require_string_list(current["reviewer_tools"], "current_slice.reviewer_tools", path)
+        _validate_reviewer_policy(current["reviewer_policy"], "current_slice.reviewer_policy", path)
         launch_config = current.get("launch_config")
         if launch_config is not None:
             _validate_launch_config(launch_config, "current_slice.launch_config", path)
@@ -561,8 +658,9 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
             _require_string(current[field], f"current_slice.{field}", path)
         if current["pause"] is not None:
             if not isinstance(current["pause"], dict):
-                raise McError(f"invalid schema-v2 run state at {path}: current_slice.pause must be an object or null")
+                raise McError(f"invalid schema-v3 run state at {path}: current_slice.pause must be an object or null")
             _require_fields(current["pause"], _PAUSE_FIELDS, "current_slice.pause", path)
+            _reject_unknown_fields(current["pause"], _PAUSE_FIELDS, "current_slice.pause", path)
             for field in _PAUSE_FIELDS:
                 _require_string(current["pause"][field], f"current_slice.pause.{field}", path)
     return state
@@ -673,9 +771,9 @@ def default_repair_state() -> dict[str, Any]:
 
 
 def repair_state(current: dict[str, Any] | None) -> dict[str, Any]:
-    """Read the required schema-v2 repair state."""
+    """Read the required schema-v3 repair state."""
     if not isinstance(current, dict) or not isinstance(current.get("repair"), dict):
-        raise McError("schema-v2 current slice is missing required repair state")
+        raise McError("schema-v3 current slice is missing required repair state")
     repair = current["repair"]
     return {
         "round": int(repair["round"]),
@@ -693,16 +791,16 @@ def current_slice_state(
     attempt: int,
     started_at: str,
     before_head: str | None,
-    orchestrator_session_id: str | None = None,
-    worker_tools: tuple[str, ...] = (),
+    developer_session_id: str | None = None,
+    reviewer_tools: tuple[str, ...] = (),
     repair: dict[str, Any] | None = None,
-    worker_policy: dict[str, Any] | None = None,
+    reviewer_policy: dict[str, Any] | None = None,
     launch_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not before_head:
-        raise McError("cannot start a schema-v2 slice without a recorded before_head")
-    if worker_policy is None:
-        raise McError("cannot start a schema-v2 slice without a worker-policy snapshot")
+        raise McError("cannot start a schema-v3 slice without a recorded before_head")
+    if reviewer_policy is None:
+        raise McError("cannot start a schema-v3 slice without a reviewer-policy snapshot")
     state = {
         "slice_id": plan_slice.slice_id,
         "title": plan_slice.title,
@@ -713,19 +811,19 @@ def current_slice_state(
         "before_head": before_head,
         "pause": None,
         # Persisted so a later, separate invocation (finalize-slice,
-        # stop-with-evidence) can recover the worker-tool requirement for
+        # stop-with-evidence) can recover the reviewer-tool requirement for
         # this slice attempt without depending on that invocation's own
-        # --worker-tools flag, which may not be re-supplied.
-        "worker_tools": list(worker_tools),
+        # --reviewer-tools flag, which may not be re-supplied.
+        "reviewer_tools": list(reviewer_tools),
         # Repair-loop progress for this slice: {round, last_signature,
         # signature_streak, session_generation}. Budget and circuit-breaker
         # decisions are driven from this persisted state, not from counting
         # appended slice entries (in-session repairs append none).
         "repair": dict(repair) if repair is not None else default_repair_state(),
-        "worker_policy": copy.deepcopy(worker_policy),
+        "reviewer_policy": copy.deepcopy(reviewer_policy),
     }
-    if orchestrator_session_id:
-        state["orchestrator_session_id"] = orchestrator_session_id
+    if developer_session_id:
+        state["developer_session_id"] = developer_session_id
     if launch_config is not None:
         state["launch_config"] = copy.deepcopy(launch_config)
     return state
@@ -738,9 +836,9 @@ def slice_entry_from_gate(
     started_at: str,
     gate: GateDecision,
     before_head: str | None = None,
-    worker_tools: tuple[str, ...] = (),
+    reviewer_tools: tuple[str, ...] = (),
     repair: dict[str, Any] | None = None,
-    worker_policy: dict[str, Any] | None = None,
+    reviewer_policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = gate.result or {}
     entry = {
@@ -764,13 +862,20 @@ def slice_entry_from_gate(
         "blockers": result.get("blockers", []),
         "residual_findings": copy.deepcopy(result.get("residual_findings", [])),
         "gate_reason": gate.reason,
-        # Preserved (not just read) so reconcile can recover the worker-tool
-        # requirement for this attempt without a fresh --worker-tools flag.
-        "worker_tools": list(worker_tools),
+        # Preserved (not just read) so reconcile can recover the reviewer-tool
+        # requirement for this attempt without a fresh --reviewer-tools flag.
+        "reviewer_tools": list(reviewer_tools),
+        "audit_provenance": reviewer_audit_provenance(
+            slice_artifact_dir,
+            reviewer_tools,
+            reviewer_policy,
+            developer_result=result if gate.result is not None else None,
+            repo=repo,
+        ),
     }
     entry["repair"] = dict(repair) if repair is not None else default_repair_state()
-    if worker_policy is not None:
-        entry["worker_policy"] = copy.deepcopy(worker_policy)
+    if reviewer_policy is not None:
+        entry["reviewer_policy"] = copy.deepcopy(reviewer_policy)
     slice_summary_path = slice_artifact_dir / "slice-summary.md"
     slice_summary_path.parent.mkdir(parents=True, exist_ok=True)
     entry["slice_summary"] = relative_artifact_path(repo, slice_summary_path)

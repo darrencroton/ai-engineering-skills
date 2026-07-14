@@ -6,31 +6,31 @@ from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harne
 
 
 class SupervisionRepairTests(McTestCase):
-    def test_cancel_run_workers_scans_current_and_prior_slice_artifacts(self):
+    def test_cancel_run_reviewers_scans_current_and_prior_slice_artifacts(self):
         run_dir = self.repo / ".ai-mc" / "runs" / "test"
         first = run_dir / "slices" / "slice-001"
         second = run_dir / "slices" / "slice-002"
         first.mkdir(parents=True)
         second.mkdir(parents=True)
 
-        with mock.patch.object(mc_runtime, "cancel_worker_runs", side_effect=[[{"slice": 1}], [{"slice": 2}]]) as cancel, mock.patch.object(
-            mc_runtime, "capture_worker_runs_summary"
+        with mock.patch.object(mc_runtime, "cancel_reviewer_runs", side_effect=[[{"slice": 1}], [{"slice": 2}]]) as cancel, mock.patch.object(
+            mc_runtime, "capture_reviewer_runs_summary"
         ) as capture:
-            results = mc.cancel_run_workers(run_dir)
+            results = mc.cancel_run_reviewers(run_dir)
 
         self.assertEqual(results, [{"slice": 1}, {"slice": 2}])
         self.assertEqual(cancel.call_args_list, [mock.call(first), mock.call(second)])
         self.assertEqual(capture.call_args_list, [mock.call(first), mock.call(second)])
 
-    def test_cancel_worker_runs_terminates_tracked_wrapper_and_child_group(self):
+    def test_cancel_reviewer_runs_terminates_tracked_wrapper_and_child_group(self):
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        run_dir = artifact / "worker-runs" / "workers-test"
+        run_dir = artifact / "reviewer-runs" / "reviewers-test"
         run_dir.mkdir(parents=True)
-        worker_jobs = mc.worker_jobs_module()
-        worker_jobs.ensure_manifest(run_dir)
-        launched = worker_jobs.start_tracked_worker(
+        reviewer_jobs = mc.reviewer_jobs_module()
+        reviewer_jobs.ensure_manifest(run_dir)
+        launched = reviewer_jobs.start_tracked_reviewer(
             run_dir,
-            "01-python-long-worker",
+            "01-python-long-reviewer",
             [sys.executable, "-c", "import time; time.sleep(60)"],
             cwd=self.repo,
         )
@@ -39,13 +39,13 @@ class SupervisionRepairTests(McTestCase):
         while not status_path.exists() and time.time() < deadline:
             time.sleep(0.05)
 
-        results = mc.cancel_worker_runs(artifact)
+        results = mc.cancel_reviewer_runs(artifact)
 
         self.assertEqual(results[0]["returncode"], 0, results)
         status = json.loads(status_path.read_text(encoding="utf-8"))
         self.assertEqual(status["state"], "cancelled")
-        worker_jobs._LIBRARY_WRAPPERS.pop(int(launched["pid"])).wait(timeout=5)
-        self.assertFalse(worker_jobs.process_running(int(launched["pid"])))
+        reviewer_jobs._LIBRARY_WRAPPERS.pop(int(launched["pid"])).wait(timeout=5)
+        self.assertFalse(reviewer_jobs.process_running(int(launched["pid"])))
 
     def test_idle_stall_signature_uses_shared_repair_escalation(self):
         repair = mc_state.default_repair_state()
@@ -77,7 +77,7 @@ class SupervisionRepairTests(McTestCase):
             buffer_seconds=0,
             status="needs-human",
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -123,7 +123,7 @@ class SupervisionRepairTests(McTestCase):
             text="You were interrupted. Review what you were doing then continue.",
             status="needs-human",
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -179,9 +179,9 @@ class SupervisionRepairTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -207,7 +207,7 @@ class SupervisionRepairTests(McTestCase):
             buffer_seconds=0,
             status="needs-human",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -224,7 +224,7 @@ class SupervisionRepairTests(McTestCase):
                 self.assertEqual(mc.finalize_slice(command_args), 2)
         state = json.loads((((self.repo / ".ai-mc" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
-        self.assertIn("orchestrator result missing", state["stop_reason"])
+        self.assertIn("developer result missing", state["stop_reason"])
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_model_supervised_finalize_blocks_missing_result_after_process_exit(self):
@@ -240,7 +240,7 @@ class SupervisionRepairTests(McTestCase):
             seconds=10,
             poll_seconds=0.1,
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -253,7 +253,7 @@ class SupervisionRepairTests(McTestCase):
             self.assertEqual(mc.finalize_slice(command_args), 2)
         state = json.loads((((self.repo / ".ai-mc" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
-        self.assertIn("orchestrator result missing", state["stop_reason"])
+        self.assertIn("developer result missing", state["stop_reason"])
 
     def test_wait_observing_policy_flag_gates_hard_signals(self):
         # The one shared wait loop serves both drivers; stop_on_hard_signals
@@ -313,7 +313,7 @@ class SupervisionRepairTests(McTestCase):
                 mc.GateDecision("failed", "prior attempt", {"changed_files": []}, ()),
                 git(self.repo, "rev-parse", "HEAD"),
                 repair=mc_state.default_repair_state(),
-                worker_policy={"sha256": "a" * 64, "policy": {}},
+                reviewer_policy={"sha256": "a" * 64, "policy": {}},
             )
         )
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
@@ -326,7 +326,7 @@ class SupervisionRepairTests(McTestCase):
         fake_adapter.command = "python fake.py"
         args = argparse.Namespace(
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -382,8 +382,8 @@ class SupervisionRepairTests(McTestCase):
         self.assertTrue((artifact / "repair-prompt-repair-1.md").exists())
         # The stale failing result was archived so a re-finalize cannot
         # instantly re-read it.
-        self.assertTrue((artifact / "orchestrator-result-repair-1.json").exists())
-        self.assertFalse((artifact / "orchestrator-result.json").exists())
+        self.assertTrue((artifact / "developer-result-repair-1.json").exists())
+        self.assertFalse((artifact / "developer-result.json").exists())
         events = [
             json.loads(line)
             for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
@@ -412,7 +412,7 @@ class SupervisionRepairTests(McTestCase):
             "suggested_follow_up": "Review the warning after the plan completes.",
         }
         self._write_failing_validation_result(artifact)
-        result_path = artifact / "orchestrator-result.json"
+        result_path = artifact / "developer-result.json"
         result = json.loads(result_path.read_text(encoding="utf-8"))
         result["residual_findings"] = [finding]
         result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -435,12 +435,12 @@ class SupervisionRepairTests(McTestCase):
         fresh_prompt = artifact / "fresh-session-prompt-repair-2.md"
         self.assertEqual(finalized["repair_prompt_path"], str(fresh_prompt.relative_to(self.repo.resolve())))
         prompt_text = fresh_prompt.read_text(encoding="utf-8")
-        self.assertIn("orchestrator-result-repair-2.json", prompt_text)
+        self.assertIn("developer-result-repair-2.json", prompt_text)
         self.assertIn(finding["summary"], prompt_text)
         self.assertIn("must retain every item", prompt_text)
         fake_adapter.send_prompt.assert_called_once_with(finalized["tmux_session"], fresh_prompt)
 
-    def test_start_slice_persists_worker_tools_for_later_finalize(self):
+    def test_start_slice_persists_reviewer_tools_for_later_finalize(self):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
@@ -453,7 +453,7 @@ class SupervisionRepairTests(McTestCase):
         fake_adapter.command = "python fake.py"
         args = argparse.Namespace(
             harness_command="python fake.py",
-            worker_tools="opencode",
+            reviewer_tools="opencode",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -462,31 +462,72 @@ class SupervisionRepairTests(McTestCase):
             result = mc.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
         self.assertTrue(result["started"])
         persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
-        self.assertEqual(persisted["current_slice"]["worker_tools"], ["opencode"])
-        policy = json.loads((run_dir / "slices" / "slice-001" / "worker-policy.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["current_slice"]["reviewer_tools"], ["opencode"])
+        policy = json.loads((run_dir / "slices" / "slice-001" / "reviewer-policy.json").read_text(encoding="utf-8"))
         self.assertEqual(policy["required_tools"], ["opencode"])
         self.assertEqual(policy["slice_id"], "Slice 1")
         self.assertEqual(policy["plan_sha256"], state["plan"]["sha256"])
         prompt = (run_dir / "slices" / "slice-001" / "prompt.md").read_text(encoding="utf-8")
-        self.assertIn("Master Controller Slice Delegation Contract", prompt)
-        self.assertIn("worker_jobs.py launch", prompt)
+        self.assertIn("Master Controller Slice Reviewer Contract", prompt)
+        self.assertIn("reviewer_jobs.py launch", prompt)
 
-    def test_worker_policy_restricts_explicit_read_only_plan_requirement(self):
+    def test_reviewer_policy_makes_role_and_access_intrinsic(self):
         state = self.init_run()
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
         plan_slice = mc.parse_plan(self.plan)[0]
         sections = dict(plan_slice.sections)
-        sections["Validation Plan"] += "\n- Worker evidence: run one bounded read-only support check."
+        sections["Validation Plan"] += "\n- Reviewer evidence: run one bounded read-only support check."
         read_only_slice = mc.PlanSlice(plan_slice.number, plan_slice.title, plan_slice.body, sections)
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        policy_path = mc.write_worker_policy(state, read_only_slice, artifact, ("opencode",), "model", None)
+        policy_path = mc.write_reviewer_policy(state, read_only_slice, artifact, ("opencode",), "model", None)
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
-        self.assertEqual(policy["allowed_access"], ["read-only"])
+        self.assertEqual(policy["schema_version"], 2)
+        self.assertNotIn("allowed_access", policy)
+        self.assertNotIn("allowed_roles", policy)
 
-    def test_worker_policy_reserves_audit_skill_sets_only_on_opt_in_slice(self):
-        # Regression: MC Test 2 found an orchestrator could launch a
-        # required-audit worker with an empty required_skills. worker-policy.json
+    def test_generated_reviewer_policy_matches_orchestrator_schema_v2(self):
+        state = self.init_run()
+        (self.repo / "README.md").write_text("review context\n", encoding="utf-8")
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        policy_path = mc.write_reviewer_policy(state, plan_slice, artifact, ("opencode",), "model", None)
+        policy = json.loads(policy_path.read_text(encoding="utf-8"))
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-contract-test"
+        reviewer_run.mkdir(parents=True)
+        request = {
+            "schema_version": 2,
+            "label": "01-opencode-review-docs",
+            "slice_id": plan_slice.slice_id,
+            "plan_sha256": state["plan"]["sha256"],
+            "tool": "opencode",
+            "model": "model",
+            "effort": "default",
+            "task": "Review the requested documentation evidence.",
+            "context": "Read-only contract integration test.",
+            "required_skills": [],
+            "files": ["README.md"],
+            "constraints": ["Do not edit files."],
+            "expected_output": "RESULT: PASS or FAIL with evidence.",
+        }
+        contract_path = MC_PATH.parents[2] / "orchestrator" / "scripts" / "reviewer_contract.py"
+        spec = importlib.util.spec_from_file_location("mc_policy_reviewer_contract", contract_path)
+        reviewer_contract = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = reviewer_contract
+        self.addCleanup(sys.modules.pop, spec.name, None)
+        spec.loader.exec_module(reviewer_contract)
+
+        normalized = reviewer_contract.validate_contract(policy, request, reviewer_run)
+
+        self.assertEqual(normalized["role"], "reviewer")
+        self.assertEqual(normalized["access"], "read-only")
+
+    def test_reviewer_policy_reserves_audit_skill_sets_only_on_opt_in_slice(self):
+        # Regression: MC Test 2 found a Developer could launch a
+        # required-audit reviewer with an empty required_skills. reviewer-policy.json
         # now carries the exact reserved combinations on an opt-in slice, and
         # none on a default slice, so the launcher's pre-launch check has
         # something to enforce against.
@@ -496,7 +537,7 @@ class SupervisionRepairTests(McTestCase):
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
 
-        default_policy_path = mc.write_worker_policy(state, base, artifact, ("opencode",), "model", None)
+        default_policy_path = mc.write_reviewer_policy(state, base, artifact, ("opencode",), "model", None)
         default_policy = json.loads(default_policy_path.read_text(encoding="utf-8"))
         self.assertEqual(default_policy["reserved_skill_sets"], [])
 
@@ -504,7 +545,7 @@ class SupervisionRepairTests(McTestCase):
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
         opt_in_slice = mc.PlanSlice(base.number, base.title, base.body, sections)
         self.assertTrue(opt_in_slice.independent_audit_required)
-        opt_in_policy_path = mc.write_worker_policy(state, opt_in_slice, artifact, ("opencode",), "model", None)
+        opt_in_policy_path = mc.write_reviewer_policy(state, opt_in_slice, artifact, ("opencode",), "model", None)
         opt_in_policy = json.loads(opt_in_policy_path.read_text(encoding="utf-8"))
         self.assertEqual(opt_in_policy["reserved_skill_sets"], [["drift-audit"], ["code-review"]])
 
@@ -526,18 +567,18 @@ class SupervisionRepairTests(McTestCase):
             1,
             mc.utc_now(),
             before,
-            worker_tools=("opencode",),
-            worker_policy={"sha256": "a" * 64, "policy": {}},
+            reviewer_tools=("opencode",),
+            reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
         args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
-            reason="worker contract violation",
+            reason="reviewer contract violation",
             status="needs-human",
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -559,7 +600,7 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(len(stopped["slices"]), 1)
         self.assertEqual(stopped["slices"][0]["status"], "needs-human")
         self.assertEqual(stopped["slices"][0]["changed_files"], ["README.md"])
-        self.assertEqual(stopped["slices"][0]["gate_reason"], "worker contract violation")
+        self.assertEqual(stopped["slices"][0]["gate_reason"], "reviewer contract violation")
 
     def test_stop_with_evidence_recovers_from_corrupted_worktree_state(self):
         self.prepare_committed_repo()
@@ -577,7 +618,7 @@ class SupervisionRepairTests(McTestCase):
             1,
             mc.utc_now(),
             git(self.repo, "rev-parse", "HEAD"),
-            worker_policy={"sha256": "a" * 64, "policy": {}},
+            reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
         mc.activate_controller_state(run_dir / "run.json", state)
         (run_dir / "run.json").write_text("{corrupted", encoding="utf-8")
@@ -588,13 +629,13 @@ class SupervisionRepairTests(McTestCase):
             reason="controller integrity breach",
             status="needs-human",
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
             harness_effort=None,
-            worker_model=None,
-            worker_effort=None,
+            reviewer_model=None,
+            reviewer_effort=None,
         )
         output = io.StringIO()
 
@@ -633,26 +674,26 @@ class SupervisionRepairTests(McTestCase):
             reason="unreadable state",
             status="needs-human",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
             harness_effort=None,
-            worker_model=None,
-            worker_effort=None,
+            reviewer_model=None,
+            reviewer_effort=None,
         )
         output = io.StringIO()
 
         with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter), mock.patch.object(
-            mc_commands, "cancel_run_workers", return_value=[]
-        ) as cancel_workers, contextlib.redirect_stdout(output):
+            mc_commands, "cancel_run_reviewers", return_value=[]
+        ) as cancel_reviewers, contextlib.redirect_stdout(output):
             self.assertEqual(mc.stop_with_evidence(args), 0)
 
         result = json.loads(output.getvalue())
         self.assertFalse(result["state_updated"])
         self.assertTrue(Path(result["evidence_path"]).is_file())
         fake_adapter.force_stop.assert_called_once_with("mc_test_slice-001_a1")
-        cancel_workers.assert_called_once_with(run_dir)
+        cancel_reviewers.assert_called_once_with(run_dir)
 
     def test_stop_with_evidence_halts_even_when_plan_changed_mid_run(self):
         self.prepare_committed_repo()
@@ -671,7 +712,7 @@ class SupervisionRepairTests(McTestCase):
             1,
             mc.utc_now(),
             before,
-            worker_policy={"sha256": "a" * 64, "policy": {}},
+            reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\nEdited mid-run.\n", encoding="utf-8")
@@ -681,7 +722,7 @@ class SupervisionRepairTests(McTestCase):
             reason="operator stop",
             status="needs-human",
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -695,12 +736,12 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(stopped["status"], "needs-human")
         self.assertIsNone(stopped["current_slice"])
 
-    def test_finalize_enforces_worker_evidence_from_persisted_state(self):
+    def test_finalize_enforces_reviewer_evidence_from_persisted_state(self):
         # finalize-slice is a separate invocation that may not re-supply
-        # --worker-tools: the worker-evidence gate must still fire from the
+        # --reviewer-tools: the reviewer-evidence gate must still fire from the
         # requirement persisted in current_slice at start-slice time.
-        # Mark Slice 1 opt-in ("Independent audit required: yes") so its worker
-        # requirement arms the gate; by default worker delegation is
+        # Mark Slice 1 opt-in ("Independent audit required: yes") so its reviewer
+        # requirement arms the gate; by default reviewer delegation is
         # reporting-only. Edit before prepare_committed_repo so the flag is
         # committed with the plan and the worktree stays clean for the gate.
         self.plan.write_text(
@@ -731,10 +772,10 @@ class SupervisionRepairTests(McTestCase):
             "attempt": 1,
             "started_at": mc.utc_now(),
             "before_head": before,
-            "worker_tools": ["opencode"],
+            "reviewer_tools": ["opencode"],
             "pause": None,
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -748,13 +789,13 @@ class SupervisionRepairTests(McTestCase):
         output = io.StringIO()
         with mock.patch.object(mc_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(output):
-                # _finalize_args passes worker_tools="" — the gate must come
+                # _finalize_args passes reviewer_tools="" — the gate must come
                 # from persisted state, not this invocation's flags.
                 self.assertEqual(mc.finalize_slice(self._finalize_args()), 0)
         result = json.loads(output.getvalue())
         self.assertEqual(result["status"], "repairable")
-        self.assertEqual(result["repair"]["last_signature"], "worker-evidence")
-        self.assertIn("worker-evidence.md", result["reason"])
+        self.assertEqual(result["repair"]["last_signature"], "reviewer-evidence")
+        self.assertIn("reviewer-evidence.md", result["reason"])
 
     def test_finalize_pass_still_force_stops_session(self):
         self.prepare_committed_repo()
@@ -777,10 +818,10 @@ class SupervisionRepairTests(McTestCase):
             "attempt": 1,
             "started_at": mc.utc_now(),
             "before_head": before,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "pause": None,
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -855,7 +896,7 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(len(state["slices"]), 1)
         self.assertEqual(state["slices"][0]["repair"]["round"], 3)
 
-    def test_repair_state_requires_complete_schema_v2_state(self):
+    def test_repair_state_requires_complete_schema_v3_state(self):
         with self.assertRaisesRegex(mc.McError, "missing required repair state"):
             mc_state.repair_state(None)
         with self.assertRaisesRegex(mc.McError, "missing required repair state"):
@@ -882,7 +923,7 @@ class SupervisionRepairTests(McTestCase):
             poll_seconds=0.1,
             reason="repair delivery",
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -933,7 +974,7 @@ class SupervisionRepairTests(McTestCase):
             poll_seconds=0.1,
             reason="repair delivery",
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -993,7 +1034,7 @@ class SupervisionRepairTests(McTestCase):
         fake_adapter.capture.side_effect = fake_capture
         args = argparse.Namespace(
             harness_command="python fake.py",
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -1022,9 +1063,9 @@ class SupervisionRepairTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -1038,7 +1079,7 @@ class SupervisionRepairTests(McTestCase):
             reason="rolling reset",
             poll_seconds=0.1,
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -1066,9 +1107,9 @@ class SupervisionRepairTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -1080,7 +1121,7 @@ class SupervisionRepairTests(McTestCase):
             seconds=30,
             poll_seconds=0.1,
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -1110,9 +1151,9 @@ class SupervisionRepairTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         state["supervision"]["max_single_pause_seconds"] = 0
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
@@ -1127,7 +1168,7 @@ class SupervisionRepairTests(McTestCase):
             reason="rolling reset",
             poll_seconds=0.1,
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,

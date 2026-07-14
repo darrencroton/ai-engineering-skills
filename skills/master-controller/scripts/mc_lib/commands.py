@@ -57,25 +57,24 @@ from .plan import (
 from .profiles import (
     current_allow_unattended_default,
     effective_run_launch_args,
-    harness_supports_role,
-    parse_worker_tools,
+    parse_reviewer_tools,
     profile_command,
     query_profile_model_identity,
     resolve_current_harness_command,
     resolve_harness_command,
 )
 from .runtime import (
-    cancel_run_workers,
-    capture_orchestrator_transcript,
-    capture_worker_runs_summary,
+    cancel_run_reviewers,
+    capture_developer_transcript,
+    capture_reviewer_runs_summary,
     environment_preflight,
     result_schema_path,
     sensitive_artifact_dirs,
     slice_dir_name,
     slice_paths,
-    worker_credential_source,
-    worker_delegation_overview,
-    worker_jobs_path,
+    reviewer_credential_source,
+    reviewer_delegation_overview,
+    reviewer_jobs_path,
 )
 from .runner import (
     _capture_git_evidence,
@@ -176,7 +175,7 @@ def init_run(args: argparse.Namespace) -> int:
         run_dir = mc_dir / "runs" / f"{rid}-{suffix}"
     run_dir.mkdir(parents=True, exist_ok=False)
 
-    # MC keeps live worker credentials and full transcripts under .ai-mc/. It
+    # MC keeps live reviewer credentials and full transcripts under .ai-mc/. It
     # deliberately does not edit the project's own .gitignore, so it makes the
     # audit directory self-ignoring instead: this keeps a stray `git add -A`
     # from ever staging seeded auth material or transcripts. MC's own dirty-tree
@@ -232,12 +231,21 @@ def init_run(args: argparse.Namespace) -> int:
                 "validation": [],
                 "drift_audit": {"verdict": None, "path": ""},
                 "code_review": {"verdict": None, "path": ""},
+                "audit_provenance": {
+                    audit: {
+                        "performed_by": "not-observed",
+                        "reviewer_tool": None,
+                        "reviewer_label": None,
+                        "fallback_context": "operator attested completion before this MC run; audit provenance was not observed",
+                    }
+                    for audit in ("drift-audit", "code-review")
+                },
                 "commit": {"requested": False, "created": False, "hash": None},
                 "next_action": "",
                 "blockers": [],
                 "residual_findings": [],
                 "gate_reason": "operator attested completion at init (--assume-complete); not verified by MC gates",
-                "worker_tools": [],
+                "reviewer_tools": [],
                 "repair": default_repair_state(),
             }
             for slice_id in assumed_ids
@@ -377,7 +385,7 @@ def status(args: argparse.Namespace) -> int:
                 artifact_dir = Path(str(artifact_value)) if artifact_value else None
                 if artifact_dir is not None and not artifact_dir.is_absolute():
                     artifact_dir = repo / artifact_dir
-                result_path = artifact_dir / "orchestrator-result.json" if artifact_dir else None
+                result_path = artifact_dir / "developer-result.json" if artifact_dir else None
                 if result_path is not None and result_path.exists():
                     print(
                         f"WARNING: run status is '{state.get('status')}' but tmux session {session_name!r} is gone; "
@@ -429,6 +437,16 @@ def summarize(args: argparse.Namespace) -> int:
         for slice_id, entries in grouped.items():
             entry = entries[-1]
             print(f"- {slice_id}: {entry.get('status', 'unknown')} (authoritative; {len(entries)} recorded outcome(s))")
+            provenance = entry.get("audit_provenance") if isinstance(entry.get("audit_provenance"), dict) else {}
+            for audit, label in (("drift-audit", "drift audit"), ("code-review", "code review")):
+                record = provenance.get(audit) if isinstance(provenance.get(audit), dict) else {}
+                if record.get("performed_by") == "reviewer":
+                    detail = f"reviewer ({record.get('reviewer_tool')}/{record.get('reviewer_label')})"
+                else:
+                    detail = str(record.get("performed_by") or "not-observed")
+                    if record.get("fallback_context"):
+                        detail += f" — {record['fallback_context']}"
+                print(f"  {label} performed by: {detail}")
             for superseded in entries[:-1]:
                 print(f"  superseded: {superseded.get('status', 'unknown')}")
             residuals = entry.get("residual_findings") if isinstance(entry.get("residual_findings"), list) else []
@@ -445,25 +463,25 @@ def summarize(args: argparse.Namespace) -> int:
             artifact_dir = entry.get("artifact_dir")
             if not artifact_dir:
                 continue
-            overview = worker_delegation_overview(repo / str(artifact_dir))
+            overview = reviewer_delegation_overview(repo / str(artifact_dir))
             if not overview:
                 continue
             flagged = [
-                worker
-                for worker in overview
-                if worker["contracted_marker"] == "absent"
-                or worker["state"] != "completed"
-                or worker["returncode"] != 0
+                reviewer
+                for reviewer in overview
+                if reviewer["contracted_marker"] == "absent"
+                or reviewer["state"] != "completed"
+                or reviewer["returncode"] != 0
             ]
             print(
-                f"  workers: {len(overview)} launched, {len(flagged)} flagged "
+                f"  reviewers: {len(overview)} launched, {len(flagged)} flagged "
                 "(informational; blocks acceptance only on slices marked 'Independent audit required: yes')"
             )
-            for worker in flagged:
-                tail = f' | last output: "{worker["output_tail"]}"' if worker.get("output_tail") else ""
+            for reviewer in flagged:
+                tail = f' | last output: "{reviewer["output_tail"]}"' if reviewer.get("output_tail") else ""
                 print(
-                    f"    ! {worker['label']} ({worker['tool']}): state={worker['state']} "
-                    f"returncode={worker['returncode']} contracted_marker={worker['contracted_marker']}{tail}"
+                    f"    ! {reviewer['label']} ({reviewer['tool']}): state={reviewer['state']} "
+                    f"returncode={reviewer['returncode']} contracted_marker={reviewer['contracted_marker']}{tail}"
                 )
     print(f"Completed: {len(completed)}/{state['plan']['slice_count']}")
     print(f"Run report: {relative_artifact_path(repo, report_path)}")
@@ -715,7 +733,7 @@ def _emergency_halt_without_state(repo: Path, run_dir: Path, args: argparse.Name
         adapter.request_stop(session_name)
         adapter.force_stop(session_name)
         session_evidence.append({"session": session_name, "capture": str(capture_path)})
-    worker_results = cancel_run_workers(run_dir)
+    reviewer_results = cancel_run_reviewers(run_dir)
     record = {
         "stopped": True,
         "state_updated": False,
@@ -723,7 +741,7 @@ def _emergency_halt_without_state(repo: Path, run_dir: Path, args: argparse.Name
         "reason": args.reason,
         "state_error": load_error,
         "sessions": session_evidence,
-        "worker_runs": worker_results,
+        "reviewer_runs": reviewer_results,
         "stopped_at": utc_now(),
     }
     record_path = evidence_dir / "emergency-stop.json"
@@ -759,13 +777,13 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
     adapter = _current_adapter(args, repo, state)
     adapter.capture(session_name, artifact_dir / f"pane-capture-stop-attempt-{attempt}.txt")
     adapter.capture(session_name, artifact_dir / "pane-capture.txt")
-    capture_orchestrator_transcript(
+    capture_developer_transcript(
         state["harness"]["name"],
         repo,
-        str(current.get("orchestrator_session_id")) if current.get("orchestrator_session_id") else None,
+        str(current.get("developer_session_id")) if current.get("developer_session_id") else None,
         artifact_dir,
     )
-    capture_worker_runs_summary(artifact_dir)
+    capture_reviewer_runs_summary(artifact_dir)
     after_head, after_status = _capture_git_evidence(
         repo,
         artifact_dir,
@@ -775,7 +793,7 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
     adapter.request_stop(session_name)
     time.sleep(0.5)
     adapter.force_stop(session_name)
-    cancel_run_workers(run_dir)
+    cancel_run_reviewers(run_dir)
     append_operational_event(
         repo,
         state,
@@ -823,9 +841,9 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
             str(current.get("started_at") or utc_now()),
             terminal,
             before_head,
-            tuple(str(tool) for tool in current.get("worker_tools") or ()),
+            tuple(str(tool) for tool in current.get("reviewer_tools") or ()),
             repair=dict(repair_state(current)),
-            worker_policy=current.get("worker_policy") if isinstance(current.get("worker_policy"), dict) else None,
+            reviewer_policy=current.get("reviewer_policy") if isinstance(current.get("reviewer_policy"), dict) else None,
         )
     )
     update_state_for_stop(run_dir / "run.json", state, args.status, args.reason)
@@ -939,12 +957,12 @@ def reconcile(args: argparse.Namespace) -> int:
         raise McError(f"failed slice has no recorded before_head: {slice_id}")
     after_head = git_head(repo)
     after_status = git_status_text(repo)
-    capture_worker_runs_summary(artifact_dir)
+    capture_reviewer_runs_summary(artifact_dir)
     # Recovered from the entry this reconcile call is replacing, not a fresh
-    # --worker-tools flag: reconcile is a separate invocation and the original
-    # slice attempt's worker requirement must not be lost on reconciliation.
-    worker_tools = tuple(entry["worker_tools"])
-    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, worker_tools)
+    # --reviewer-tools flag: reconcile is a separate invocation and the original
+    # slice attempt's reviewer requirement must not be lost on reconciliation.
+    reviewer_tools = tuple(entry["reviewer_tools"])
+    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, reviewer_tools)
     reconciled_entry = slice_entry_from_gate(
         repo,
         plan_slice,
@@ -952,9 +970,9 @@ def reconcile(args: argparse.Namespace) -> int:
         str(entry.get("started_at") or utc_now()),
         gate,
         before_head,
-        worker_tools,
+        reviewer_tools,
         repair=dict(entry["repair"]),
-        worker_policy=entry.get("worker_policy") if isinstance(entry.get("worker_policy"), dict) else None,
+        reviewer_policy=entry.get("reviewer_policy") if isinstance(entry.get("reviewer_policy"), dict) else None,
     )
     state["slices"][entry_index] = reconciled_entry
     state["current_slice"] = None
@@ -993,7 +1011,7 @@ def stop(args: argparse.Namespace) -> int:
         adapter.request_stop(str(session_name))
         time.sleep(0.5)
         adapter.force_stop(str(session_name))
-    cancel_run_workers(run_dir)
+    cancel_run_reviewers(run_dir)
     update_state_for_stop(run_dir / "run.json", state, "cancelled", args.reason)
     print(f"Run cancelled: {args.reason}")
     return 0
@@ -1008,7 +1026,6 @@ def print_check(label: str, ok: bool, detail: str = "") -> None:
 def list_profiles(args: argparse.Namespace) -> int:
     for name, profile in sorted(HARNESS_PROFILES.items()):
         print(f"{name}")
-        print(f"  roles: {', '.join(profile.get('roles', []))}")
         base = profile.get("base_command") or []
         print(f"  base_command: {shlex.join(base)}")
         model_override = profile.get("model_flag") or (f"-c {profile['model_config_key']}=..." if profile.get("model_config_key") else "none")
@@ -1048,7 +1065,7 @@ def preflight(args: argparse.Namespace) -> int:
                 harness_name,
                 repo,
                 state,
-                parse_worker_tools(args.worker_tools),
+                parse_reviewer_tools(args.reviewer_tools),
                 harness_model=getattr(args, "harness_model", None),
                 harness_effort=getattr(args, "harness_effort", None),
             )
@@ -1057,8 +1074,6 @@ def preflight(args: argparse.Namespace) -> int:
         except McError as exc:
             check("profile command", False, str(exc))
     check("harness executable", shutil.which(executable) is not None, f"{executable}: {shutil.which(executable) or 'not found'}")
-    check("harness orchestrator role", harness_supports_role(harness_name, "orchestrator"), harness_name)
-
     harness_model = getattr(args, "harness_model", None)
     if harness_model:
         try:
@@ -1072,20 +1087,20 @@ def preflight(args: argparse.Namespace) -> int:
         except McError as exc:
             check("harness model identity", False, str(exc))
 
-    worker_model = getattr(args, "worker_model", None)
-    worker_tools = parse_worker_tools(args.worker_tools)
-    if worker_model:
-        for worker_tool in worker_tools:
+    reviewer_model = getattr(args, "reviewer_model", None)
+    reviewer_tools = parse_reviewer_tools(args.reviewer_tools)
+    if reviewer_model:
+        for reviewer_tool in reviewer_tools:
             try:
-                identity = query_profile_model_identity(worker_tool, worker_model)
+                identity = query_profile_model_identity(reviewer_tool, reviewer_model)
                 if identity is not None:
                     check(
-                        f"{worker_tool} worker model identity",
+                        f"{reviewer_tool} reviewer model identity",
                         True,
                         f"{identity['resolved_id']} ({identity['display_name']}; via {identity['inventory_command']})",
                     )
             except McError as exc:
-                check(f"{worker_tool} worker model identity", False, str(exc))
+                check(f"{reviewer_tool} reviewer model identity", False, str(exc))
 
     # Resolve and preflight the exact launch command run-next would use, so
     # preflight cannot pass a configuration the run then refuses (for example a
@@ -1097,7 +1112,7 @@ def preflight(args: argparse.Namespace) -> int:
             harness_name,
             resolve_harness_command(args, repo, state, session_hint),
             getattr(args, "allow_unattended_default", False),
-            parse_worker_tools(args.worker_tools),
+            parse_reviewer_tools(args.reviewer_tools),
         )
         launch_adapter.preflight()
         check("harness launch resolves", True, launch_adapter.command)
@@ -1122,7 +1137,7 @@ def preflight(args: argparse.Namespace) -> int:
         check("slice eligibility", runnable, "; ".join(reasons) if reasons else candidate.title)
         proposed_artifact_dir = run_dir / "slices" / slice_dir_name(candidate)
         check("run directory writable", os.access(run_dir, os.W_OK), str(run_dir))
-        check("worker helper", worker_jobs_path().exists(), str(worker_jobs_path()))
+        check("reviewer helper", reviewer_jobs_path().exists(), str(reviewer_jobs_path()))
         check("result schema", result_schema_path().exists(), str(result_schema_path()))
         for label, path in slice_paths(proposed_artifact_dir).items():
             parent = nearest_existing_parent(path)
@@ -1135,31 +1150,31 @@ def preflight(args: argparse.Namespace) -> int:
         except McError as exc:
             check("git directory writable", False, str(exc))
 
-    if candidate is not None and candidate.independent_audit_required and not worker_tools:
+    if candidate is not None and candidate.independent_audit_required and not reviewer_tools:
         # Fail fast at setup: an opt-in slice's mechanical independence gate
-        # cannot be satisfied with no worker available. Catch it here rather
+        # cannot be satisfied with no reviewer available. Catch it here rather
         # than at the finalize gate after a full slice has run.
         check(
-            "independent-audit worker available",
+            "independent-audit reviewer available",
             False,
-            f"{candidate.slice_id} is marked 'Independent audit required: yes' but no --worker-tools was configured",
+            f"{candidate.slice_id} is marked 'Independent audit required: yes' but no --reviewer-tools was configured",
         )
-    if worker_tools:
-        unsupported = [tool for tool in worker_tools if tool not in HARNESS_PROFILES]
-        check("worker profiles known", not unsupported, ", ".join(unsupported) if unsupported else ", ".join(worker_tools))
+    if reviewer_tools:
+        unsupported = [tool for tool in reviewer_tools if tool not in HARNESS_PROFILES]
+        check("reviewer profiles known", not unsupported, ", ".join(unsupported) if unsupported else ", ".join(reviewer_tools))
         if harness_name == "codex" and not (getattr(args, "allow_profile_command", False) or "sandbox_workspace_write.network_access=true" in (args.harness_command or "")):
-            check("codex worker network launch", False, "use --allow-profile-command or include sandbox workspace network access in --harness-command")
+            check("codex reviewer network launch", False, "use --allow-profile-command or include sandbox workspace network access in --harness-command")
         else:
-            check("worker-enabled launch", True, ", ".join(worker_tools))
-        for tool in worker_tools:
+            check("reviewer-enabled launch", True, ", ".join(reviewer_tools))
+        for tool in reviewer_tools:
             if tool == harness_name:
                 continue
-            source = worker_credential_source(tool)
+            source = reviewer_credential_source(tool)
             if source is None:
                 continue
             source_dir, filename = source
             credential_path = source_dir / filename
-            check(f"{tool} worker credential source", credential_path.exists(), str(credential_path))
+            check(f"{tool} reviewer credential source", credential_path.exists(), str(credential_path))
 
     if meaningful_status_lines(git_status_text(repo)):
         check("clean worktree", False, "dirty outside .ai-mc/")
@@ -1178,7 +1193,7 @@ def archive_sensitive(args: argparse.Namespace) -> int:
     run_dir = resolve_run_dir(repo, args.run)
     targets = sensitive_artifact_dirs(run_dir)
     if not targets:
-        print("No sensitive worker artifact directories found.")
+        print("No sensitive reviewer artifact directories found.")
         return 0
     archive_root = repo / ".ai-mc" / "sensitive-archive" / run_dir.name
     for source in targets:
@@ -1192,8 +1207,8 @@ def archive_sensitive(args: argparse.Namespace) -> int:
             raise McError(f"archive destination already exists: {destination}")
         shutil.move(str(source), str(destination))
         marker = source.parent / f"{source.name}-ARCHIVED.txt"
-        marker.write_text(f"Sensitive worker state archived to {destination}\n", encoding="utf-8")
-    print("Dry run complete." if args.dry_run else "Sensitive worker artifacts archived.")
+        marker.write_text(f"Sensitive reviewer state archived to {destination}\n", encoding="utf-8")
+    print("Dry run complete." if args.dry_run else "Sensitive reviewer artifacts archived.")
     return 0
 
 

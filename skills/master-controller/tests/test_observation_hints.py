@@ -82,7 +82,7 @@ class ObservationHintTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -115,9 +115,9 @@ class ObservationHintTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
 
@@ -128,7 +128,7 @@ class ObservationHintTests(McTestCase):
             repo=str(self.repo),
             run="current",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -159,9 +159,9 @@ class ObservationHintTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -173,7 +173,7 @@ class ObservationHintTests(McTestCase):
             text="You were interrupted. Continue.",
             reason="resume after reset",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -204,9 +204,9 @@ class ObservationHintTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -218,7 +218,7 @@ class ObservationHintTests(McTestCase):
             text="continue",
             reason="test",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,
@@ -241,8 +241,8 @@ class ObservationHintTests(McTestCase):
         hints = mc.extract_operational_hints(safety_text, process_running=True, result_exists=False)
         self.assertFalse(any(hint["kind"] == "external_side_effect_request" for hint in hints))
 
-    def test_full_rendered_orchestrator_prompt_triggers_no_hard_prompt_or_hard_stop_hint(self):
-        # render_orchestrator_prompt embeds the compact MC slice delegation
+    def test_full_rendered_developer_prompt_triggers_no_hard_prompt_or_hard_stop_hint(self):
+        # render_developer_prompt embeds the compact MC slice delegation
         # contract. A doc phrase anywhere in that contract that
         # happens to collide with a HARD_PROMPT_MARKERS substring would make
         # the repair-send guard and _raise_on_hard_stop_hints refuse delivery
@@ -253,7 +253,7 @@ class ObservationHintTests(McTestCase):
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(
+        prompt = mc.render_developer_prompt(
             state,
             plan_slice,
             slice_artifact_dir,
@@ -262,7 +262,7 @@ class ObservationHintTests(McTestCase):
             "some-model",
             "medium",
         )
-        self.assertIn("Master Controller Slice Delegation Contract", prompt)
+        self.assertIn("Master Controller Slice Reviewer Contract", prompt)
 
         hard_prompt = mc.TmuxHarnessAdapter.detect_hard_prompt(prompt)
         self.assertFalse(hard_prompt["present"], hard_prompt.get("kinds"))
@@ -283,7 +283,7 @@ class ObservationHintTests(McTestCase):
         self.assertTrue(external["hard_stop"])
 
     def test_operational_hints_ignore_instructional_timeout_flags(self):
-        text = 'Use worker_jobs.py wait --run-dir "$run_dir" --label check --timeout 300.'
+        text = 'Use reviewer_jobs.py wait --run-dir "$run_dir" --label check --timeout 300.'
         hints = mc.extract_operational_hints(text, process_running=True, result_exists=False)
         self.assertFalse(any(hint["kind"] == "network_transient" for hint in hints))
 
@@ -403,7 +403,7 @@ class ObservationHintTests(McTestCase):
         self.assertTrue(usage["hard_stop"])
 
     def test_only_high_confidence_service_unavailable_reclassifies_terminal_report(self):
-        terminal = mc.GateDecision("blocked", "orchestrator reported blocked", {"status": "blocked"})
+        terminal = mc.GateDecision("blocked", "developer reported blocked", {"status": "blocked"})
         high = {
             "kind": "service_unavailable",
             "subtype": "transient",
@@ -455,9 +455,9 @@ class ObservationHintTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -469,7 +469,7 @@ class ObservationHintTests(McTestCase):
             text="continue",
             reason="test",
             harness_command=None,
-            worker_tools="",
+            reviewer_tools="",
             allow_profile_command=False,
             allow_unattended_default=False,
             harness_model=None,

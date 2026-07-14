@@ -4,6 +4,12 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** renamed the `ai-orchestrator` skill to `orchestrator`, renamed the executing agent role to Developer, and replaced the Senior/Junior worker roles with one read-only Reviewer role. All supported harnesses are equally eligible for either role; harness-specific read-only enforcement differences are reported as facts rather than used as eligibility policy.
+- **Breaking:** Master Controller state/results now use schema version 3 and the Reviewer contract uses schema version 2. The CLI uses `--reviewer-*`, runtime state lives under `.orchestrator/`, and Developer/Reviewer fields and artifacts replace their former role-shaped names without compatibility aliases.
+- Audit provenance now records Reviewer execution or explicit Developer self-audit in slice summaries, run reports, and summaries. Default slices may self-audit when no Reviewer is configured or available; independent-audit slices still require separate validated Reviewer runs.
+
 ## [0.5.0] — 2026-07-13
 
 ### Added

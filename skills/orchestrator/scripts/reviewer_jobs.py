@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Validate, launch, and manage tracked worker runs for ai-orchestrator.
+"""Validate, launch, and manage tracked Reviewer runs for the orchestrator skill.
 
-Worker artifacts are written to .ai-orchestrator/runs/ in the current project
-by default (override with AI_ORCHESTRATOR_ARTIFACT_ROOT). Provides per-run
+Reviewer artifacts are written to .orchestrator/runs/ in the current project
+by default (override with ORCHESTRATOR_ARTIFACT_ROOT). Provides per-run
 directories, semantic contract validation, deterministic harness composition,
 manifest tracking, status, activity, cancel, and extract commands.
 """
@@ -27,18 +27,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from worker_contract import (
-    WorkerContractError,
-    WORKER_PROFILES,
+from reviewer_contract import (
+    ReviewerContractError,
+    REVIEWER_PROFILES,
     LABEL_RE as CONTRACT_LABEL_RE,
-    compose_worker_command,
+    compose_reviewer_command,
     compile_skill_bundle,
     load_json_object,
-    render_worker_prompt,
+    render_reviewer_prompt,
     sha256_path,
     validate_contract,
 )
-from worker_sessions import (
+from reviewer_sessions import (
     claude_project_root,
     extract_session_text,
     infer_tool_name,
@@ -49,8 +49,9 @@ from worker_sessions import (
 )
 
 
-ARTIFACT_ROOT_ENV = "AI_ORCHESTRATOR_ARTIFACT_ROOT"
-STATE_DIR_NAME = ".ai-orchestrator"
+ARTIFACT_ROOT_ENV = "ORCHESTRATOR_ARTIFACT_ROOT"
+STATE_DIR_NAME = ".orchestrator"
+RUN_SCHEMA_VERSION = 2
 RUNS_DIR_NAME = "runs"
 MANIFEST_NAME = "manifest.json"
 MANIFEST_LOCK_NAME = ".manifest.lock"
@@ -66,7 +67,7 @@ AUDIT_VERDICT_RE = re.compile(
 _LIBRARY_WRAPPERS: dict[int, subprocess.Popen[bytes]] = {}
 
 
-class WorkerJobsError(RuntimeError):
+class ReviewerJobsError(RuntimeError):
     """Raised for expected operational errors."""
 
 
@@ -122,11 +123,11 @@ def state_dir_from_run_dir(path: Path) -> Path | None:
 
 
 def resolve_run_dir(arg: str) -> Path:
-    """Resolve --run-dir; 'current' follows the .ai-orchestrator/current symlink."""
+    """Resolve --run-dir; 'current' follows the .orchestrator/current symlink."""
     if arg == "current":
         current_link = default_state_dir() / "current"
         if not current_link.exists():
-            raise WorkerJobsError("No current run: .ai-orchestrator/current symlink not found.")
+            raise ReviewerJobsError("No current run: .orchestrator/current symlink not found.")
         return current_link.resolve()
     return Path(arg).expanduser().resolve()
 
@@ -136,7 +137,7 @@ def ensure_managed_run_dir(path: Path) -> Path:
     state_dir = state_dir_from_run_dir(resolved)
     if state_dir is None:
         managed_root = default_root()
-        raise WorkerJobsError(
+        raise ReviewerJobsError(
             f"Run directory must live under helper-managed artifact root {managed_root}. "
             f"Set {ARTIFACT_ROOT_ENV} to override the root."
         )
@@ -286,8 +287,8 @@ def normalize_section_name(name: str) -> str:
 def validate_label(label: str) -> None:
     if LABEL_RE.fullmatch(label):
         return
-    raise WorkerJobsError(
-        "Worker label must match <nn>-<tool>-<subtask-slug>[-rN] in lowercase kebab-case, "
+    raise ReviewerJobsError(
+        "Reviewer label must match <nn>-<tool>-<subtask-slug>[-rN] in lowercase kebab-case, "
         f"for example 01-codex-trace-login or 03-claude-review-plan-r1: {label}"
     )
 
@@ -315,7 +316,7 @@ def hold_lock(lock_path: Path, description: str):
         try:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
         except OSError as exc:
-            raise WorkerJobsError(f"Unable to lock {description}: {lock_path.parent}") from exc
+            raise ReviewerJobsError(f"Unable to lock {description}: {lock_path.parent}") from exc
         try:
             yield
         finally:
@@ -337,8 +338,14 @@ def hold_index_lock(state_dir: Path):
 def load_manifest(run_dir: Path) -> dict[str, Any]:
     path = manifest_path(run_dir)
     if not path.exists():
-        raise WorkerJobsError(f"Run directory has no manifest: {run_dir}")
-    return read_json(path)
+        raise ReviewerJobsError(f"Run directory has no manifest: {run_dir}")
+    manifest = read_json(path)
+    if manifest.get("schema_version") != RUN_SCHEMA_VERSION:
+        raise ReviewerJobsError(
+            f"Unsupported Reviewer run manifest schema: expected {RUN_SCHEMA_VERSION}, "
+            f"got {manifest.get('schema_version')!r}. Start a new .orchestrator run."
+        )
+    return manifest
 
 
 def save_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
@@ -348,11 +355,12 @@ def save_manifest(run_dir: Path, manifest: dict[str, Any]) -> None:
 def ensure_manifest(run_dir: Path) -> dict[str, Any]:
     path = manifest_path(run_dir)
     if path.exists():
-        return read_json(path)
+        return load_manifest(run_dir)
     manifest = {
+        "schema_version": RUN_SCHEMA_VERSION,
         "created_at": iso_now(),
         "run_dir": str(run_dir),
-        "workers": {},
+        "reviewers": {},
     }
     save_manifest(run_dir, manifest)
     return manifest
@@ -378,7 +386,7 @@ def save_index(state_dir: Path, index: list[dict[str, Any]]) -> None:
     write_json(index_path(state_dir), index)
 
 
-def worker_status(entry: dict[str, Any]) -> dict[str, Any]:
+def reviewer_status(entry: dict[str, Any]) -> dict[str, Any]:
     pid = int(entry.get("pid", 0))
     status_file = Path(entry["status_file"])
     outfile = Path(entry["outfile"])
@@ -422,7 +430,7 @@ def worker_status(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_status_from_manifest(manifest: dict[str, Any]) -> str:
-    states = {worker_status(entry)["state"] for entry in manifest.get("workers", {}).values()}
+    states = {reviewer_status(entry)["state"] for entry in manifest.get("reviewers", {}).values()}
     if not states or states & {"running", "stalled", "finished"}:
         return "active"
     if "failed" in states:
@@ -552,7 +560,7 @@ def extract_best_result(entry: dict[str, Any]) -> dict[str, str]:
             "text": err_text,
         }
 
-    raise WorkerJobsError(f"No output available for worker {entry['label']}")
+    raise ReviewerJobsError(f"No output available for reviewer {entry['label']}")
 
 
 def extract_best_text(entry: dict[str, Any]) -> str:
@@ -560,7 +568,7 @@ def extract_best_text(entry: dict[str, Any]) -> str:
 
 
 def audit_skill_verdicts(required_skills: list[str], text: str) -> dict[str, str | None]:
-    """Extract helper-owned semantic verdicts after the worker exits."""
+    """Extract helper-owned semantic verdicts after the reviewer exits."""
     audit_skills = [skill for skill in required_skills if skill in {"drift-audit", "code-review"}]
     if not audit_skills:
         return {}
@@ -574,7 +582,7 @@ def command_init(args: argparse.Namespace) -> int:
     if args.root:
         requested_root = Path(args.root).expanduser().resolve()
         if requested_root != root:
-            raise WorkerJobsError(
+            raise ReviewerJobsError(
                 f"Custom --root is no longer supported. Use {ARTIFACT_ROOT_ENV}={requested_root} "
                 "to override the helper-managed artifact root."
             )
@@ -596,22 +604,22 @@ def command_init(args: argparse.Namespace) -> int:
 
 def command_profiles(args: argparse.Namespace) -> int:
     del args
-    print(json.dumps({"schema_version": 1, "profiles": WORKER_PROFILES}, indent=2, sort_keys=True))
+    print(json.dumps({"schema_version": RUN_SCHEMA_VERSION, "profiles": REVIEWER_PROFILES}, indent=2, sort_keys=True))
     return 0
 
 
 def normalize_dependencies(manifest: dict[str, Any], label: str, depends_on: list[str] | None) -> list[str]:
     if not depends_on:
         return []
-    workers = manifest.get("workers", {})
+    reviewers = manifest.get("reviewers", {})
     normalized: list[str] = []
     seen: set[str] = set()
     for dep in depends_on:
         validate_label(dep)
         if dep == label:
-            raise WorkerJobsError(f"Worker '{label}' cannot depend on itself.")
-        if dep not in workers:
-            raise WorkerJobsError(f"Unknown dependency label: {dep}")
+            raise ReviewerJobsError(f"Reviewer '{label}' cannot depend on itself.")
+        if dep not in reviewers:
+            raise ReviewerJobsError(f"Unknown dependency label: {dep}")
         if dep in seen:
             continue
         seen.add(dep)
@@ -619,7 +627,7 @@ def normalize_dependencies(manifest: dict[str, Any], label: str, depends_on: lis
     return normalized
 
 
-def start_tracked_worker(
+def start_tracked_reviewer(
     run_dir: Path,
     label: str,
     command: list[str],
@@ -628,14 +636,14 @@ def start_tracked_worker(
     depends_on: list[str] | None = None,
     launch_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Start a validated worker command and persist its durable evidence."""
+    """Start a validated reviewer command and persist its durable evidence."""
     validate_label(label)
     tool_name = infer_tool_name(command)
 
     with hold_manifest_lock(run_dir):
         manifest = ensure_manifest(run_dir)
-        if label in manifest["workers"]:
-            raise WorkerJobsError(f"Worker label already exists in manifest: {label}")
+        if label in manifest["reviewers"]:
+            raise ReviewerJobsError(f"Reviewer label already exists in manifest: {label}")
         normalized_dependencies = normalize_dependencies(manifest, label, depends_on)
 
         started_at = iso_now()
@@ -674,7 +682,7 @@ def start_tracked_worker(
             # Popen handle so they can reap it after an external cancel.
             _LIBRARY_WRAPPERS[process.pid] = process
 
-        manifest["workers"][label] = {
+        manifest["reviewers"][label] = {
             "label": label,
             "tool": tool_name,
             "pid": process.pid,
@@ -686,21 +694,21 @@ def start_tracked_worker(
             "cwd": str(cwd),
         }
         if normalized_dependencies:
-            manifest["workers"][label]["depends_on"] = normalized_dependencies
+            manifest["reviewers"][label]["depends_on"] = normalized_dependencies
         if launch_contract is not None:
-            manifest["workers"][label]["launch_contract"] = launch_contract
+            manifest["reviewers"][label]["launch_contract"] = launch_contract
         save_manifest(run_dir, manifest)
         sync_run_index(run_dir, manifest=manifest, status="active")
 
     if tool_name in {"claude", "codex"}:
-        session_path = resolve_session_path(manifest["workers"][label], wait_seconds=5.0)
+        session_path = resolve_session_path(manifest["reviewers"][label], wait_seconds=5.0)
         if session_path is not None:
             with hold_manifest_lock(run_dir):
                 manifest = ensure_manifest(run_dir)
-                worker_entry = manifest["workers"].get(label)
-                if worker_entry is not None:
-                    worker_entry["session_path"] = str(session_path)
-                    worker_entry["session_id"] = session_id_from_path(session_path) or session_path.stem
+                reviewer_entry = manifest["reviewers"].get(label)
+                if reviewer_entry is not None:
+                    reviewer_entry["session_path"] = str(session_path)
+                    reviewer_entry["session_id"] = session_id_from_path(session_path) or session_path.stem
                     save_manifest(run_dir, manifest)
 
     return {
@@ -718,19 +726,19 @@ def _feedback_paths(run_dir: Path, label: str) -> tuple[Path, Path]:
     return run_dir / f"{label}-request-feedback.json", run_dir / f"{label}-request-feedback.md"
 
 
-def write_contract_feedback(run_dir: Path, label: str, exc: WorkerContractError) -> dict[str, Any]:
+def write_contract_feedback(run_dir: Path, label: str, exc: ReviewerContractError) -> dict[str, Any]:
     payload = {
         "status": "rejected",
         "label": label,
         "issues": [issue.as_dict() for issue in exc.issues],
-        "next_action": "Correct only the listed worker-request fields, preserve the same slice contract, then run launch again.",
+        "next_action": "Correct only the listed reviewer-request fields, preserve the same slice contract, then run launch again.",
     }
     json_path, markdown_path = _feedback_paths(run_dir, label)
     write_json(json_path, payload)
     lines = [
-        "# Worker Request Rejected",
+        "# Reviewer Request Rejected",
         "",
-        "The worker was not launched. Fix the request and retry; do not substitute a raw harness command.",
+        "The reviewer was not launched. Fix the request and retry; do not substitute a raw harness command.",
         "",
     ]
     for index, issue in enumerate(exc.issues, start=1):
@@ -753,7 +761,7 @@ def command_launch(args: argparse.Namespace) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
     request_path = Path(args.request).expanduser().resolve()
     policy_path = Path(args.policy).expanduser().resolve()
-    label = "worker-request"
+    label = "reviewer-request"
     try:
         policy = load_json_object(policy_path, "policy")
         request = load_json_object(request_path, "request")
@@ -761,14 +769,15 @@ def command_launch(args: argparse.Namespace) -> int:
             label = request["label"].strip()
         contract = validate_contract(policy, request, run_dir)
         label = contract["label"]
-        prompt = render_worker_prompt(contract)
-        command = compose_worker_command(contract, prompt)
-    except WorkerContractError as exc:
+        prompt = render_reviewer_prompt(contract)
+        command = compose_reviewer_command(contract, prompt)
+    except ReviewerContractError as exc:
         payload = write_contract_feedback(run_dir, label, exc)
         print(json.dumps(payload, indent=2, sort_keys=True), file=sys.stderr)
         return 2
 
     contract_artifact = {
+        "schema_version": RUN_SCHEMA_VERSION,
         "status": "pass",
         "policy_path": str(policy_path),
         "policy_sha256": sha256_path(policy_path),
@@ -783,7 +792,7 @@ def command_launch(args: argparse.Namespace) -> int:
         "access": contract["access"],
         # Preserve the validated semantic purpose of the launch. MC uses this
         # to distinguish independent drift-audit evidence from code-review
-        # evidence instead of accepting any successful worker process as proof
+        # evidence instead of accepting any successful reviewer process as proof
         # that both gates were delegated.
         "required_skills": list(contract["required_skills"]),
         "repo_path": contract["repo_path"],
@@ -804,7 +813,7 @@ def command_launch(args: argparse.Namespace) -> int:
         "prompt_artifact": str(prompt_path),
         "launch_artifact": str(launch_path),
     }
-    result = start_tracked_worker(
+    result = start_tracked_reviewer(
         run_dir,
         label,
         command,
@@ -816,33 +825,33 @@ def command_launch(args: argparse.Namespace) -> int:
     return 0
 
 
-def iter_selected_workers(manifest: dict[str, Any], label: str | None) -> list[dict[str, Any]]:
-    workers = manifest.get("workers", {})
+def iter_selected_reviewers(manifest: dict[str, Any], label: str | None) -> list[dict[str, Any]]:
+    reviewers = manifest.get("reviewers", {})
     if label is None:
-        return [workers[key] for key in sorted(workers)]
-    if label not in workers:
-        raise WorkerJobsError(f"Unknown worker label: {label}")
-    return [workers[label]]
+        return [reviewers[key] for key in sorted(reviewers)]
+    if label not in reviewers:
+        raise ReviewerJobsError(f"Unknown reviewer label: {label}")
+    return [reviewers[label]]
 
 
 def dependency_warnings(manifest: dict[str, Any], entry: dict[str, Any]) -> list[str]:
-    """Return warning strings for invalid or incomplete worker dependencies."""
+    """Return warning strings for invalid or incomplete reviewer dependencies."""
     deps = entry.get("depends_on") or []
     if not deps:
         return []
-    ws = manifest.get("workers", {})
+    ws = manifest.get("reviewers", {})
     warnings_list = []
     for dep in deps:
         dep_entry = ws.get(dep)
         if dep_entry is None:
             warnings_list.append(
-                f"worker '{entry['label']}' depends on unknown worker '{dep}'"
+                f"reviewer '{entry['label']}' depends on unknown reviewer '{dep}'"
             )
             continue
-        dep_state = worker_status(dep_entry)["state"]
+        dep_state = reviewer_status(dep_entry)["state"]
         if dep_state not in {"completed", "cancelled", "failed"}:
             warnings_list.append(
-                f"worker '{entry['label']}' depends on '{dep}' which is {dep_state}"
+                f"reviewer '{entry['label']}' depends on '{dep}' which is {dep_state}"
             )
     return warnings_list
 
@@ -850,8 +859,8 @@ def dependency_warnings(manifest: dict[str, Any], entry: dict[str, Any]) -> list
 def command_status(args: argparse.Namespace) -> int:
     run_dir = resolve_run_dir(args.run_dir)
     manifest = load_manifest(run_dir)
-    entries = iter_selected_workers(manifest, args.label)
-    statuses = [worker_status(entry) for entry in entries]
+    entries = iter_selected_reviewers(manifest, args.label)
+    statuses = [reviewer_status(entry) for entry in entries]
     for entry in entries:
         for warn in dependency_warnings(manifest, entry):
             print(f"WARNING: {warn}", file=sys.stderr)
@@ -872,7 +881,7 @@ def command_status(args: argparse.Namespace) -> int:
 def command_activity(args: argparse.Namespace) -> int:
     run_dir = resolve_run_dir(args.run_dir)
     manifest = load_manifest(run_dir)
-    entries = iter_selected_workers(manifest, args.label)
+    entries = iter_selected_reviewers(manifest, args.label)
     for entry in entries:
         for warn in dependency_warnings(manifest, entry):
             print(f"WARNING: {warn}", file=sys.stderr)
@@ -880,7 +889,7 @@ def command_activity(args: argparse.Namespace) -> int:
     activity_rows: list[dict[str, Any]] = []
 
     for entry in entries:
-        status = worker_status(entry)
+        status = reviewer_status(entry)
         payload = {
             "label": status["label"],
             "state": status["state"],
@@ -951,7 +960,7 @@ def command_wait(args: argparse.Namespace) -> int:
     deadline = None if args.timeout is None else time.time() + args.timeout
     while True:
         manifest = load_manifest(run_dir)
-        statuses = [worker_status(entry) for entry in iter_selected_workers(manifest, args.label)]
+        statuses = [reviewer_status(entry) for entry in iter_selected_reviewers(manifest, args.label)]
         if not any(status["running"] for status in statuses):
             failed = [status for status in statuses if status["returncode"] not in (None, 0)]
             if args.json:
@@ -972,7 +981,7 @@ def command_wait(args: argparse.Namespace) -> int:
 
 def command_extract(args: argparse.Namespace) -> int:
     manifest = load_manifest(resolve_run_dir(args.run_dir))
-    entry = iter_selected_workers(manifest, args.label)[0]
+    entry = iter_selected_reviewers(manifest, args.label)[0]
     result = extract_best_result(entry)
     text = result["text"]
     if args.sections:
@@ -1000,7 +1009,7 @@ def command_extract(args: argparse.Namespace) -> int:
 def command_cancel(args: argparse.Namespace) -> int:
     run_dir = resolve_run_dir(args.run_dir)
     manifest = load_manifest(run_dir)
-    entries = iter_selected_workers(manifest, args.label)
+    entries = iter_selected_reviewers(manifest, args.label)
 
     requested_labels: set[str] = set()
     signal_errors: dict[str, str] = {}
@@ -1027,7 +1036,7 @@ def command_cancel(args: argparse.Namespace) -> int:
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         manifest = load_manifest(run_dir)
-        current_entries = iter_selected_workers(manifest, args.label)
+        current_entries = iter_selected_reviewers(manifest, args.label)
         if not any(tracked_wrapper_running(entry) or tracked_child_running(entry) for entry in current_entries):
             # A denied individual signal is not terminal if another owned
             # process completed cleanup and every tracked identity is gone.
@@ -1038,7 +1047,7 @@ def command_cancel(args: argparse.Namespace) -> int:
                     status = read_json(status_path) if status_path.is_file() else {}
                     if status.get("state") not in {"completed", "cancelled", "failed"}:
                         mark_cancelled_entry(entry, forced=False, returncode=-signal.SIGTERM)
-            statuses = [worker_status(entry) for entry in current_entries]
+            statuses = [reviewer_status(entry) for entry in current_entries]
             if args.json:
                 print(json.dumps(statuses, indent=2, sort_keys=True))
             else:
@@ -1048,7 +1057,7 @@ def command_cancel(args: argparse.Namespace) -> int:
         time.sleep(args.interval)
 
     manifest = load_manifest(run_dir)
-    remaining = iter_selected_workers(manifest, args.label)
+    remaining = iter_selected_reviewers(manifest, args.label)
     for entry in remaining:
         if tracked_wrapper_running(entry) or tracked_child_running(entry):
             label = str(entry["label"])
@@ -1057,7 +1066,7 @@ def command_cancel(args: argparse.Namespace) -> int:
                 signal_errors.pop(label, None)
             except PermissionError as exc:
                 signal_errors[label] = f"SIGKILL denied: {exc}"
-    statuses = [worker_status(entry) for entry in remaining]
+    statuses = [reviewer_status(entry) for entry in remaining]
     if args.json:
         print(json.dumps(statuses, indent=2, sort_keys=True))
     else:
@@ -1065,14 +1074,14 @@ def command_cancel(args: argparse.Namespace) -> int:
             print(f"{status['label']}: state={status['state']} pid={status['pid']}")
     if signal_errors:
         details = "; ".join(f"{label}: {detail}" for label, detail in sorted(signal_errors.items()))
-        raise WorkerJobsError(f"Unable to cancel every selected worker: {details}")
+        raise ReviewerJobsError(f"Unable to cancel every selected reviewer: {details}")
     return 0 if not any(status["running"] for status in statuses) else 1
 
 
 def command_runner(args: argparse.Namespace) -> int:
     command = normalize_command(args.command)
     if not command:
-        raise WorkerJobsError("Runner requires a worker command.")
+        raise ReviewerJobsError("Runner requires a reviewer command.")
 
     status_file = Path(args.status_file)
     stdout_path = Path(args.stdout)
@@ -1152,7 +1161,7 @@ def command_runner(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="worker_jobs.py")
+    parser = argparse.ArgumentParser(prog="reviewer_jobs.py")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser(
@@ -1166,12 +1175,14 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--prefix", default="run")
     init_parser.set_defaults(func=command_init)
 
-    profiles_parser = subparsers.add_parser("profiles", help="Show deterministic worker role/access capabilities.")
+    profiles_parser = subparsers.add_parser(
+        "profiles", help="Show Reviewer harness command mechanics and factual read-only enforcement."
+    )
     profiles_parser.set_defaults(func=command_profiles)
 
     launch_parser = subparsers.add_parser(
         "launch",
-        help="Validate a semantic worker request against policy, compose the harness command, and start one tracked worker.",
+        help="Validate a semantic reviewer request against policy, compose the harness command, and start one tracked reviewer.",
     )
     launch_parser.add_argument(
         "--run-dir",
@@ -1181,30 +1192,30 @@ def build_parser() -> argparse.ArgumentParser:
             f"artifact root (override with {ARTIFACT_ROOT_ENV})."
         ),
     )
-    launch_parser.add_argument("--policy", required=True, help="MC/orchestrator worker-policy.json path.")
-    launch_parser.add_argument("--request", required=True, help="Semantic worker-request.json path.")
+    launch_parser.add_argument("--policy", required=True, help="MC/Developer reviewer-policy.json path.")
+    launch_parser.add_argument("--request", required=True, help="Semantic reviewer-request.json path.")
     launch_parser.add_argument(
         "--depends-on",
         nargs="*",
         metavar="LABEL",
-        help="Worker labels that must complete before this one (stored in manifest; checked by status/activity).",
+        help="Reviewer labels that must complete before this one (stored in manifest; checked by status/activity).",
     )
     launch_parser.set_defaults(func=command_launch)
 
-    status_parser = subparsers.add_parser("status", help="Show worker status.")
+    status_parser = subparsers.add_parser("status", help="Show reviewer status.")
     status_parser.add_argument("--run-dir", required=True)
     status_parser.add_argument("--label")
     status_parser.add_argument("--json", action="store_true")
     status_parser.set_defaults(func=command_status)
 
-    activity_parser = subparsers.add_parser("activity", help="Show lightweight worker activity signals.")
+    activity_parser = subparsers.add_parser("activity", help="Show lightweight reviewer activity signals.")
     activity_parser.add_argument("--run-dir", required=True)
     activity_parser.add_argument("--label")
     activity_parser.add_argument("--max-idle", type=int, default=900)
     activity_parser.add_argument("--json", action="store_true")
     activity_parser.set_defaults(func=command_activity)
 
-    wait_parser = subparsers.add_parser("wait", help="Wait for workers to finish.")
+    wait_parser = subparsers.add_parser("wait", help="Wait for reviewers to finish.")
     wait_parser.add_argument("--run-dir", required=True)
     wait_parser.add_argument("--label")
     wait_parser.add_argument("--timeout", type=float)
@@ -1212,7 +1223,7 @@ def build_parser() -> argparse.ArgumentParser:
     wait_parser.add_argument("--json", action="store_true")
     wait_parser.set_defaults(func=command_wait)
 
-    extract_parser = subparsers.add_parser("extract", help="Read the best available worker output.")
+    extract_parser = subparsers.add_parser("extract", help="Read the best available reviewer output.")
     extract_parser.add_argument("--run-dir", required=True)
     extract_parser.add_argument("--label", required=True)
     extract_parser.add_argument(
@@ -1222,7 +1233,7 @@ def build_parser() -> argparse.ArgumentParser:
     extract_parser.add_argument("--json", action="store_true", help="Print the extracted text plus its source metadata as JSON.")
     extract_parser.set_defaults(func=command_extract)
 
-    cancel_parser = subparsers.add_parser("cancel", help="Ask tracked workers to stop and wait for status to settle.")
+    cancel_parser = subparsers.add_parser("cancel", help="Ask tracked reviewers to stop and wait for status to settle.")
     cancel_parser.add_argument("--run-dir", required=True)
     cancel_parser.add_argument("--label")
     cancel_parser.add_argument("--timeout", type=float, default=10.0)
@@ -1250,7 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except KeyboardInterrupt:
         return 130
-    except WorkerJobsError as exc:
+    except ReviewerJobsError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

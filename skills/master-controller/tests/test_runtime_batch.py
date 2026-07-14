@@ -95,17 +95,20 @@ class RuntimeBatchTests(McTestCase):
         self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
         self.assertFalse((slice_dir / "repair-prompt.md").exists())
         self.assertFalse((slice_dir / "repair-prompt-repair-1.md").exists())
-        self.assertFalse((slice_dir / "orchestrator-result-repair-1.json").exists())
+        self.assertFalse((slice_dir / "developer-result-repair-1.json").exists())
         self.assertFalse((slice_dir / "pane-capture-repair-1.txt").exists())
         self.assertEqual(
             set(state["slices"][0]),
             {
                 "slice_id", "title", "status", "started_at", "completed_at", "artifact_dir",
                 "before_head", "changed_files", "summary", "validation", "drift_audit", "code_review",
-                "commit", "next_action", "blockers", "gate_reason", "worker_tools", "worker_policy",
+                "audit_provenance",
+                "commit", "next_action", "blockers", "gate_reason", "reviewer_tools", "reviewer_policy",
                 "repair", "residual_findings", "slice_summary",
             },
         )
+        self.assertEqual(state["slices"][0]["audit_provenance"]["drift-audit"]["performed_by"], "developer-self-audit")
+        self.assertEqual(state["slices"][0]["audit_provenance"]["code-review"]["performed_by"], "developer-self-audit")
 
     def test_run_next_refuses_while_current_slice_is_active(self):
         self.prepare_committed_repo()
@@ -173,7 +176,7 @@ class RuntimeBatchTests(McTestCase):
             self.assertEqual(mc.run_next(run_args), 2)
         state = json.loads(((self.repo / ".ai-mc" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
-        self.assertIn("orchestrator result missing", state["stop_reason"])
+        self.assertIn("developer result missing", state["stop_reason"])
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_next_times_out_hanging_session_with_evidence(self):
@@ -197,7 +200,7 @@ class RuntimeBatchTests(McTestCase):
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
         self.assertEqual(state["status"], "blocked")
-        self.assertIn("timeout waiting for orchestrator-result.json", state["stop_reason"])
+        self.assertIn("timeout waiting for developer-result.json", state["stop_reason"])
         self.assertIsNone(state["current_slice"])
         self.assertEqual(state["supervision"]["mode"], "deterministic-batch")
         self.assertTrue((slice_dir / "pane-capture-timeout.txt").exists())
@@ -255,11 +258,11 @@ class RuntimeBatchTests(McTestCase):
         })
         self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
         # The stale failing result was archived, not re-read.
-        archived = json.loads((slice_dir / "orchestrator-result-repair-1.json").read_text(encoding="utf-8"))
+        archived = json.loads((slice_dir / "developer-result-repair-1.json").read_text(encoding="utf-8"))
         self.assertEqual(archived["validation"], [])
         self.assertTrue((slice_dir / "repair-prompt-repair-1.md").exists())
         self.assertTrue((slice_dir / "pane-capture-repair-1.txt").exists())
-        final = json.loads((slice_dir / "orchestrator-result.json").read_text(encoding="utf-8"))
+        final = json.loads((slice_dir / "developer-result.json").read_text(encoding="utf-8"))
         self.assertEqual(final["changed_files"], ["README.md"])
         events = [
             json.loads(line)
@@ -294,11 +297,11 @@ class RuntimeBatchTests(McTestCase):
         self.assertTrue((slice_dir / "activity-attempt-2.jsonl").exists())
         # Every per-round artifact family survives across rounds.
         for round_number in (1, 2):
-            self.assertTrue((slice_dir / f"orchestrator-result-repair-{round_number}.json").exists())
+            self.assertTrue((slice_dir / f"developer-result-repair-{round_number}.json").exists())
             self.assertTrue((slice_dir / f"pane-capture-repair-{round_number}.txt").exists())
             self.assertTrue((slice_dir / f"git-status-repair-{round_number}.txt").exists())
         self.assertTrue((slice_dir / "repair-prompt-repair-1.md").exists())
-        self.assertFalse((slice_dir / "orchestrator-result-repair-3.json").exists())
+        self.assertFalse((slice_dir / "developer-result-repair-3.json").exists())
         events = [
             json.loads(line)
             for line in (self.repo / state["operational_events_path"]).read_text(encoding="utf-8").splitlines()
@@ -408,7 +411,7 @@ class RuntimeBatchTests(McTestCase):
         self.assertIn("slice_id does not match", state["stop_reason"])
         self.assertEqual(state["slices"][0]["repair"], mc_state.default_repair_state())
         self.assertFalse((slice_dir / "repair-prompt-repair-1.md").exists())
-        self.assertFalse((slice_dir / "orchestrator-result-repair-1.json").exists())
+        self.assertFalse((slice_dir / "developer-result-repair-1.json").exists())
         self.assertFalse((slice_dir / "activity-attempt-2.jsonl").exists())
 
     def test_run_remaining_stops_on_approval_needed_second_slice(self):
@@ -525,7 +528,7 @@ class RuntimeBatchTests(McTestCase):
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         captured = {}
 
-        def fake_gate(repo, run_state, plan_slice, art, before, after, status, worker_tools=()):
+        def fake_gate(repo, run_state, plan_slice, art, before, after, status, reviewer_tools=()):
             captured["before"] = before
             return mc.GateDecision("fail", "still bad", {"changed_files": []}, ())
 
@@ -604,9 +607,9 @@ class RuntimeBatchTests(McTestCase):
             "started_at": mc.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
             "pause": None,
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "a" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
         }
         (run_dir / "run.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         buffer = io.StringIO()

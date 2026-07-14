@@ -1,4 +1,4 @@
-"""Validate semantic worker requests and compose deterministic harness commands."""
+"""Validate semantic reviewer requests and compose deterministic harness commands."""
 
 from __future__ import annotations
 
@@ -6,19 +6,49 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 1
-ACCESS_MODES = {"read-only", "workspace-write"}
-WORKER_ROLES = {"junior-worker", "senior-worker"}
+SCHEMA_VERSION = 2
+REVIEWER_ROLE = "reviewer"
+REVIEWER_ACCESS = "read-only"
 LABEL_RE = re.compile(r"^\d{2}-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r\d+)?$")
-WORKER_PROFILES: dict[str, dict[str, Any]] = {
-    "claude": {"roles": ["junior-worker", "senior-worker"], "access_modes": ["read-only", "workspace-write"]},
-    "codex": {"roles": ["junior-worker", "senior-worker"], "access_modes": ["read-only", "workspace-write"]},
-    "copilot": {"roles": ["junior-worker", "senior-worker"], "access_modes": ["workspace-write"]},
-    "opencode": {"roles": ["junior-worker", "senior-worker"], "access_modes": ["read-only", "workspace-write"]},
+REVIEWER_PROFILES: dict[str, dict[str, Any]] = {
+    "claude": {"read_only_enforcement": "partial-plan-mode"},
+    "codex": {"read_only_enforcement": "mechanical-sandbox"},
+    "copilot": {"read_only_enforcement": "prompt-enforced"},
+    "opencode": {
+        "read_only_enforcement": "partial-edit-tools-denied",
+        "effort_override": "unsupported",
+    },
+}
+POLICY_FIELDS = {
+    "schema_version",
+    "run_id",
+    "slice_id",
+    "plan_sha256",
+    "repo_path",
+    "reviewer_artifact_root",
+    "required_tools",
+    "required_model",
+    "required_effort",
+    "reserved_skill_sets",
+}
+REQUEST_FIELDS = {
+    "schema_version",
+    "label",
+    "slice_id",
+    "plan_sha256",
+    "tool",
+    "model",
+    "effort",
+    "task",
+    "context",
+    "required_skills",
+    "files",
+    "constraints",
+    "expected_output",
 }
 
 
@@ -38,8 +68,8 @@ class ContractIssue:
         }
 
 
-class WorkerContractError(RuntimeError):
-    """A worker request cannot be launched under the supplied policy."""
+class ReviewerContractError(RuntimeError):
+    """A reviewer request cannot be launched under the supplied policy."""
 
     def __init__(self, issues: list[ContractIssue]):
         super().__init__("; ".join(issue.message for issue in issues))
@@ -54,11 +84,11 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise WorkerContractError(
+        raise ReviewerContractError(
             [ContractIssue("missing-file", label, f"{label} file does not exist: {path}", f"Create {path} as valid JSON.")]
         ) from exc
     except json.JSONDecodeError as exc:
-        raise WorkerContractError(
+        raise ReviewerContractError(
             [
                 ContractIssue(
                     "invalid-json",
@@ -69,7 +99,7 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
             ]
         ) from exc
     if not isinstance(payload, dict):
-        raise WorkerContractError(
+        raise ReviewerContractError(
             [ContractIssue("wrong-type", label, f"{label} must be a JSON object", "Replace the top-level value with an object.")]
         )
     return payload
@@ -114,6 +144,20 @@ def _validate_schema_version(payload: dict[str, Any], label: str, issues: list[C
         )
 
 
+def _validate_fields(
+    payload: dict[str, Any], allowed: set[str], label: str, issues: list[ContractIssue]
+) -> None:
+    for field in sorted(set(payload) - allowed):
+        issues.append(
+            ContractIssue(
+                "unknown-field",
+                f"{label}.{field}",
+                f"{label} contains unsupported field {field!r}",
+                f"Remove {field!r}; schema v{SCHEMA_VERSION} does not accept retired or extension fields.",
+            )
+        )
+
+
 def _resolve_repo_file(repo: Path, value: str, field: str, issues: list[ContractIssue]) -> Path | None:
     candidate = Path(value).expanduser()
     if not candidate.is_absolute():
@@ -134,47 +178,50 @@ def _resolve_repo_file(repo: Path, value: str, field: str, issues: list[Contract
     return resolved
 
 
-def _normalize_authorized_entry(raw_entry: str) -> str:
-    # Plan authors commonly write `` `path/to/file.py` (new file) `` — an
-    # inline-code span followed by a trailing annotation. str.strip("`")
-    # only trims from the very ends of the string, so it cannot remove a
-    # closing backtick that isn't the last character. Extract the inline
-    # code span explicitly when present; only fall back to raw stripping
-    # for plain (non-backtick-wrapped) entries.
-    stripped = raw_entry.strip()
-    match = re.match(r"`([^`]+)`", stripped)
-    if match:
-        return match.group(1).strip().rstrip(".")
-    return stripped.strip("`").rstrip(".")
-
-
-def _authorized(relative_path: str, entries: list[str]) -> bool:
-    for raw_entry in entries:
-        entry = _normalize_authorized_entry(raw_entry)
-        if entry.endswith("/") and relative_path.startswith(entry):
-            return True
-        if any(marker in entry for marker in ("*", "?", "[")) and PurePosixPath(relative_path).full_match(entry):
-            return True
-        if relative_path == entry:
-            return True
-    return False
-
-
 def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: Path) -> dict[str, Any]:
     """Return a normalized contract or raise with field-specific corrections."""
     issues: list[ContractIssue] = []
     _validate_schema_version(policy, "policy", issues)
     _validate_schema_version(request, "request", issues)
+    _validate_fields(policy, POLICY_FIELDS, "policy", issues)
+    _validate_fields(request, REQUEST_FIELDS, "request", issues)
 
     run_id = _required_string(policy, "run_id", issues)
     slice_id = _required_string(policy, "slice_id", issues)
     plan_sha256 = _required_string(policy, "plan_sha256", issues)
     repo_text = _required_string(policy, "repo_path", issues)
-    artifact_text = _required_string(policy, "worker_artifact_root", issues)
+    artifact_text = _required_string(policy, "reviewer_artifact_root", issues)
     required_tools = _string_list(policy, "required_tools", issues, required=True)
-    allowed_access = _string_list(policy, "allowed_access", issues, required=True)
-    allowed_roles = _string_list(policy, "allowed_roles", issues, required=True)
-    authorized_files = _string_list(policy, "authorized_files", issues, required=True)
+    required_model = _required_string(policy, "required_model", issues)
+    required_effort = _required_string(policy, "required_effort", issues)
+    if not required_tools:
+        issues.append(
+            ContractIssue(
+                "empty-field",
+                "required_tools",
+                "required_tools must select at least one Reviewer harness",
+                "Add at least one of claude, codex, copilot, or opencode, or do not create a Reviewer launch policy.",
+            )
+        )
+    for index, required_tool in enumerate(required_tools):
+        if required_tool not in REVIEWER_PROFILES:
+            issues.append(
+                ContractIssue(
+                    "unsupported-tool",
+                    f"required_tools[{index}]",
+                    f"no deterministic Reviewer profile exists for {required_tool!r}",
+                    "Choose claude, codex, copilot, or opencode.",
+                )
+            )
+    if len(set(required_tools)) != len(required_tools):
+        issues.append(
+            ContractIssue(
+                "duplicate-value",
+                "required_tools",
+                "required_tools contains duplicate harness names",
+                "List each selected Reviewer harness once.",
+            )
+        )
 
     repo = Path(repo_text).expanduser().resolve() if repo_text else Path.cwd().resolve()
     artifact_root = Path(artifact_text).expanduser().resolve() if artifact_text else run_dir.parent.resolve()
@@ -185,8 +232,8 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "artifact-root-mismatch",
                 "run_dir",
-                f"run directory {run_dir} is outside policy worker_artifact_root {artifact_root}",
-                "Initialize the run through worker_jobs.py with the MC-provided artifact root, then retry.",
+                f"run directory {run_dir} is outside policy reviewer_artifact_root {artifact_root}",
+                "Initialize the run through reviewer_jobs.py with the MC-provided artifact root, then retry.",
             )
         )
 
@@ -197,7 +244,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "slice-mismatch",
                 "slice_id",
-                f"worker request targets {request_slice}, but policy authorizes {slice_id}",
+                f"reviewer request targets {request_slice}, but policy authorizes {slice_id}",
                 f"Rewrite the request for {slice_id}; do not reuse a request from another slice.",
             )
         )
@@ -206,8 +253,8 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "plan-digest-mismatch",
                 "plan_sha256",
-                "worker request plan digest does not match the frozen MC policy",
-                f"Copy the exact plan_sha256 from the current worker policy ({plan_sha256}).",
+                "reviewer request plan digest does not match the frozen MC policy",
+                f"Copy the exact plan_sha256 from the current reviewer policy ({plan_sha256}).",
             )
         )
 
@@ -221,42 +268,34 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                 "Use lowercase letters/digits and hyphens, for example 01-opencode-check-output or 01-opencode-check-output-r1.",
             )
         )
-    tool = str(request.get("tool") or "").strip()
-    if not tool and len(required_tools) == 1:
-        tool = required_tools[0]
-    if not tool:
-        issues.append(
-            ContractIssue("missing-field", "tool", "tool is required when policy requires multiple tools", "Choose one tool from required_tools for this request; create one request per required tool.")
-        )
-    elif tool not in required_tools:
+    tool = _required_string(request, "tool", issues)
+    if tool and tool not in required_tools:
         issues.append(
             ContractIssue(
                 "tool-not-authorized",
                 "tool",
-                f"worker tool {tool!r} is not required or authorized; required tools: {', '.join(required_tools) or '(none)'}",
+                f"reviewer tool {tool!r} is not required or authorized; required tools: {', '.join(required_tools) or '(none)'}",
                 "Use a required tool or stop and report that the configured tool cannot satisfy the task.",
             )
         )
-    elif tool not in WORKER_PROFILES:
+    elif tool not in REVIEWER_PROFILES:
         issues.append(
             ContractIssue(
                 "unsupported-tool",
                 "tool",
-                f"no deterministic worker profile exists for {tool!r}",
+                f"no deterministic reviewer profile exists for {tool!r}",
                 "Use a supported tool or add and test its profile before authorizing it in MC.",
             )
         )
 
-    model = str(request.get("model") or policy.get("required_model") or "default").strip() or "default"
-    effort = str(request.get("effort") or policy.get("required_effort") or "default").strip() or "default"
-    required_model = str(policy.get("required_model") or "default").strip() or "default"
-    required_effort = str(policy.get("required_effort") or "default").strip() or "default"
+    model = _required_string(request, "model", issues)
+    effort = _required_string(request, "effort", issues)
     if model != required_model:
         issues.append(
             ContractIssue(
                 "model-mismatch",
                 "model",
-                f"worker request model {model!r} does not match required model {required_model!r}",
+                f"reviewer request model {model!r} does not match required model {required_model!r}",
                 f"Set model to {required_model!r}; do not silently fall back.",
             )
         )
@@ -265,65 +304,8 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "effort-mismatch",
                 "effort",
-                f"worker request effort {effort!r} does not match required effort {required_effort!r}",
+                f"reviewer request effort {effort!r} does not match required effort {required_effort!r}",
                 f"Set effort to {required_effort!r}; do not silently fall back.",
-            )
-        )
-
-    role = _required_string(request, "role", issues)
-    if role and role not in WORKER_ROLES:
-        issues.append(
-            ContractIssue(
-                "invalid-role",
-                "role",
-                f"role must be one of {sorted(WORKER_ROLES)}, got {role!r}",
-                "Choose junior-worker or senior-worker; workers can never be orchestrators.",
-            )
-        )
-    elif tool in WORKER_PROFILES and role not in WORKER_PROFILES[tool]["roles"]:
-        issues.append(
-            ContractIssue(
-                "unsupported-role",
-                "role",
-                f"{tool} profile does not support role {role!r}; supported roles: {', '.join(WORKER_PROFILES[tool]['roles'])}",
-                "Choose a supported role or a different authorized worker tool.",
-            )
-        )
-    if role and role not in allowed_roles:
-        issues.append(
-            ContractIssue(
-                "role-not-authorized",
-                "role",
-                f"role {role!r} is outside the policy allowed_roles: {', '.join(allowed_roles)}",
-                "Choose an allowed role or stop and request an explicit policy change.",
-            )
-        )
-    access = _required_string(request, "access", issues)
-    if access and access not in ACCESS_MODES:
-        issues.append(
-            ContractIssue(
-                "invalid-access",
-                "access",
-                f"access must be one of {sorted(ACCESS_MODES)}, got {access!r}",
-                "Use read-only for analysis/review or workspace-write for an authorized edit.",
-            )
-        )
-    elif access and access not in allowed_access:
-        issues.append(
-            ContractIssue(
-                "access-not-authorized",
-                "access",
-                f"access {access!r} is not authorized by policy; allowed: {', '.join(allowed_access)}",
-                "Reduce the request to an allowed access mode or stop and ask for an explicit policy change.",
-            )
-        )
-    elif tool in WORKER_PROFILES and access not in WORKER_PROFILES[tool]["access_modes"]:
-        issues.append(
-            ContractIssue(
-                "unsupported-access",
-                "access",
-                f"{tool} profile cannot mechanically enforce {access!r}; supported access: {', '.join(WORKER_PROFILES[tool]['access_modes'])}",
-                "Choose a supported access mode or a different authorized worker tool; do not rely on prompt-only restrictions.",
             )
         )
 
@@ -333,23 +315,27 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
     skills = _string_list(request, "required_skills", issues, required=True)
     reserved_sets_raw = policy.get("reserved_skill_sets")
     if reserved_sets_raw is not None:
-        # A malformed reserved_skill_sets (wrong top-level type, or a
-        # non-list group) must fail closed rather than silently disabling
-        # the reservation it exists to enforce — an absent key or an empty
-        # list are the only shapes that legitimately mean "no reservation".
-        if not isinstance(reserved_sets_raw, list) or any(not isinstance(group, list) for group in reserved_sets_raw):
+        # Only an absent key or an empty top-level list legitimately means
+        # "no reservation". Every configured group must be a non-empty list
+        # of non-empty strings so malformed members cannot disappear during
+        # normalization and silently weaken the reservation.
+        malformed_reserved_sets = not isinstance(reserved_sets_raw, list) or any(
+            not isinstance(group, list)
+            or not group
+            or any(not isinstance(name, str) or not name.strip() for name in group)
+            for group in reserved_sets_raw
+        )
+        if malformed_reserved_sets:
             issues.append(
                 ContractIssue(
                     "policy-reserved-skill-sets-malformed",
                     "reserved_skill_sets",
-                    f"policy reserved_skill_sets is malformed: {reserved_sets_raw!r}; expected a list of skill-name lists such as [[\"drift-audit\"], [\"code-review\"]]",
+                    f"policy reserved_skill_sets is malformed: {reserved_sets_raw!r}; expected non-empty skill-name lists such as [[\"drift-audit\"], [\"code-review\"]]",
                     "Fix the policy before launching; a malformed reserved_skill_sets must not silently disable the reservation.",
                 )
             )
         elif reserved_sets_raw:
-            normalized_reserved_sets = [
-                sorted(name.strip() for name in group if isinstance(name, str) and name.strip()) for group in reserved_sets_raw
-            ]
+            normalized_reserved_sets = [sorted(name.strip() for name in group) for group in reserved_sets_raw]
             reserved_names_lower = {name.lower() for group in normalized_reserved_sets for name in group}
             if {name.lower() for name in skills}.intersection(reserved_names_lower) and sorted(skills) not in normalized_reserved_sets:
                 allowed_text = " or ".join(json.dumps(group) for group in normalized_reserved_sets)
@@ -364,42 +350,19 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
     files = _string_list(request, "files", issues, required=True)
     constraints = _string_list(request, "constraints", issues, required=True)
     resolved_files = [path for index, value in enumerate(files) if (path := _resolve_repo_file(repo, value, f"files[{index}]", issues))]
-    if access == "read-only":
-        for index, path in enumerate(resolved_files):
-            if not path.exists():
-                issues.append(
-                    ContractIssue(
-                        "missing-input",
-                        f"files[{index}]",
-                        f"read-only worker input does not exist: {path}",
-                        "Correct the path or create the authorized input before launching the worker.",
-                    )
+    for index, path in enumerate(resolved_files):
+        if not path.exists():
+            issues.append(
+                ContractIssue(
+                    "missing-input",
+                    f"files[{index}]",
+                    f"read-only reviewer input does not exist: {path}",
+                    "Correct the path or create the input before launching the reviewer.",
                 )
-
-    if access == "workspace-write" and not authorized_files:
-        issues.append(
-            ContractIssue(
-                "missing-authorized-surface",
-                "authorized_files",
-                "workspace-write worker requested but policy has no authorized files",
-                "Use read-only access or correct the MC plan before launching an editing worker.",
             )
-        )
-    if access == "workspace-write":
-        for index, path in enumerate(resolved_files):
-            relative = path.relative_to(repo).as_posix()
-            if not _authorized(relative, authorized_files):
-                issues.append(
-                    ContractIssue(
-                        "file-not-authorized",
-                        f"files[{index}]",
-                        f"workspace-write request includes {relative!r}, outside the policy authorized_files",
-                        "Remove the file from this request or stop and revise the frozen plan through the planning workflow.",
-                    )
-                )
 
     if issues:
-        raise WorkerContractError(issues)
+        raise ReviewerContractError(issues)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -407,14 +370,13 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
         "slice_id": slice_id,
         "plan_sha256": plan_sha256,
         "repo_path": str(repo),
-        "worker_artifact_root": str(artifact_root),
-        "authorized_files": authorized_files,
+        "reviewer_artifact_root": str(artifact_root),
         "label": label,
         "tool": tool,
         "model": model,
         "effort": effort,
-        "role": role,
-        "access": access,
+        "role": REVIEWER_ROLE,
+        "access": REVIEWER_ACCESS,
         "task": task,
         "context": context,
         "required_skills": skills,
@@ -433,7 +395,7 @@ def compile_skill_bundle(skill_name: str) -> str:
     skill_dir = _skill_root() / skill_name
     entry = skill_dir / "SKILL.md"
     if not entry.is_file():
-        raise WorkerContractError(
+        raise ReviewerContractError(
             [
                 ContractIssue(
                     "required-skill-unavailable",
@@ -454,11 +416,11 @@ def compile_skill_bundle(skill_name: str) -> str:
         try:
             path.relative_to(skill_dir.resolve())
         except ValueError as exc:
-            raise WorkerContractError(
+            raise ReviewerContractError(
                 [ContractIssue("skill-resource-outside-root", "required_skills", f"skill resource escapes its root: {path}", "Fix the skill package before launching.")]
             ) from exc
         if not path.is_file():
-            raise WorkerContractError(
+            raise ReviewerContractError(
                 [ContractIssue("skill-resource-missing", "required_skills", f"required skill resource is missing: {path}", "Restore the complete skill package before launching.")]
             )
         text = path.read_text(encoding="utf-8")
@@ -474,33 +436,28 @@ def compile_skill_bundle(skill_name: str) -> str:
     return "\n\n".join(rendered)
 
 
-def render_worker_prompt(contract: dict[str, Any]) -> str:
+def render_reviewer_prompt(contract: dict[str, Any]) -> str:
     skills = contract["required_skills"]
     skill_list = "\n".join(f"  - {name}" for name in skills) if skills else "  - none"
     files = "\n".join(f"  - {path}" for path in contract["files"]) if contract["files"] else "  - none"
-    if contract["access"] == "read-only":
-        access_constraint = (
-            "Access mode is read-only: you may read files and run commands that do not modify the workspace "
-            "(for example the validation, tests, or checks the task asks for); you must not create, edit, or delete files."
-        )
-    else:
-        access_constraint = (
-            "Access mode is workspace-write: you may edit only the files listed in this request; "
-            "do not modify anything else."
-        )
     constraints = [
-        access_constraint,
-        "You are a delegated worker, not the orchestrator. Do not invoke ai-orchestrator, re-delegate, commit, or make final acceptance decisions.",
+        (
+            "Reviewer access is intrinsically read-only: you may read files and run commands that do not modify "
+            "the workspace; you must not create, edit, delete, move, or format files."
+        ),
+        "Do not run tests or commands that may write caches, snapshots, generated files, or other workspace state.",
+        "Do not perform Git, GitHub, commit, branch, staging, push, or other state-changing operations.",
+        "You are a delegated Reviewer, not the Developer. Do not invoke orchestrator, re-delegate, or make final acceptance decisions.",
         *contract["constraints"],
     ]
     constraint_text = "\n".join(f"  - {item}" for item in constraints)
     embedded = "\n\n".join(compile_skill_bundle(name) for name in skills)
-    prompt = f"""WORKER MODE: Delegated worker only — no ai-orchestrator skill, no re-delegation, no commits, complete locally, report blockers.
+    prompt = f"""REVIEWER MODE: Read-only delegated Reviewer — no edits, no state-changing commands, no orchestrator skill, no re-delegation, no commits, report blockers.
 
 TASK: {contract['task']}
 
-ROLE: {contract['role']}
-ACCESS: {contract['access']}
+ROLE: reviewer
+ACCESS: read-only
 
 REQUIRED SKILLS:
 {skill_list}
@@ -529,20 +486,28 @@ RETURN:
     return prompt
 
 
-def compose_worker_command(contract: dict[str, Any], prompt: str) -> list[str]:
+def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]:
     tool = contract["tool"]
     model = contract["model"]
     effort = contract["effort"]
-    access = contract["access"]
     repo = contract["repo_path"]
 
     if tool == "opencode":
+        if effort != "default":
+            raise ReviewerContractError(
+                [
+                    ContractIssue(
+                        "unsupported-effort",
+                        "effort",
+                        "the tested OpenCode run command has no effort/variant flag",
+                        "Set effort to 'default'; choose the configured model explicitly if a different capability level is required.",
+                    )
+                ]
+            )
         command = ["opencode", "run", prompt]
         if model != "default":
             command.extend(["-m", model])
-        if effort != "default":
-            command.extend(["--variant", effort])
-        command.extend(["--agent", "plan" if access == "read-only" else "build", "--auto", "--dir", repo])
+        command.extend(["--agent", "plan", "--auto", "--dir", repo])
         return command
 
     if tool == "claude":
@@ -551,9 +516,7 @@ def compose_worker_command(contract: dict[str, Any], prompt: str) -> list[str]:
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
-        command.extend(
-            ["--permission-mode", "plan" if access == "read-only" else "acceptEdits", "--output-format", "text", "--add-dir", repo]
-        )
+        command.extend(["--permission-mode", "plan", "--output-format", "text", "--add-dir", repo])
         return command
 
     if tool == "codex":
@@ -562,7 +525,7 @@ def compose_worker_command(contract: dict[str, Any], prompt: str) -> list[str]:
             command.extend(["-m", model])
         if effort != "default":
             command.extend(["-c", f'model_reasoning_effort="{effort}"'])
-        command.extend(["--sandbox", access, "--skip-git-repo-check", "-C", repo])
+        command.extend(["--sandbox", "read-only", "--skip-git-repo-check", "-C", repo])
         return command
 
     if tool == "copilot":
@@ -574,13 +537,13 @@ def compose_worker_command(contract: dict[str, Any], prompt: str) -> list[str]:
         command.extend(["-p", prompt, "--allow-all-tools", "--autopilot", "--silent", "--add-dir", repo])
         return command
 
-    raise WorkerContractError(
+    raise ReviewerContractError(
         [
             ContractIssue(
                 "unsupported-tool",
                 "tool",
-                f"no deterministic worker profile exists for {tool!r}",
-                "Use a tool supported by ai-orchestrator or add and test a deterministic profile before launching it.",
+                f"no deterministic reviewer profile exists for {tool!r}",
+                "Use a tool supported by orchestrator or add and test a deterministic profile before launching it.",
             )
         ]
     )

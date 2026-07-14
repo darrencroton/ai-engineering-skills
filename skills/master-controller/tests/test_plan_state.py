@@ -26,9 +26,9 @@ class PlanStateTests(McTestCase):
             harness_command=None,
             harness_model=None,
             harness_effort=None,
-            worker_tools="",
-            worker_model=None,
-            worker_effort=None,
+            reviewer_tools="",
+            reviewer_model=None,
+            reviewer_effort=None,
             allow_profile_command=False,
             allow_unattended_default=False,
         )
@@ -43,20 +43,25 @@ class PlanStateTests(McTestCase):
         with self.assertRaisesRegex(mc.McError, "controller-owned run state is missing"):
             mc.write_run(run_json, state)
 
-    def test_load_run_backfills_additive_idle_supervision_defaults_for_schema_v2(self):
+    def test_load_run_rejects_incomplete_schema_v3_supervision(self):
         self.prepare_committed_repo()
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         state["supervision"].pop("max_observe_staleness_seconds")
         state["supervision"].pop("min_idle_observation_windows")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        loaded = mc.load_run(run_json)
-        self.assertEqual(loaded["supervision"]["max_observe_staleness_seconds"], 600)
-        self.assertEqual(loaded["supervision"]["min_idle_observation_windows"], 3)
+        with self.assertRaisesRegex(mc.McError, "supervision missing required field"):
+            mc.load_run(run_json)
+
     def test_cli_rejects_unsupported_python_before_parsing(self):
         with mock.patch.object(sys, "version_info", (3, 12)), contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(mc.main([]), 1)
         self.assertIn("Python 3.13 or newer is required", err.getvalue())
+
+    def test_cli_rejects_retired_worker_flags(self):
+        parser = mc.build_parser()
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            parser.parse_args(["preflight", "--repo", str(self.repo), "--worker-tools", "codex"])
 
     def test_check_plan_passes_clean_plan(self):
         report = mc.plan_check_report(self.plan)
@@ -314,7 +319,7 @@ class PlanStateTests(McTestCase):
 
     def test_run_state_creation(self):
         state = self.init_run()
-        self.assertEqual(state["schema_version"], 2)
+        self.assertEqual(state["schema_version"], 3)
         self.assertEqual(state["repo_path"], str(self.repo.resolve()))
         self.assertEqual(state["plan_path"], str(self.plan.resolve()))
         self.assertEqual(state["harness"]["name"], "codex")
@@ -379,7 +384,7 @@ class PlanStateTests(McTestCase):
         with self.assertRaisesRegex(mc.McError, "unsupported run-state schema"):
             mc.load_run(run_json)
 
-        state["schema_version"] = 2
+        state["schema_version"] = 3
         state.pop("supervision")
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(mc.McError, "missing required field.*supervision"):
@@ -391,7 +396,7 @@ class PlanStateTests(McTestCase):
         with self.assertRaisesRegex(mc.McError, "supervision.pause_counters missing required field"):
             mc.load_run(run_json)
 
-    def test_run_state_rejects_incomplete_or_unsafe_nested_schema_v2_state(self):
+    def test_run_state_rejects_incomplete_or_unsafe_nested_schema_v3_state(self):
         base = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         cases = (
@@ -446,10 +451,93 @@ class PlanStateTests(McTestCase):
 
         state = json.loads(json.dumps(base))
         state["slices"].append(self.terminal_slice_entry(state))
-        state["slices"][0].pop("worker_policy")
+        state["slices"][0].pop("reviewer_policy")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(mc.McError, r"slices\[0\].worker_policy must be an object"):
+        with self.assertRaisesRegex(mc.McError, r"slices\[0\].reviewer_policy must be an object"):
             mc.load_run(run_json)
+
+    def test_run_state_rejects_retired_extra_fields_at_every_schema_level(self):
+        base = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        launch_config = {
+            "harness_command": None,
+            "harness_model": None,
+            "harness_effort": None,
+            "reviewer_tools": [],
+            "reviewer_model": None,
+            "reviewer_effort": None,
+            "allow_profile_command": False,
+            "allow_unattended_default": False,
+        }
+        current_slice = mc.current_slice_state(
+            self.repo,
+            mc.parse_plan(self.plan)[0],
+            self.repo / ".ai-mc" / "runs" / base["run_id"] / "slices" / "slice-001",
+            "mc_test_slice-001_a1",
+            1,
+            "2026-01-01T00:00:00Z",
+            "a" * 40,
+            reviewer_policy={"sha256": "b" * 64, "policy": {}},
+            launch_config=launch_config,
+        )
+
+        def add_run_field(state):
+            state["worker_tools"] = []
+
+        def add_policy_field(state):
+            state["policy"]["worker_policy"] = {}
+
+        def add_current_slice_field(state):
+            state["current_slice"] = json.loads(json.dumps(current_slice))
+            state["current_slice"]["worker_tools"] = []
+
+        def add_terminal_slice_field(state):
+            state["slices"].append(self.terminal_slice_entry(state))
+            state["slices"][0]["worker_policy"] = {}
+
+        def add_reviewer_policy_field(state):
+            state["current_slice"] = json.loads(json.dumps(current_slice))
+            state["current_slice"]["reviewer_policy"]["worker_policy"] = {}
+
+        def add_launch_config_field(state):
+            state["harness"]["launch_config"] = json.loads(json.dumps(launch_config))
+            state["harness"]["launch_config"]["worker_model"] = "legacy"
+
+        cases = (
+            ("run", add_run_field, "run contains unsupported field.*worker_tools"),
+            (
+                "run policy",
+                add_policy_field,
+                "policy contains unsupported field.*worker_policy",
+            ),
+            (
+                "current slice",
+                add_current_slice_field,
+                "current_slice contains unsupported field.*worker_tools",
+            ),
+            (
+                "terminal slice",
+                add_terminal_slice_field,
+                r"slices\[0\] contains unsupported field.*worker_policy",
+            ),
+            (
+                "reviewer policy wrapper",
+                add_reviewer_policy_field,
+                "current_slice.reviewer_policy contains unsupported field.*worker_policy",
+            ),
+            (
+                "launch config",
+                add_launch_config_field,
+                "harness.launch_config contains unsupported field.*worker_model",
+            ),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                state = json.loads(json.dumps(base))
+                mutate(state)
+                run_json.write_text(json.dumps(state), encoding="utf-8")
+                with self.assertRaisesRegex(mc.McError, expected):
+                    mc.load_run(run_json)
 
     def test_append_operational_event_does_not_rewrite_run_json(self):
         state = self.init_run()
@@ -478,7 +566,7 @@ class PlanStateTests(McTestCase):
             1,
             "2026-01-01T00:00:00Z",
             "a" * 40,
-            worker_policy={"sha256": "b" * 64, "policy": {}},
+            reviewer_policy={"sha256": "b" * 64, "policy": {}},
         )
 
         self.assertEqual(state["before_head"], "a" * 40)
@@ -502,9 +590,9 @@ class PlanStateTests(McTestCase):
                 "reason": "rolling usage limit reset",
                 "evidence_event_id": "op-0001",
             },
-            "worker_tools": [],
+            "reviewer_tools": [],
             "repair": mc_state.default_repair_state(),
-            "worker_policy": {"sha256": "c" * 64, "policy": {}},
+            "reviewer_policy": {"sha256": "c" * 64, "policy": {}},
         }
         run_json.write_text(json.dumps(state), encoding="utf-8")
         output = io.StringIO()
@@ -626,49 +714,6 @@ Continue later.
         self.assertTrue(mc.is_authorized_path("deep/a.md", ["**/*.md"]))
         self.assertTrue(mc.is_authorized_path("src/a.py", ["src/*.py"]))
         self.assertFalse(mc.is_authorized_path("src/deep/a.py", ["src/*.py"]))
-
-    def test_authorized_matcher_parity_with_worker_contract(self):
-        # The authorized-surface matcher exists twice on purpose: MC's gate in
-        # mc_lib/git_ops.py and the launcher-side copy in ai-orchestrator's
-        # worker_contract.py (which cannot import from MC without breaking the
-        # atomic-skill boundary). This fixture table pins the two copies
-        # together: if either normalization or matching drifts, the launcher's
-        # workspace-write file authorization would silently diverge from the
-        # gate MC recomputes.
-        contract_path = MC_PATH.parents[2] / "ai-orchestrator" / "scripts" / "worker_contract.py"
-        spec = importlib.util.spec_from_file_location("parity_worker_contract", contract_path)
-        worker_contract = importlib.util.module_from_spec(spec)
-        assert spec.loader is not None
-        # dataclass processing looks the module up in sys.modules by name.
-        sys.modules[spec.name] = worker_contract
-        self.addCleanup(sys.modules.pop, spec.name, None)
-        spec.loader.exec_module(worker_contract)
-
-        fixtures = [
-            ("README.md", ["README.md"], True),
-            ("README.md", ["CHANGELOG.md"], False),
-            ("docs/a.md", ["docs/"], True),
-            ("docs/a.md", ["docs"], False),
-            ("docs2/a.md", ["docs/"], False),
-            ("a.md", ["*.md"], True),
-            ("deep/a.md", ["*.md"], False),
-            ("deep/a.md", ["**/*.md"], True),
-            ("src/a.py", ["src/*.py"], True),
-            ("src/deep/a.py", ["src/*.py"], False),
-            ("file1.py", ["file?.py"], True),
-            ("nilakantha.py", ["`nilakantha.py` (new file)"], True),
-            ("other.py", ["`nilakantha.py` (new file)"], False),
-        ]
-        for path, entries, expected in fixtures:
-            with self.subTest(path=path, entries=entries):
-                self.assertEqual(mc.is_authorized_path(path, entries), expected)
-                self.assertEqual(worker_contract._authorized(path, entries), expected)
-        for raw in ["`a b.py` (note)", "  plain.py  ", "`*.md`", "docs/", "trail.py."]:
-            with self.subTest(raw=raw):
-                self.assertEqual(
-                    mc.normalize_authorized_entry(raw),
-                    worker_contract._normalize_authorized_entry(raw),
-                )
 
     def test_normalize_authorized_entry_strips_backtick_with_trailing_annotation(self):
         # Regression: entries like "`file.py` (new file)" were previously
@@ -803,7 +848,7 @@ Continue later.
         self.assertFalse(state["policy"]["commit_required"])
         self.assertEqual(state["approvals"], {})
 
-    # --- Gate hardening (validation artifact, worker success) -------------
+    # --- Gate hardening (validation artifact, reviewer success) -------------
 
     def test_event_counter_seeds_from_existing_log(self):
         state = self.init_run()

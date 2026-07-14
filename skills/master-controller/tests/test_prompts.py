@@ -1,4 +1,4 @@
-"""Orchestrator-prompt and repair-prompt rendering tests."""
+"""Developer-prompt and repair-prompt rendering tests."""
 
 from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harnesses, and the mc module
 
@@ -9,56 +9,56 @@ class PromptRenderingTests(McTestCase):
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json)
+        prompt = mc.render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json)
         self.assertIn("Selected slice: Slice 1 - First Slice", prompt)
         self.assertIn("Authorized surface:", prompt)
         self.assertIn("README.md", prompt)
-        self.assertIn("orchestrator-result.json", prompt)
+        self.assertIn("developer-result.json", prompt)
         self.assertIn(str(mc.skill_root() / "references" / "run-state-schema.md"), prompt)
-        self.assertIn(str(mc.worker_jobs_path()), prompt)
-        self.assertIn(str(slice_artifact_dir / "worker-runs"), prompt)
+        self.assertIn(str(mc.reviewer_jobs_path()), prompt)
+        self.assertIn(str(slice_artifact_dir / "reviewer-runs"), prompt)
         self.assertIn(str(slice_artifact_dir / "tmp"), prompt)
         self.assertIn(str(slice_artifact_dir / "tool-homes"), prompt)
         self.assertIn(str(slice_artifact_dir / "copilot-home"), prompt)
         self.assertIn('run_dir="$(python3 ', prompt)
         self.assertIn('launch --run-dir "$run_dir"', prompt)
         self.assertIn("Embedded MC slice delegation contract:", prompt)
-        self.assertIn("Master Controller Slice Delegation Contract", prompt)
-        self.assertIn("worker-evidence.md", prompt)
-        self.assertIn("Available worker tool(s) for this run: none available for this run", prompt)
+        self.assertIn("Master Controller Slice Reviewer Contract", prompt)
+        self.assertIn("reviewer-evidence.md", prompt)
+        self.assertIn("Available reviewer tool(s) for this run: none available for this run", prompt)
         self.assertNotIn(str(run_json), prompt)
-        self.assertIn("Controller state is not an orchestrator input", prompt)
+        self.assertIn("Controller state is not a developer input", prompt)
         self.assertNotIn("ai-mc-control", prompt)
 
-    def test_prompt_rendering_states_available_worker_tools_for_delegation(self):
+    def test_prompt_rendering_states_available_reviewer_tools_for_delegation(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
-        self.assertIn("Available worker tool(s) for this run: codex", prompt)
-        self.assertIn("which worker MC has made available for delegation", prompt)
+        prompt = mc.render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
+        self.assertIn("Available reviewer tool(s) for this run: codex", prompt)
+        self.assertIn("which reviewer MC has made available for delegation", prompt)
 
     def test_prompt_mirrors_mode_a_delegate_for_independence_with_local_fallback(self):
         # The Mode B per-slice prompt must read like the Mode A launcher: prefer
         # delegating the drift-audit and code-review to a separate model for
-        # independence, fall back to a local self-audit when no worker is
+        # independence, fall back to a local self-audit when no reviewer is
         # available (a valid accepted outcome), and always keep the gate with
-        # the orchestrator. It must also name the opt-in independence gate.
+        # the developer. It must also name the opt-in independence gate.
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
+        prompt = mc.render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json, ("codex",))
         self.assertIn("Mode B counterpart of the Mode A", prompt)
-        self.assertIn("Prefer delegating this as a hostile, independent audit to the available worker", prompt)
-        self.assertIn("Prefer delegating code review as an independent review to the available worker", prompt)
+        self.assertIn("Prefer delegating this as a hostile, independent audit to the available reviewer", prompt)
+        self.assertIn("Prefer delegating code review as an independent review to the available reviewer", prompt)
         self.assertIn("perform the drift-audit locally yourself", prompt)
         self.assertIn("perform the review locally yourself", prompt)
         self.assertIn("You still hold every gate", prompt)
         self.assertIn("Independent audit required: yes", prompt)
         self.assertIn("do not launch code review unless the authorization verdict is `PASS`", prompt)
-        self.assertIn("Do not launch drift-audit and code-review workers in parallel", prompt)
+        self.assertIn("Do not launch drift-audit and code-review reviewers in parallel", prompt)
         self.assertIn("final code-review verdict to be exactly `PASS`", prompt)
         self.assertIn("residual_findings", prompt)
 
@@ -67,31 +67,51 @@ class PromptRenderingTests(McTestCase):
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         base = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        default_prompt = mc.render_orchestrator_prompt(state, base, slice_artifact_dir, run_json)
+        default_prompt = mc.render_developer_prompt(state, base, slice_artifact_dir, run_json)
         self.assertNotIn("never `[]` and never both skills in one request", default_prompt)
 
         sections = dict(base.sections)
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
         opt_in_slice = mc.PlanSlice(base.number, base.title, base.body, sections)
-        opt_in_prompt = mc.render_orchestrator_prompt(state, opt_in_slice, slice_artifact_dir, run_json)
+        opt_in_prompt = mc.render_developer_prompt(state, opt_in_slice, slice_artifact_dir, run_json)
         self.assertIn('exactly `["drift-audit"]` or exactly `["code-review"]`', opt_in_prompt)
         self.assertIn("never `[]` and never both skills in one request", opt_in_prompt)
 
-    def test_prompt_local_audit_is_valid_when_no_worker_available(self):
+    def test_prompt_local_audit_is_valid_when_no_reviewer_available(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, slice_artifact_dir, run_json)
+        prompt = mc.render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json)
         self.assertIn("none available for this run", prompt)
         self.assertIn("that is a valid, accepted outcome, not a failure", prompt)
 
-    def test_prompt_rendering_states_worker_model_and_effort(self):
+    def test_prompt_configured_reviewer_failure_falls_back_only_on_default_slice(self):
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        base = mc.parse_plan(self.plan)[0]
+        slice_artifact_dir = run_json.parent / "slices" / "slice-001"
+
+        default_prompt = mc.render_developer_prompt(state, base, slice_artifact_dir, run_json, ("codex",))
+        self.assertIn("cannot launch or cannot honor its authentication, model, or effort contract", default_prompt)
+        self.assertIn("preserve the exact failure in `reviewer-evidence.md`", default_prompt)
+        self.assertIn("On a default slice, then perform the affected audit(s) locally as Developer self-audit", default_prompt)
+        self.assertIn("the failed reviewer attempt is evidence, not a blocker", default_prompt)
+
+        sections = dict(base.sections)
+        sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
+        opt_in_slice = mc.PlanSlice(base.number, base.title, base.body, sections)
+        opt_in_prompt = mc.render_developer_prompt(state, opt_in_slice, slice_artifact_dir, run_json, ("codex",))
+        self.assertIn("do not substitute Developer self-audit", opt_in_prompt)
+        self.assertIn("preserve the failure and stop", opt_in_prompt)
+        self.assertIn("record the blocker in `developer-result.json` and stop", opt_in_prompt)
+
+    def test_prompt_rendering_states_reviewer_model_and_effort(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(
+        prompt = mc.render_developer_prompt(
             state,
             plan_slice,
             slice_artifact_dir,
@@ -100,18 +120,18 @@ class PromptRenderingTests(McTestCase):
             "gpt-5.5",
             "low",
         )
-        self.assertIn("Available worker model for this run: gpt-5.5", prompt)
-        self.assertIn("Available worker effort for this run: low", prompt)
+        self.assertIn("Available reviewer model for this run: gpt-5.5", prompt)
+        self.assertIn("Available reviewer effort for this run: low", prompt)
         self.assertIn('"model": "gpt-5.5"', prompt)
         self.assertIn('"effort": "low"', prompt)
-        self.assertIn("Do not construct or invoke a worker harness command yourself", prompt)
+        self.assertIn("Do not construct or invoke a Reviewer harness command yourself", prompt)
 
     def test_prompt_rendering_embeds_compact_mc_delegation_contract(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
         plan_slice = mc.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = mc.render_orchestrator_prompt(
+        prompt = mc.render_developer_prompt(
             state,
             plan_slice,
             slice_artifact_dir,
@@ -120,10 +140,10 @@ class PromptRenderingTests(McTestCase):
             "some-model",
             "medium",
         )
-        self.assertIn("Master Controller Slice Delegation Contract", prompt)
+        self.assertIn("Master Controller Slice Reviewer Contract", prompt)
         self.assertIn('"model": "some-model"', prompt)
         self.assertIn('"effort": "medium"', prompt)
-        self.assertNotIn("Worker model/effort guidance:", prompt)
+        self.assertNotIn("Reviewer model/effort guidance:", prompt)
         self.assertNotIn("references/claude.md", prompt)
         self.assertNotIn("references/codex.md", prompt)
         self.assertLess(len(prompt.split()), 4000)
@@ -144,13 +164,13 @@ class PromptRenderingTests(McTestCase):
             "validation": "Fix only the validation gap",
             "drift": "Fix only the drift audit gap",
             "review": "Fix only the code review gap",
-            "worker-evidence": "Fix only the worker evidence gap",
+            "reviewer-evidence": "Fix only the reviewer evidence gap",
             "unauthorized-files": "restore-only",
             "changed-files-mismatch": "No file edits are needed",
             "result-malformed": "valid JSON matching the required schema",
             "commit-missing": "commit skill",
             "dirty-worktree": "uncommitted changes outside `.ai-mc/`",
-            "orchestrator-repairable": "You reported status `repairable` yourself",
+            "developer-repairable": "You reported status `repairable` yourself",
             "residual-ledger-mismatch": "copy every legitimate non-blocking post-plan consideration",
         }
         self.assertEqual(set(stanza_markers), set(REPAIRABLE_SIGNATURES))
@@ -170,26 +190,26 @@ class PromptRenderingTests(McTestCase):
             self.assertIn(stanza_markers[signature], prompt, signature)
             self.assertIn("- README.md", prompt)
             self.assertIn("Do not change any other file.", prompt)
-            self.assertIn("orchestrator-result.json", prompt)
+            self.assertIn("developer-result.json", prompt)
             self.assertIn("git rev-parse HEAD", prompt)
             self.assertIn("Slice 1", prompt)
             self.assertIn("Delegation posture remains unchanged", prompt)
             self.assertIn("Preserve and update `residual_findings`", prompt)
 
-    def test_repair_prompt_worker_evidence_preserves_existing_work(self):
+    def test_repair_prompt_reviewer_evidence_preserves_existing_work(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         artifact.mkdir(parents=True, exist_ok=True)
         gate = mc.GateDecision(
             "repairable",
-            "required worker tool(s) (opencode) were never actually invoked",
+            "required reviewer tool(s) (opencode) were never actually invoked",
             None,
             ("README.md",),
-            signature="worker-evidence",
+            signature="reviewer-evidence",
         )
         prompt = mc_runtime.render_repair_prompt(plan_slice, artifact, gate, before_head="a" * 40)
         self.assertIn("do NOT re-implement", prompt)
-        self.assertIn("worker evidence", prompt)
+        self.assertIn("reviewer evidence", prompt)
         self.assertIn("were never actually invoked", prompt)
 
     def test_repair_prompt_unauthorized_files_is_restore_only(self):
@@ -234,7 +254,7 @@ class PromptRenderingTests(McTestCase):
         artifact.mkdir(parents=True, exist_ok=True)
         gate = mc.GateDecision(
             "repairable",
-            "orchestrator changed_files does not match git evidence",
+            "developer changed_files does not match git evidence",
             None,
             ("README.md",),
             signature="changed-files-mismatch",
@@ -281,20 +301,20 @@ class PromptRenderingTests(McTestCase):
         # The repair block is a second fenced template in the same reference
         # file; the main loader must still pick the original block.
         template = mc.load_prompt_template()
-        self.assertIn("You are the slice orchestrator for Master Controller.", template)
+        self.assertIn("You are the slice Developer for Master Controller.", template)
         self.assertNotIn("NOT accepted", template)
         repair = mc_runtime.load_repair_template()
         self.assertIn("NOT accepted", repair)
-        self.assertNotIn("Worker helper sequence", repair)
+        self.assertNotIn("Reviewer helper sequence", repair)
 
-    def test_rendered_prompt_states_claude_worker_auth_policy(self):
+    def test_rendered_prompt_states_claude_reviewer_auth_policy(self):
         plan_slice = mc.parse_plan(self.plan)[0]
         state = self.init_run()
         artifact_dir = Path("/tmp/artifacts")
         run_json = Path("/tmp/run.json")
-        prompt = mc.render_orchestrator_prompt(state, plan_slice, artifact_dir, run_json, ("claude",))
-        self.assertIn("Available worker tool(s) for this run: claude", prompt)
-        self.assertIn("Worker auth policy:", prompt)
+        prompt = mc.render_developer_prompt(state, plan_slice, artifact_dir, run_json, ("claude",))
+        self.assertIn("Available reviewer tool(s) for this run: claude", prompt)
+        self.assertIn("Reviewer auth policy:", prompt)
         self.assertIn("MC does not set CLAUDE_CONFIG_DIR", prompt)
         self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", prompt)
 

@@ -1,9 +1,175 @@
-"""Deterministic gate verification and worker-evidence tests."""
+"""Deterministic gate verification and reviewer-evidence tests."""
 
 from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harnesses, and the mc module
 
 
 class GateVerificationTests(McTestCase):
+    def test_audit_provenance_records_explicit_developer_self_audit_without_reviewer(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=[])
+        result = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
+
+        provenance = mc.reviewer_audit_provenance(
+            artifact,
+            (),
+            None,
+            developer_result=result,
+            repo=self.repo,
+        )
+
+        for audit in ("drift-audit", "code-review"):
+            self.assertEqual(provenance[audit]["performed_by"], "developer-self-audit")
+            self.assertIsNone(provenance[audit]["reviewer_tool"])
+            self.assertIn("no Reviewer was configured", provenance[audit]["fallback_context"])
+
+    def test_audit_provenance_is_not_observed_without_execution_evidence(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+
+        provenance = mc.reviewer_audit_provenance(artifact, (), None)
+
+        for audit in ("drift-audit", "code-review"):
+            self.assertEqual(provenance[audit]["performed_by"], "not-observed")
+            self.assertIn("no validated Reviewer evidence", provenance[audit]["fallback_context"])
+
+    def test_audit_provenance_records_validated_reviewer_tool_and_label(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_validated_reviewer_run(artifact)
+        snapshot = mc.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+
+        provenance = mc.reviewer_audit_provenance(artifact, ("opencode",), snapshot)
+
+        for audit in ("drift-audit", "code-review"):
+            self.assertEqual(provenance[audit]["performed_by"], "reviewer")
+            self.assertEqual(provenance[audit]["reviewer_tool"], "opencode")
+            self.assertIn(audit, provenance[audit]["reviewer_label"])
+            self.assertIsNone(provenance[audit]["fallback_context"])
+
+    def test_audit_provenance_supports_mixed_reviewer_and_developer_self_audit(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=[])
+        result = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = next((artifact / "reviewer-runs").iterdir())
+        code_status = next(reviewer_run.glob("*code-review-status.json"))
+        status = json.loads(code_status.read_text(encoding="utf-8"))
+        status["skill_verdicts"]["code-review"] = "FAIL"
+        code_status.write_text(json.dumps(status), encoding="utf-8")
+        mc.capture_reviewer_runs_summary(artifact)
+        snapshot = mc.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+
+        provenance = mc.reviewer_audit_provenance(
+            artifact,
+            ("opencode",),
+            snapshot,
+            developer_result=result,
+            repo=self.repo,
+        )
+
+        self.assertEqual(provenance["drift-audit"]["performed_by"], "reviewer")
+        self.assertEqual(provenance["code-review"]["performed_by"], "developer-self-audit")
+        self.assertIn("no successful validated Reviewer PASS evidence", provenance["code-review"]["fallback_context"])
+
+    def test_audit_provenance_rejects_non_intrinsic_role_or_access(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=[])
+        result = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = next((artifact / "reviewer-runs").iterdir())
+        manifest_path = reviewer_run / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for entry in manifest["reviewers"].values():
+            entry["launch_contract"]["access"] = "workspace-write"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        mc.capture_reviewer_runs_summary(artifact)
+        snapshot = mc.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+
+        provenance = mc.reviewer_audit_provenance(
+            artifact,
+            ("opencode",),
+            snapshot,
+            developer_result=result,
+            repo=self.repo,
+        )
+
+        self.assertTrue(all(record["performed_by"] == "developer-self-audit" for record in provenance.values()))
+
+    def test_audit_provenance_rejects_developer_artifact_outside_slice(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        outside = self.repo / "outside-audit.md"
+        outside.write_text("PASS\n", encoding="utf-8")
+        result = {
+            "drift_audit": {"verdict": "PASS", "path": str(outside)},
+            "code_review": {"verdict": "", "path": ""},
+        }
+
+        provenance = mc.reviewer_audit_provenance(
+            artifact,
+            (),
+            None,
+            developer_result=result,
+            repo=self.repo,
+        )
+
+        self.assertEqual(provenance["drift-audit"]["performed_by"], "not-observed")
+
+    def test_timeout_without_developer_result_records_audits_not_observed(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        gate = mc.GateDecision("blocked", "Developer session timed out")
+
+        entry = mc.slice_entry_from_gate(
+            self.repo,
+            mc.parse_plan(self.plan)[0],
+            artifact,
+            mc.utc_now(),
+            gate,
+        )
+
+        self.assertTrue(all(record["performed_by"] == "not-observed" for record in entry["audit_provenance"].values()))
+
+    def test_missing_result_terminal_entry_records_audits_not_observed(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        gate = mc.GateDecision("blocked", f"developer result missing: {artifact / 'developer-result.json'}")
+
+        entry = mc.slice_entry_from_gate(
+            self.repo,
+            mc.parse_plan(self.plan)[0],
+            artifact,
+            mc.utc_now(),
+            gate,
+        )
+
+        self.assertTrue(all(record["performed_by"] == "not-observed" for record in entry["audit_provenance"].values()))
+
+    def test_pre_audit_stop_records_audits_not_observed(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        gate = mc.GateDecision(
+            "blocked",
+            "Developer stopped before audit stage",
+            {
+                "schema_version": 3,
+                "slice_id": "Slice 1",
+                "status": "blocked",
+                "summary": "stopped before audit",
+                "changed_files": [],
+                "validation": [],
+                "commit": {"requested": False, "created": False, "hash": None},
+                "next_action": "",
+                "blockers": ["pre-audit stop"],
+                "residual_findings": [],
+            },
+        )
+
+        entry = mc.slice_entry_from_gate(
+            self.repo,
+            mc.parse_plan(self.plan)[0],
+            artifact,
+            mc.utc_now(),
+            gate,
+        )
+
+        self.assertTrue(all(record["performed_by"] == "not-observed" for record in entry["audit_provenance"].values()))
+
     def test_gate_blocks_unauthorized_changed_file(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
@@ -75,7 +241,7 @@ class GateVerificationTests(McTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -109,7 +275,7 @@ class GateVerificationTests(McTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -146,7 +312,7 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "pass")
         self.assertIn("corrected reported commit hash", decision.reason)
-        result = json.loads((artifact / "orchestrator-result.json").read_text(encoding="utf-8"))
+        result = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
         self.assertEqual(result["commit"]["hash"], after)
         self.assertTrue((artifact / "mc-reconciliation.json").exists())
 
@@ -164,7 +330,7 @@ class GateVerificationTests(McTestCase):
         self.assertIn("did not advance HEAD", decision.reason)
 
     def test_gate_blocks_reset_to_unrelated_head_even_with_truthful_hash(self):
-        # Codex #4: an orchestrator that resets to a commit not descended from
+        # Codex #4: a Developer that resets to a commit not descended from
         # the slice start and *truthfully* reports that HEAD must fail the
         # integrity gate, not pass because reported_hash == after_head skipped
         # the reconciliation branch where the descendant check used to live.
@@ -250,14 +416,14 @@ class GateVerificationTests(McTestCase):
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         artifact.mkdir(parents=True, exist_ok=True)
-        (artifact / "orchestrator-result.json").write_text("{not json", encoding="utf-8")
+        (artifact / "developer-result.json").write_text("{not json", encoding="utf-8")
         state = self.init_run()
 
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
-        self.assertIn("invalid orchestrator result", decision.reason)
+        self.assertIn("invalid developer result", decision.reason)
 
     def test_gate_classifies_schema_and_status_errors_as_result_malformed(self):
         self.prepare_committed_repo()
@@ -266,20 +432,20 @@ class GateVerificationTests(McTestCase):
         state = self.init_run()
         plan_slice = mc.parse_plan(self.plan)[0]
 
-        self.write_gate_result_data(artifact, {"schema_version": 99, "slice_id": "Slice 1", "status": "pass"})
+        self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 1", "status": "pass"})
         decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("schema_version", decision.reason)
 
-        self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 1", "status": "victory"})
+        self.write_gate_result_data(artifact, {"schema_version": 3, "slice_id": "Slice 1", "status": "victory"})
         decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("status is invalid", decision.reason)
 
     def test_gate_blocks_missing_result_without_repair_signature(self):
-        # Absence of orchestrator-result.json is a runner condition (dead or
+        # Absence of developer-result.json is a runner condition (dead or
         # unresponsive session), not a steerable content defect: it stays
         # terminal `blocked` with no repair signature.
         self.prepare_committed_repo()
@@ -292,13 +458,13 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "blocked")
         self.assertEqual(decision.signature, "")
-        self.assertIn("orchestrator result missing", decision.reason)
+        self.assertIn("developer result missing", decision.reason)
 
     def test_gate_classifies_slice_id_mismatch_as_terminal(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 2", "status": "pass"})
+        self.write_gate_result_data(artifact, {"schema_version": 3, "slice_id": "Slice 2", "status": "pass"})
         state = self.init_run()
 
         decision = mc.verify_gate(self.repo, state, mc.parse_plan(self.plan)[0], artifact, before, before, mc.git_status_text(self.repo))
@@ -307,38 +473,38 @@ class GateVerificationTests(McTestCase):
         self.assertEqual(decision.signature, "slice-id-mismatch")
         self.assertIn("slice_id does not match", decision.reason)
 
-    def test_gate_passes_through_orchestrator_self_report_signatures(self):
+    def test_gate_passes_through_developer_self_report_signatures(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         state = self.init_run()
         plan_slice = mc.parse_plan(self.plan)[0]
 
-        self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 1", "status": "repairable"})
+        self.write_gate_result_data(artifact, {"schema_version": 3, "slice_id": "Slice 1", "status": "repairable"})
         decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "orchestrator-repairable")
+        self.assertEqual(decision.signature, "developer-repairable")
 
-        self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 1", "status": "needs-human"})
+        self.write_gate_result_data(artifact, {"schema_version": 3, "slice_id": "Slice 1", "status": "needs-human"})
         decision = mc.verify_gate(self.repo, state, plan_slice, artifact, before, before, mc.git_status_text(self.repo))
         self.assertEqual(decision.status, "needs-human")
         self.assertEqual(decision.signature, "")
 
     def _opt_in_slice(self):
         # Return Slice 1 with the opt-in "Independent audit required: yes" flag
-        # set, so MC's worker-launch verification is armed as a blocking gate.
-        # By default (without this flag) worker delegation is reporting-only and
+        # set, so MC's reviewer-launch verification is armed as a blocking gate.
+        # By default (without this flag) reviewer delegation is reporting-only and
         # never blocks acceptance.
         base = mc.parse_plan(self.plan)[0]
         sections = dict(base.sections)
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
         return mc.PlanSlice(base.number, base.title, base.body, sections)
 
-    def test_gate_default_slice_accepts_without_worker_evidence(self):
+    def test_gate_default_slice_accepts_without_reviewer_evidence(self):
         # Default posture: a slice not marked "Independent audit required: yes"
-        # is accepted even when a worker was made available but no genuine worker
+        # is accepted even when a reviewer was made available but no genuine reviewer
         # evidence exists — a locally self-audited slice is a valid outcome, and
-        # worker delegation is reporting-only, not a gate.
+        # reviewer delegation is reporting-only, not a gate.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -347,9 +513,9 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        self.write_worker_policy(artifact)
+        self.write_reviewer_policy(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
         default_slice = mc.parse_plan(self.plan)[0]
         self.assertFalse(default_slice.independent_audit_required)
 
@@ -358,6 +524,18 @@ class GateVerificationTests(McTestCase):
         )
 
         self.assertEqual(decision.status, "pass")
+        entry = mc.slice_entry_from_gate(
+            self.repo,
+            default_slice,
+            artifact,
+            mc.utc_now(),
+            decision,
+            before,
+            ("opencode",),
+            reviewer_policy=state["current_slice"]["reviewer_policy"],
+        )
+        for audit in ("drift-audit", "code-review"):
+            self.assertEqual(entry["audit_provenance"][audit]["performed_by"], "developer-self-audit")
 
     def test_gate_requires_explicit_residual_findings_ledger(self):
         self.prepare_committed_repo()
@@ -368,7 +546,7 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        result_path = artifact / "orchestrator-result.json"
+        result_path = artifact / "developer-result.json"
         result = json.loads(result_path.read_text(encoding="utf-8"))
         del result["residual_findings"]
         result_path.write_text(json.dumps(result), encoding="utf-8")
@@ -456,11 +634,16 @@ class GateVerificationTests(McTestCase):
             mc.utc_now(),
             decision,
             before,
-            worker_policy={"sha256": "a" * 64, "policy": {}},
+            reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
         self.assertEqual(entry["residual_findings"], [finding])
+        self.assertEqual(entry["audit_provenance"]["drift-audit"]["performed_by"], "developer-self-audit")
+        self.assertEqual(entry["audit_provenance"]["code-review"]["performed_by"], "developer-self-audit")
         slice_summary = artifact / "slice-summary.md"
-        self.assertIn("Legacy helper could be clarified later", slice_summary.read_text(encoding="utf-8"))
+        slice_text = slice_summary.read_text(encoding="utf-8")
+        self.assertIn("Legacy helper could be clarified later", slice_text)
+        self.assertIn("Drift audit performed by: developer-self-audit", slice_text)
+        self.assertIn("Code review performed by: developer-self-audit", slice_text)
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
         state["slices"] = [entry]
         state["status"] = "complete"
@@ -468,6 +651,13 @@ class GateVerificationTests(McTestCase):
         report = (run_dir / "run-report.md").read_text(encoding="utf-8")
         self.assertIn("Legacy helper could be clarified later", report)
         self.assertIn("Consider a separate cleanup plan", report)
+        self.assertIn("Drift audit performed by: developer-self-audit", report)
+        self.assertIn("Code review performed by: developer-self-audit", report)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.assertEqual(mc.summarize(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+        self.assertIn("drift audit performed by: developer-self-audit", output.getvalue())
+        self.assertIn("code review performed by: developer-self-audit", output.getvalue())
 
     def test_run_report_groups_superseded_and_authoritative_outcomes(self):
         state = {
@@ -494,9 +684,9 @@ class GateVerificationTests(McTestCase):
         self.assertIn("Recorded outcome 2 — authoritative", report)
         self.assertIn("Completed slices: 1/1", report)
 
-    def test_gate_opt_in_without_available_worker_stops_terminally(self):
-        # An opt-in slice with no worker made available is an operator/plan
-        # config mismatch the orchestrator cannot repair, so it fails closed
+    def test_gate_opt_in_without_available_reviewer_stops_terminally(self):
+        # An opt-in slice with no reviewer made available is an operator/plan
+        # config mismatch the developer cannot repair, so it fails closed
         # terminally (needs-human) rather than burning the repair budget.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
@@ -513,10 +703,10 @@ class GateVerificationTests(McTestCase):
         )
 
         self.assertEqual(decision.status, "needs-human")
-        self.assertEqual(decision.signature, "worker-unavailable")
-        self.assertIn("no worker tool was made available", decision.reason)
+        self.assertEqual(decision.signature, "reviewer-unavailable")
+        self.assertIn("no reviewer tool was made available", decision.reason)
 
-    def test_gate_blocks_pass_when_required_worker_never_launched(self):
+    def test_gate_blocks_pass_when_required_reviewer_never_launched(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -525,19 +715,19 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        self.write_worker_policy(artifact)
+        self.write_reviewer_policy(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
-        self.assertIn("have no worker-evidence.md", decision.reason)
+        self.assertEqual(decision.signature, "reviewer-evidence")
+        self.assertIn("have no reviewer-evidence.md", decision.reason)
 
-    def test_gate_blocks_pass_when_worker_evidence_is_narration_without_a_launch(self):
+    def test_gate_blocks_pass_when_reviewer_evidence_is_narration_without_a_launch(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -546,29 +736,29 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text(
-            "# Worker Evidence\n- Result summary: worker was not launched; orchestrator did the check itself.\n",
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Result summary: reviewer was not launched; developer did the check itself.\n",
             encoding="utf-8",
         )
-        self.write_worker_policy(artifact)
-        # A worker-runs directory was init'd but no worker was ever started in it,
+        self.write_reviewer_policy(artifact)
+        # A reviewer-runs directory was init'd but no reviewer was ever started in it,
         # exactly reproducing the observed OpenCode/OpenCode Test 5 failure mode.
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(json.dumps({"workers": {}}), encoding="utf-8")
-        mc.capture_worker_runs_summary(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "manifest.json").write_text(json.dumps({"reviewers": {}}), encoding="utf-8")
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
-        self.assertIn("no worker was started in it", decision.reason)
+        self.assertEqual(decision.signature, "reviewer-evidence")
+        self.assertIn("no reviewer was started in it", decision.reason)
 
-    def test_gate_accepts_pass_when_required_worker_has_real_run_evidence(self):
+    def test_gate_accepts_pass_when_required_reviewer_has_real_run_evidence(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -577,21 +767,35 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text(
-            "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: confirmed unchanged.\n",
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: confirmed unchanged.\n",
             encoding="utf-8",
         )
-        self.write_validated_worker_run(artifact)
+        self.write_validated_reviewer_run(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "pass")
+        entry = mc.slice_entry_from_gate(
+            self.repo,
+            self._opt_in_slice(),
+            artifact,
+            mc.utc_now(),
+            decision,
+            before,
+            ("opencode",),
+            reviewer_policy=state["current_slice"]["reviewer_policy"],
+        )
+        for audit in ("drift-audit", "code-review"):
+            self.assertEqual(entry["audit_provenance"][audit]["performed_by"], "reviewer")
+            self.assertEqual(entry["audit_provenance"][audit]["reviewer_tool"], "opencode")
+            self.assertIn(audit, entry["audit_provenance"][audit]["reviewer_label"])
 
-    def test_gate_rejects_completed_worker_with_adverse_audit_verdict(self):
+    def test_gate_rejects_completed_reviewer_with_adverse_audit_verdict(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -600,26 +804,26 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
-        self.write_validated_worker_run(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        status_path = next(worker_run.glob("*code-review-status.json"))
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n", encoding="utf-8")
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        status_path = next(reviewer_run.glob("*code-review-status.json"))
         status = json.loads(status_path.read_text(encoding="utf-8"))
         status["skill_verdicts"]["code-review"] = "FAIL"
         status_path.write_text(json.dumps(status), encoding="utf-8")
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("code-review=FAIL", decision.reason)
 
-    def test_gate_rejects_completed_worker_without_helper_recorded_verdict(self):
+    def test_gate_rejects_completed_reviewer_without_helper_recorded_verdict(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -628,23 +832,23 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
-        self.write_validated_worker_run(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        status_path = next(worker_run.glob("*drift-audit-status.json"))
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n", encoding="utf-8")
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        status_path = next(reviewer_run.glob("*drift-audit-status.json"))
         status = json.loads(status_path.read_text(encoding="utf-8"))
         del status["skill_verdicts"]
         status_path.write_text(json.dumps(status), encoding="utf-8")
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("drift-audit=missing", decision.reason)
 
     def test_gate_rejects_latest_adverse_audit_verdict_after_earlier_pass(self):
@@ -656,21 +860,21 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
-        self.write_validated_worker_run(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        manifest_path = worker_run / "manifest.json"
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n", encoding="utf-8")
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        manifest_path = reviewer_run / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        original_label = next(label for label in manifest["workers"] if "code-review" in label)
+        original_label = next(label for label in manifest["reviewers"] if "code-review" in label)
         retry_label = f"{original_label}-r1"
-        retry_entry = dict(manifest["workers"][original_label])
-        retry_entry["outfile"] = str(worker_run / f"{retry_label}-out.txt")
-        retry_entry["errfile"] = str(worker_run / f"{retry_label}-err.txt")
+        retry_entry = dict(manifest["reviewers"][original_label])
+        retry_entry["outfile"] = str(reviewer_run / f"{retry_label}-out.txt")
+        retry_entry["errfile"] = str(reviewer_run / f"{retry_label}-err.txt")
         Path(retry_entry["outfile"]).write_text("", encoding="utf-8")
         Path(retry_entry["errfile"]).write_text("", encoding="utf-8")
-        manifest["workers"][retry_label] = retry_entry
+        manifest["reviewers"][retry_label] = retry_entry
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        (worker_run / f"{retry_label}-status.json").write_text(
+        (reviewer_run / f"{retry_label}-status.json").write_text(
             json.dumps(
                 {
                     "label": retry_label,
@@ -682,16 +886,16 @@ class GateVerificationTests(McTestCase):
             ),
             encoding="utf-8",
         )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("code-review=FAIL", decision.reason)
 
     def test_gate_opt_in_requires_distinct_drift_and_code_review_contracts(self):
@@ -703,38 +907,38 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Drift audit only.\n", encoding="utf-8")
-        self.write_validated_worker_run(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        manifest_path = worker_run / "manifest.json"
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n- Drift audit only.\n", encoding="utf-8")
+        self.write_validated_reviewer_run(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        manifest_path = reviewer_run / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        review_label = next(label for label in manifest["workers"] if "code-review" in label)
-        del manifest["workers"][review_label]
+        review_label = next(label for label in manifest["reviewers"] if "code-review" in label)
+        del manifest["reviewers"][review_label]
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        (worker_run / f"{review_label}-status.json").unlink()
-        mc.capture_worker_runs_summary(artifact)
+        (reviewer_run / f"{review_label}-status.json").unlink()
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("code-review", decision.reason)
         self.assertIn("separate validated launch", decision.reason)
 
     def test_gate_rejects_hand_authored_manifest_with_no_real_launch_footprint(self):
-        # An orchestrator has full write access to its own worker-runs tree
-        # and can read worker-policy.json (including its own sha256) to
+        # A Developer has full write access to its own reviewer-runs tree
+        # and can read reviewer-policy.json (including its own sha256) to
         # compute a matching policy_sha256. It could therefore hand-author a
         # manifest.json + <label>-status.json pair that satisfies every
         # digest/identity/model/effort/access/role/repo check without ever
-        # invoking worker_jobs.py launch or a real harness process. The gate
-        # must still reject that: a genuine start_tracked_worker launch always
+        # invoking reviewer_jobs.py launch or a real harness process. The gate
+        # must still reject that: a genuine start_tracked_reviewer launch always
         # records a positive pid and always creates real outfile/errfile
-        # inside worker_artifact_root before the child process starts.
+        # inside reviewer_artifact_root before the child process starts.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -743,15 +947,15 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text(
-            "# Worker Evidence\n- Label: 01-opencode-forged\n- Result summary: opencode worker ran successfully.\n",
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Label: 01-opencode-forged\n- Result summary: opencode reviewer ran successfully.\n",
             encoding="utf-8",
         )
-        policy_path, policy = self.write_worker_policy(artifact)
+        policy_path, policy = self.write_reviewer_policy(artifact)
         policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
         label = "01-opencode-forged"
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
         contract = {
             "status": "pass",
             "policy_sha256": policy_sha,
@@ -760,35 +964,35 @@ class GateVerificationTests(McTestCase):
             "tool": "opencode",
             "model": "default",
             "effort": "default",
-            "role": "junior-worker",
+            "role": "reviewer",
             "access": "read-only",
             "repo_path": str(self.repo.resolve()),
             "cwd": str(self.repo.resolve()),
         }
-        # Deliberately no pid, no outfile, no errfile, and no worker_jobs.py
+        # Deliberately no pid, no outfile, no errfile, and no reviewer_jobs.py
         # invocation anywhere in this test — only three hand-written JSON
         # files, exactly mirroring the zero-effort forgery this closes.
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {label: {"tool": "opencode", "launch_contract": contract}}}),
+        (reviewer_run / "manifest.json").write_text(
+            json.dumps({"reviewers": {label: {"tool": "opencode", "launch_contract": contract}}}),
             encoding="utf-8",
         )
-        (worker_run / f"{label}-status.json").write_text(
+        (reviewer_run / f"{label}-status.json").write_text(
             json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("without matching validated launch contracts", decision.reason)
         self.assertIn("real subprocess pid", decision.reason)
 
-    def test_gate_rejects_worker_policy_changed_after_mc_snapshot(self):
+    def test_gate_rejects_reviewer_policy_changed_after_mc_snapshot(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -797,13 +1001,13 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
-        self.write_validated_worker_run(artifact)
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
+        self.write_validated_reviewer_run(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
-        policy_path = artifact / "worker-policy.json"
+        self.attach_reviewer_policy_snapshot(state, artifact)
+        policy_path = artifact / "reviewer-policy.json"
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
-        policy["allowed_access"] = ["read-only", "workspace-write", "unrestricted"]
+        policy["required_model"] = "unapproved-model"
         policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
         decision = mc.verify_gate(
@@ -811,10 +1015,10 @@ class GateVerificationTests(McTestCase):
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("changed after MC created", decision.reason)
 
-    def test_gate_requires_successful_evidence_for_every_configured_worker_tool(self):
+    def test_gate_requires_successful_evidence_for_every_configured_reviewer_tool(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -823,14 +1027,14 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
-        policy_path, policy = self.write_worker_policy(artifact)
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n- Label: 01-opencode-readonly-check\n", encoding="utf-8")
+        policy_path, policy = self.write_reviewer_policy(artifact)
         policy["required_tools"] = ["opencode", "codex"]
         policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         policy_sha = hashlib.sha256(policy_path.read_bytes()).hexdigest()
         label = "01-opencode-readonly-check"
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
         contract = {
             "status": "pass",
             "policy_sha256": policy_sha,
@@ -839,28 +1043,28 @@ class GateVerificationTests(McTestCase):
             "tool": "opencode",
             "model": "default",
             "effort": "default",
-            "role": "junior-worker",
+            "role": "reviewer",
             "access": "read-only",
             "repo_path": str(self.repo.resolve()),
             "cwd": str(self.repo.resolve()),
         }
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {label: {"tool": "opencode", "command": ["opencode", "run"], "launch_contract": contract}}}),
+        (reviewer_run / "manifest.json").write_text(
+            json.dumps({"reviewers": {label: {"tool": "opencode", "command": ["opencode", "run"], "launch_contract": contract}}}),
             encoding="utf-8",
         )
-        (worker_run / f"{label}-status.json").write_text(
+        (reviewer_run / f"{label}-status.json").write_text(
             json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode", "codex")
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("codex", decision.reason)
 
     def test_gate_rejects_matching_executable_without_validated_launch_contract(self):
@@ -872,32 +1076,32 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n- Label: 01-opencode-raw\n", encoding="utf-8")
-        self.write_worker_policy(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {"01-opencode-raw": {"tool": "opencode", "command": ["opencode", "run"]}}}),
+        (artifact / "reviewer-evidence.md").write_text("# Reviewer Evidence\n- Label: 01-opencode-raw\n", encoding="utf-8")
+        self.write_reviewer_policy(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "manifest.json").write_text(
+            json.dumps({"reviewers": {"01-opencode-raw": {"tool": "opencode", "command": ["opencode", "run"]}}}),
             encoding="utf-8",
         )
-        (worker_run / "01-opencode-raw-status.json").write_text(
+        (reviewer_run / "01-opencode-raw-status.json").write_text(
             json.dumps({"label": "01-opencode-raw", "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("without matching validated launch contracts", decision.reason)
-        self.assertIn("correct the semantic worker request", decision.reason)
+        self.assertIn("correct the semantic reviewer request", decision.reason)
 
-    def test_gate_blocks_pass_when_worker_is_mislabeled_but_actually_a_different_executable(self):
-        # Reproduces a live OpenCode/OpenCode test run: a worker labeled
+    def test_gate_blocks_pass_when_reviewer_is_mislabeled_but_actually_a_different_executable(self):
+        # Reproduces a live OpenCode/OpenCode test run: a reviewer labeled
         # "01-opencode-drift-check" whose manifest recorded "tool": "bash"
-        # because the orchestrator ran a shell one-liner through worker_jobs.py
+        # because the developer ran a shell one-liner through reviewer_jobs.py
         # instead of actually invoking `opencode`.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
@@ -907,34 +1111,34 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text(
-            "# Worker Evidence\n- Label: 01-opencode-drift-check\n- Result summary: drift check passed.\n",
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Label: 01-opencode-drift-check\n- Result summary: drift check passed.\n",
             encoding="utf-8",
         )
-        self.write_worker_policy(artifact)
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(
-            json.dumps({"workers": {"01-opencode-drift-check": {"tool": "bash", "command": ["bash", "-c", "grep foo"]}}}),
+        self.write_reviewer_policy(artifact)
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "manifest.json").write_text(
+            json.dumps({"reviewers": {"01-opencode-drift-check": {"tool": "bash", "command": ["bash", "-c", "grep foo"]}}}),
             encoding="utf-8",
         )
-        (worker_run / "01-opencode-drift-check-status.json").write_text(
+        (reviewer_run / "01-opencode-drift-check-status.json").write_text(
             json.dumps({"label": "01-opencode-drift-check", "state": "completed", "returncode": 0}),
             encoding="utf-8",
         )
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
 
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("were never actually invoked", decision.reason)
 
-    def test_gate_ignores_worker_evidence_when_no_worker_tool_is_required(self):
+    def test_gate_ignores_reviewer_evidence_when_no_reviewer_tool_is_required(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -949,104 +1153,104 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "pass")
 
-    def test_capture_worker_runs_summary_records_status_files(self):
+    def test_capture_reviewer_runs_summary_records_status_files(self):
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "01-codex-check-status.json").write_text(
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "01-codex-check-status.json").write_text(
             json.dumps({"label": "01-codex-check", "state": "completed", "returncode": 0}),
             encoding="utf-8",
         )
 
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
 
-        summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
-        self.assertEqual(summary["runs"][0]["workers"][0]["label"], "01-codex-check")
+        summary = json.loads((artifact / "reviewer-runs-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(summary["runs"][0]["reviewers"][0]["label"], "01-codex-check")
 
-    def test_capture_worker_runs_summary_skips_current_symlink(self):
+    def test_capture_reviewer_runs_summary_skips_current_symlink(self):
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        worker_root = artifact / "worker-runs"
-        worker_run = worker_root / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "manifest.json").write_text(json.dumps({"workers": {}}), encoding="utf-8")
-        (worker_run / "01-codex-check-status.json").write_text(
+        reviewer_root = artifact / "reviewer-runs"
+        reviewer_run = reviewer_root / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "manifest.json").write_text(json.dumps({"reviewers": {}}), encoding="utf-8")
+        (reviewer_run / "01-codex-check-status.json").write_text(
             json.dumps({"label": "01-codex-check", "state": "completed", "returncode": 0}),
             encoding="utf-8",
         )
-        os.symlink(worker_run, worker_root / "current")
+        os.symlink(reviewer_run, reviewer_root / "current")
 
-        mc.capture_worker_runs_summary(artifact)
+        mc.capture_reviewer_runs_summary(artifact)
 
-        summary = json.loads((artifact / "worker-runs-summary.json").read_text(encoding="utf-8"))
-        self.assertEqual([Path(entry["run_dir"]).name for entry in summary["runs"]], ["workers-1"])
+        summary = json.loads((artifact / "reviewer-runs-summary.json").read_text(encoding="utf-8"))
+        self.assertEqual([Path(entry["run_dir"]).name for entry in summary["runs"]], ["reviewers-1"])
 
-    def test_worker_delegation_overview_flags_missing_contracted_marker(self):
-        # Regression (MC Test 11): a worker that refused its task but exited
+    def test_reviewer_delegation_overview_flags_missing_contracted_marker(self):
+        # Regression (MC Test 11): a reviewer that refused its task but exited
         # cleanly (state completed, returncode 0) passed the process-level
-        # worker-evidence gate and was invisible in every summary. The
-        # overview must surface, per worker, whether the output contains the
+        # reviewer-evidence gate and was invisible in every summary. The
+        # overview must surface, per reviewer, whether the output contains the
         # marker its own request's expected_output contracted.
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        for name, out_text in (("workers-1", "How would you like to proceed?"), ("workers-2", "RESULT: pass — verified.")):
-            worker_run = artifact / "worker-runs" / name
-            worker_run.mkdir(parents=True)
-            (worker_run / "01-opencode-check-out.txt").write_text(out_text, encoding="utf-8")
-            (worker_run / "manifest.json").write_text(
+        for name, out_text in (("reviewers-1", "How would you like to proceed?"), ("reviewers-2", "RESULT: pass — verified.")):
+            reviewer_run = artifact / "reviewer-runs" / name
+            reviewer_run.mkdir(parents=True)
+            (reviewer_run / "01-opencode-check-out.txt").write_text(out_text, encoding="utf-8")
+            (reviewer_run / "manifest.json").write_text(
                 json.dumps(
                     {
-                        "workers": {
+                        "reviewers": {
                             "01-opencode-check": {
                                 "tool": "opencode",
-                                "outfile": str(worker_run / "01-opencode-check-out.txt"),
+                                "outfile": str(reviewer_run / "01-opencode-check-out.txt"),
                             }
                         }
                     }
                 ),
                 encoding="utf-8",
             )
-            (worker_run / "01-opencode-check-request.json").write_text(
+            (reviewer_run / "01-opencode-check-request.json").write_text(
                 json.dumps({"expected_output": "Return RESULT: pass or RESULT: blocked."}),
                 encoding="utf-8",
             )
-            (worker_run / "01-opencode-check-status.json").write_text(
+            (reviewer_run / "01-opencode-check-status.json").write_text(
                 json.dumps({"label": "01-opencode-check", "state": "completed", "returncode": 0}),
                 encoding="utf-8",
             )
 
-        overview = mc.worker_delegation_overview(artifact)
+        overview = mc.reviewer_delegation_overview(artifact)
 
         self.assertEqual(len(overview), 2)
         by_run = {Path(entry["run_dir"]).name: entry for entry in overview}
-        self.assertEqual(by_run["workers-1"]["contracted_marker"], "absent")
-        self.assertEqual(by_run["workers-1"]["state"], "completed")
-        self.assertEqual(by_run["workers-1"]["returncode"], 0)
-        self.assertEqual(by_run["workers-1"]["output_tail"], "How would you like to proceed?")
-        self.assertEqual(by_run["workers-2"]["contracted_marker"], "present")
+        self.assertEqual(by_run["reviewers-1"]["contracted_marker"], "absent")
+        self.assertEqual(by_run["reviewers-1"]["state"], "completed")
+        self.assertEqual(by_run["reviewers-1"]["returncode"], 0)
+        self.assertEqual(by_run["reviewers-1"]["output_tail"], "How would you like to proceed?")
+        self.assertEqual(by_run["reviewers-2"]["contracted_marker"], "present")
 
-    def test_worker_delegation_overview_reports_na_without_contracted_marker(self):
+    def test_reviewer_delegation_overview_reports_na_without_contracted_marker(self):
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
-        worker_run = artifact / "worker-runs" / "workers-1"
-        worker_run.mkdir(parents=True)
-        (worker_run / "01-opencode-scan-out.txt").write_text("free-form notes", encoding="utf-8")
-        (worker_run / "manifest.json").write_text(
+        reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+        reviewer_run.mkdir(parents=True)
+        (reviewer_run / "01-opencode-scan-out.txt").write_text("free-form notes", encoding="utf-8")
+        (reviewer_run / "manifest.json").write_text(
             json.dumps(
                 {
-                    "workers": {
+                    "reviewers": {
                         "01-opencode-scan": {
                             "tool": "opencode",
-                            "outfile": str(worker_run / "01-opencode-scan-out.txt"),
+                            "outfile": str(reviewer_run / "01-opencode-scan-out.txt"),
                         }
                     }
                 }
             ),
             encoding="utf-8",
         )
-        (worker_run / "01-opencode-scan-request.json").write_text(
+        (reviewer_run / "01-opencode-scan-request.json").write_text(
             json.dumps({"expected_output": "Describe what you found."}),
             encoding="utf-8",
         )
 
-        overview = mc.worker_delegation_overview(artifact)
+        overview = mc.reviewer_delegation_overview(artifact)
 
         self.assertEqual(overview[0]["contracted_marker"], "n/a")
         self.assertEqual(overview[0]["state"], "unknown")
@@ -1058,7 +1262,7 @@ class GateVerificationTests(McTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -1085,7 +1289,7 @@ class GateVerificationTests(McTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -1143,10 +1347,10 @@ class GateVerificationTests(McTestCase):
         self.assertEqual(decision.signature, "validation")
         self.assertIn("missing or empty", decision.reason)
 
-    def test_gate_blocks_worker_that_never_completed_successfully(self):
-        # A required worker that was genuinely launched with the right
+    def test_gate_blocks_reviewer_that_never_completed_successfully(self):
+        # A required reviewer that was genuinely launched with the right
         # executable but crashed (or is still running) proves nothing was
-        # delegated; launch alone must not satisfy the worker-evidence gate.
+        # delegated; launch alone must not satisfy the reviewer-evidence gate.
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
@@ -1155,18 +1359,18 @@ class GateVerificationTests(McTestCase):
         after = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
-        (artifact / "worker-evidence.md").write_text(
-            "# Worker Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: worker ran.\n",
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Label: 01-opencode-readonly-check\n- Result summary: reviewer ran.\n",
             encoding="utf-8",
         )
-        self.write_validated_worker_run(artifact, state="failed", returncode=1)
+        self.write_validated_reviewer_run(artifact, state="failed", returncode=1)
         state = self.init_run()
-        self.attach_worker_policy_snapshot(state, artifact)
+        self.attach_reviewer_policy_snapshot(state, artifact)
         decision = mc.verify_gate(
             self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
         )
         self.assertEqual(decision.status, "repairable")
-        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertEqual(decision.signature, "reviewer-evidence")
         self.assertIn("never completed successfully", decision.reason)
 
     # --- Send guards and event-log behavior --------------------------------

@@ -1,6 +1,6 @@
 # Harness Adapter Contract
 
-MC core must not hardcode one AI harness. Each adapter describes how to start, observe, supervise, and stop a tmux-backed orchestrator session in a target repo.
+MC core must not hardcode one AI harness. Each adapter describes how to start, observe, supervise, and stop a tmux-backed developer session in a target repo.
 
 ## Implemented Adapter Responsibilities
 
@@ -10,7 +10,7 @@ The current `TmuxHarnessAdapter` provides these concrete methods:
 - `preflight`: command or function that checks local availability without starting a run.
 - `build_shell_command`: returns the shell command used inside tmux, including MC environment variables for the run state, plan path, slice id, and slice artifact directory.
 - `start`: starts a fresh tmux session in the target repo with the built shell command.
-- `send_prompt`: injects the rendered orchestrator prompt into the tmux session.
+- `send_prompt`: injects the rendered developer prompt into the tmux session.
 - `send_literal`: send short model-supervised operational text literally to the current tmux session and submit it without shell evaluation.
 - `capture`: writes transcript or pane output to the slice artifact directory.
 - `detect_activity`: reports whether the session is still active or idle as `{"running": bool, "active": bool, "capture": string}`.
@@ -19,7 +19,7 @@ The current `TmuxHarnessAdapter` provides these concrete methods:
 - `force_stop`: terminates the tmux session after a terminal stop/finalize decision or failed graceful stop.
 - `session_exists` and `sessions_with_prefix`: support liveness checks and stale-session cleanup.
 
-Structured result detection is owned by MC's runner and command layer by checking `orchestrator-result.json` in the current slice artifact directory, not by a separate adapter method.
+Structured result detection is owned by MC's runner and command layer by checking `developer-result.json` in the current slice artifact directory, not by a separate adapter method.
 
 ## Primitive-Level Responsibilities
 
@@ -42,14 +42,14 @@ For each slice, the adapter must allow MC to capture:
 - `git-status-before.txt`
 - `git-status-after.txt`
 - `git-diff.patch`
-- `orchestrator-result.json`
+- `developer-result.json`
 
 ## Tmux Requirements
 
 - Every slice starts in a fresh tmux session.
 - Session names must include the run id and slice id.
 - The working directory must be the target repo/worktree.
-- The harness receives fixed MC environment variables for the slice: `MC_SLICE_ARTIFACT_DIR`, `MC_RUN_JSON_PATH`, `MC_PLAN_PATH`, `MC_SLICE_ID`, `MC_RESULT_SCHEMA_PATH`, `MC_WORKER_JOBS_PATH`, `MC_WORKER_ARTIFACT_ROOT`, `AI_ORCHESTRATOR_ARTIFACT_ROOT`, `MC_SLICE_TMP_DIR`, `TMPDIR`, and `MC_TOOL_HOME_ROOT`. Tool home redirects are worker-only: `COPILOT_HOME` / `CODEX_HOME` are set only when that tool is a required worker and not the orchestrator harness itself, so an orchestrator always keeps its real config and session state.
+- The harness receives fixed MC environment variables for the slice: `MC_SLICE_ARTIFACT_DIR`, `MC_PLAN_PATH`, `MC_SLICE_ID`, `MC_RESULT_SCHEMA_PATH`, `MC_REVIEWER_JOBS_PATH`, `MC_REVIEWER_POLICY_PATH`, `MC_REVIEWER_ARTIFACT_ROOT`, `ORCHESTRATOR_ARTIFACT_ROOT`, `MC_SLICE_TMP_DIR`, `TMPDIR`, and `MC_TOOL_HOME_ROOT`. Controller state is deliberately not exposed. Tool home redirects are Reviewer-only: `COPILOT_HOME` / `CODEX_HOME` are set only when that tool is a required Reviewer and not the Developer harness itself, so a Developer always keeps its real config and session state.
 - MC records activity checks as JSON lines with `checked_at`, `running`, and `active` fields.
 - MC must preserve live pane output while polling and must also attempt a final capture before and after stop.
 - Deterministic batch execution must close the session after completion or terminal timeout.
@@ -69,15 +69,15 @@ Literal sends must:
 
 ## Harness Profiles
 
-MC keeps one capability profile per tool, not one profile per role combination. The launch command is composed from:
+MC keeps one mechanical profile per tool, not one profile per role combination. The launch command is composed from:
 
-- the selected orchestrator harness, for example `codex` or `claude`;
-- runtime requirements, such as worker tools being used;
+- the selected developer harness, for example `codex` or `claude`;
+- runtime requirements, such as reviewer tools being used;
 - run policy, such as `commit_required=true`.
 
-This keeps tool-specific instructions together while avoiding many partially tested combinations. For example, the Codex profile adds sandbox network access only when worker tools are requested, and adds scoped git-directory access only when commits are required.
+This keeps tool-specific instructions together while avoiding many partially tested combinations. For example, the Codex profile adds sandbox network access only when reviewer tools are requested, and adds scoped git-directory access only when commits are required.
 
-Profile composition also owns supported orchestrator model and effort overrides. For example, a Claude run that requests a specific model must be composed by MC as `claude --permission-mode auto --model <model> --session-id <generated-id>` so model selection does not bypass transcript capture or other profile-managed launch requirements. A Codex run that requests model and effort is composed from the same profile table as `-m <model>` plus `-c model_reasoning_effort="<effort>"`.
+Profile composition also owns supported developer model and effort overrides. For example, a Claude run that requests a specific model must be composed by MC as `claude --permission-mode auto --model <model> --session-id <generated-id>` so model selection does not bypass transcript capture or other profile-managed launch requirements. A Codex run that requests model and effort is composed from the same profile table as `-m <model>` plus `-c model_reasoning_effort="<effort>"`.
 
 ### Model identity verification
 
@@ -87,15 +87,13 @@ Where the interactive harness exposes its resolved model in a stable ready-state
 
 MC records requested, catalog-resolved, and display identity evidence separately. Tests use mocked inventory responses and recorded pane fixtures so regression coverage is deterministic and does not depend on a locally installed or changing harness binary.
 
-The first slice freezes the complete run launch configuration; the active slice snapshots the same values. Every later slice and automatic fresh-session recovery composes from that contract rather than silently reverting to harness or worker defaults when the controlling invocation omits model/profile flags. Conflicting explicit values fail closed. Identity evidence is refreshed for every launched slice/session and tagged with its slice instead of being reused as an unmarked cache.
+The first slice freezes the complete run launch configuration; the active slice snapshots the same values. Every later slice and automatic fresh-session recovery composes from that contract rather than silently reverting to harness or reviewer defaults when the controlling invocation omits model/profile flags. Conflicting explicit values fail closed. Identity evidence is refreshed for every launched slice/session and tagged with its slice instead of being reused as an unmarked cache.
 
-Worker launch is a semantic contract, not a second launch subsystem inside MC. MC writes `worker-policy.json` with slice identity, frozen plan digest, repository, required tools/model/effort, permitted roles/access, and authorized files, then stores its digest and normalized content in the slice state. The orchestrator writes task intent in one `worker-request.json` per required tool; `ai-orchestrator` validates it, embeds complete worker/skill instructions, composes the tested harness command, forces the child working directory to the policy repository, and records normalized launch evidence. MC requires successful validated evidence for every configured tool and verifies it against the stored policy snapshot without hardcoding worker-tool flags. For opt-in audit workers, the helper also records the output's exact machine-readable verdict and MC requires `PASS` from both skills.
+Reviewer launch is a semantic contract, not a second launch subsystem inside MC. MC writes schema-v2 `reviewer-policy.json` with slice identity, frozen plan digest, repository, required tools/model/effort, and artifact root, then stores its digest and normalized content in slice state. The Developer writes task intent and context files in one schema-v2 `reviewer-request.json` per required tool; requests do not choose role or access. `orchestrator` validates the request, embeds complete Reviewer/skill instructions, composes the tested harness command, forces the child working directory to the policy repository, and records normalized `role: reviewer` / `access: read-only` launch evidence. MC verifies those constants directly rather than consulting policy allow-lists. For opt-in audits, the helper records the exact machine-readable verdict and MC requires `PASS` from both skills.
 
-Copilot and OpenCode are mechanically validated MC orchestrator harnesses: both accept the same tmux paste-buffer-plus-double-Enter prompt injection as Codex/Claude, both were directly observed reaching a stable ready state before first send (Copilot via a stable-pane heuristic like Claude's; OpenCode via a literal `"Ask anything..."` composer placeholder), and Copilot's directory-trust dialog text was confirmed to match an existing generic `TRUST_PROMPT_MARKERS` entry verbatim. Their `HARNESS_PROFILES` entries list `roles: ["orchestrator", "senior-worker", "junior-worker"]` on that basis.
+Codex, Claude, Copilot, and OpenCode are equally eligible for Developer or Reviewer selection. Profiles record mechanics only and contain no role allow-list, capability tier, ranking, or suitability gate. Copilot and OpenCode both accept the same tmux paste-buffer-plus-double-Enter prompt injection as Codex/Claude and were directly observed reaching a stable ready state before first send; Copilot's directory-trust dialog text was also confirmed to match `TRUST_PROMPT_MARKERS`. Enforcement-strength differences remain factual notes rather than eligibility restrictions, and the user selects the tool/model through the plan or launcher.
 
-This is a mechanical-readiness fact, not a suitability judgment. Whether a given harness should actually be used as orchestrator, senior worker, or junior worker for a specific task is a per-run decision for the operator or the orchestrating model, made from the functional role definitions in `ai-orchestrator`'s `SKILL.md` plus the configured model's demonstrated capability — not a restriction this contract or `HARNESS_PROFILES["roles"]` should hardcode. A `roles` entry means "MC can safely automate this harness unattended in this role class"; it does not mean "this harness is a good choice" for every task in that class.
-
-Two residual coverage gaps apply to Copilot and OpenCode alike, in addition to whatever gaps already existed for Codex/Claude: (1) only the directory-trust prompt was directly triggered and confirmed for each; other hard-stop prompt classes (credential, permission-denial, external side effect) rely on the same generic keyword markers used for every harness, untested against these two CLIs' actual prompt wording. (2) Extended real-world runs (long multi-step slices, concurrent workers sharing a tool's local state/session store) have not been exercised — validation here covered readiness detection and one short end-to-end slice per harness. OpenCode now has query-backed exact model-id validation and a pre-prompt display-name comparison; equivalent positive identity verification remains a documented gap for profiles without both signals.
+Two residual coverage gaps apply to Copilot and OpenCode alike, in addition to whatever gaps already existed for Codex/Claude: (1) only the directory-trust prompt was directly triggered and confirmed for each; other hard-stop prompt classes (credential, permission-denial, external side effect) rely on the same generic keyword markers used for every harness, untested against these two CLIs' actual prompt wording. (2) Extended real-world runs (long multi-step slices, concurrent reviewers sharing a tool's local state/session store) have not been exercised — validation here covered readiness detection and one short end-to-end slice per harness. OpenCode now has query-backed exact model-id validation and a pre-prompt display-name comparison; equivalent positive identity verification remains a documented gap for profiles without both signals.
 
 ## Failure Semantics
 
@@ -114,4 +112,4 @@ MC should record stable failure reasons in run state and artifacts instead of ex
 
 `timeout` is terminal for deterministic batch execution when the result file never appears before the configured deadline. In model-supervised operation, a bounded `wait` timeout is an observation result, not an acceptance or failure verdict by itself; the MC model must then choose a safe next primitive such as another wait, `pause-until`, `send`, `finalize-slice`, or `stop-with-evidence`.
 
-MC records terminal failures in run state and stops rather than retrying indefinitely. Model-supervised waits and pauses are not acceptance states; they preserve evidence and return control for a later observe, send, finalize, or stop decision. Acceptance still requires `orchestrator-result.json` plus deterministic validation, authorization, drift audit, code review, commit, and clean-worktree gates.
+MC records terminal failures in run state and stops rather than retrying indefinitely. Model-supervised waits and pauses are not acceptance states; they preserve evidence and return control for a later observe, send, finalize, or stop decision. Acceptance still requires `developer-result.json` plus deterministic validation, authorization, drift audit, code review, commit, and clean-worktree gates.

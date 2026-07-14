@@ -5,7 +5,7 @@ import shlex
 from typing import Any
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 PARSER_NAME = "implementation-plan-markdown-v2"
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_SECTIONS = (
@@ -22,7 +22,7 @@ REQUIRED_SECTIONS = (
 # run existed, e.g. under a previous run whose plan was edited to clear an
 # approval gate. MC never assigns it from gate verification.
 COMPLETED_SLICE_STATUSES = {"pass", "assumed-complete"}
-ORCHESTRATOR_STATUSES = {"pass", "repairable", "needs-human", "fail", "blocked"}
+DEVELOPER_STATUSES = {"pass", "repairable", "needs-human", "fail", "blocked"}
 RUN_ACTIVE_STATUSES = {"initialized", "running", "paused", "resuming", "partial"}
 RUN_STOP_STATUSES = {"needs-human", "blocked", "failed", "cancelled"}
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -58,75 +58,68 @@ DEFAULT_SUPERVISION: dict[str, Any] = {
 
 HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     "codex": {
-        "roles": ["orchestrator", "senior-worker"],
         "base_command": ["codex", "--no-alt-screen", "-s", "workspace-write", "-a", "never"],
         "model_flag": "-m",
         "effort_config_key": "model_reasoning_effort",
-        "worker_network_flag": ["-c", "sandbox_workspace_write.network_access=true"],
+        "reviewer_network_flag": ["-c", "sandbox_workspace_write.network_access=true"],
         "commit_git_access_flag": "--add-dir",
         "notes": [
             "Use --no-alt-screen for durable tmux captures.",
             "Optional MC profile model and effort overrides are composed as -m and -c model_reasoning_effort=... .",
-            "Worker-backed runs need sandbox network access.",
+            "Reviewer-backed runs need sandbox network access.",
             "Commit-required runs need scoped write access to the repository git directory.",
-            "When used as a worker (not orchestrator), gets a per-slice CODEX_HOME seeded with a copy of the "
+            "When used as a reviewer (not developer), gets a per-slice CODEX_HOME seeded with a copy of the "
             "real auth.json, since Codex's home dir doubles as its credential store.",
         ],
     },
     "claude": {
-        "roles": ["orchestrator", "senior-worker"],
         "base_command": ["claude", "--permission-mode", "auto"],
         "model_flag": "--model",
         "effort_flag": "--effort",
         "notes": [
             "Uses Claude Code's permission classifier for unattended routine actions.",
             "Optional MC profile model and effort overrides are composed while preserving --session-id transcript capture.",
-            "Do not launch Claude workers from inside a Claude orchestrator.",
-            "As orchestrator, launched with --session-id so MC can capture the full JSONL transcript "
-            "as orchestrator-transcript.jsonl (pane capture alone loses detail behind Claude Code's "
+            "Do not launch Claude reviewers from inside a Claude developer.",
+            "As developer, launched with --session-id so MC can capture the full JSONL transcript "
+            "as developer-transcript.jsonl (pane capture alone loses detail behind Claude Code's "
             "'ctrl+o to expand' collapsing).",
-            "When used as a worker (not orchestrator), uses the operator's normal Claude Code auth/config unless "
+            "When used as a reviewer (not developer), uses the operator's normal Claude Code auth/config unless "
             "standard Claude auth environment variables are provided; copying .credentials.json into an isolated "
             "CLAUDE_CONFIG_DIR is not portable.",
         ],
     },
     "copilot": {
-        "roles": ["orchestrator", "senior-worker", "junior-worker"],
         "base_command": ["copilot", "--allow-all-tools", "--autopilot"],
         "model_flag": "--model",
         "effort_flag": "--effort",
         "notes": [
-            "Mechanically validated as an MC orchestrator harness: bare interactive TUI accepts tmux paste-buffer "
+            "Mechanically validated as an MC developer harness: bare interactive TUI accepts tmux paste-buffer "
             "plus double-Enter prompt injection identically to codex/claude, and its directory-trust dialog text "
             "('Do you trust the files in this folder?') matches an existing generic TRUST_PROMPT_MARKERS entry, so "
             "MC already fails closed on it.",
-            "Which role (orchestrator, senior worker, junior worker) fits a given task is a per-run operator/model "
-            "decision based on the configured Copilot model's demonstrated capability, not a fixed property of "
-            "this profile — see harness-adapter-contract.md and ai-orchestrator's role definitions.",
-            "When used as a worker (not orchestrator), gets a per-slice COPILOT_HOME for sandboxed session state; "
-            "as orchestrator it keeps the operator's real ~/.copilot config.",
+            "Developer or Reviewer selection is a per-run operator choice, not a capability ranking in this profile.",
+            "When used as a reviewer (not developer), gets a per-slice COPILOT_HOME for sandboxed session state; "
+            "as developer it keeps the operator's real ~/.copilot config.",
             "Coverage gap: only the directory-trust prompt has been directly observed; other Copilot prompt classes "
             "(credential, permission-denial, external side effect) rely on the same generic keyword markers used "
             "for every harness and have not been individually triggered and confirmed.",
         ],
     },
     "opencode": {
-        "roles": ["orchestrator", "senior-worker", "junior-worker"],
         "base_command": ["opencode", "--auto"],
         "model_flag": "-m",
         "model_inventory_command": ["opencode", "models", "{provider}", "--verbose"],
         "model_inventory_verbose_json": True,
         "notes": [
-            "Mechanically validated as an MC orchestrator harness: bare interactive TUI shows a stable 'Ask "
+            "Mechanically validated as an MC developer harness: bare interactive TUI shows a stable 'Ask "
             "anything...' idle placeholder as a ready marker and accepts the same tmux paste-buffer plus "
             "double-Enter prompt injection as codex/claude/copilot.",
             "No effort_flag: the interactive TUI command this profile launches has no effort/reasoning flag, "
             "so an effort request fails closed at command-compose time with "
             "a clear McError instead of launching a broken command that exits before the prompt can be sent.",
             "Primarily backed by local/self-hosted models (see ~/.config/opencode/opencode.json, served via "
-            "~/.llm/llama-server/); may also be configured with subscription models. Role fit depends entirely on "
-            "the configured model's demonstrated capability, not on this profile — weak local models should stay "
-            "in junior-worker or narrowly-scoped senior-worker use even though the mechanics support all roles.",
+            "~/.llm/llama-server/); it may also be configured with subscription models. The operator chooses the "
+            "model and role; this profile records mechanics only.",
             "Coverage gap: no opencode-specific hard-stop-prompt text (credential, permission-denial, external "
             "side effect) has been directly observed; detection relies on the same generic keyword markers used "
             "for every harness. The whitelisted-directory permission prompt implied by opencode.json's "
@@ -183,20 +176,20 @@ LICENSE_SURFACE_PREFIXES = ("license", "copying", "notice", "patents")
 BROAD_SURFACE_ENTRIES = {"**", "**/*"}
 TOP_LEVEL_ONLY_SURFACE_ENTRIES = {"*"}
 
-# Worker-tool home directories are not interchangeable. Copilot's real GitHub
+# Reviewer-tool home directories are not interchangeable. Copilot's real GitHub
 # credential lives outside ~/.copilot (gh CLI config / OS keychain), so
 # redirecting COPILOT_HOME to an isolated per-slice directory only needs a
-# writable dir. Codex's auth.json is portable enough for the local MC worker
+# writable dir. Codex's auth.json is portable enough for the local MC reviewer
 # profile and can be copied into per-slice CODEX_HOME. Claude Code's subscription
 # OAuth state is not safely reproduced by copying ~/.claude/.credentials.json
 # into an isolated CLAUDE_CONFIG_DIR; use the operator's normal Claude config or
 # standard Claude auth environment variables instead.
-WORKER_CREDENTIAL_HOMES: dict[str, tuple[str, str, str]] = {
+REVIEWER_CREDENTIAL_HOMES: dict[str, tuple[str, str, str]] = {
     "codex": ("CODEX_HOME", ".codex", "auth.json"),
 }
 
 # The two skills an opt-in ("Independent audit required: yes") slice must
-# delegate as separate, exactly-one-skill worker requests (see gates.py's
-# finalize-time enforcement and worker_contract.py's reserved_skill_sets
+# delegate as separate, exactly-one-skill reviewer requests (see gates.py's
+# finalize-time enforcement and reviewer_contract.py's reserved_skill_sets
 # pre-launch check). Single source of truth so the two layers cannot drift.
 REQUIRED_AUDIT_SKILLS = ("drift-audit", "code-review")

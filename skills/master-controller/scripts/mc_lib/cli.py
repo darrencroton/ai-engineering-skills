@@ -37,18 +37,18 @@ def add_harness_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--harness-command", help="override harness command for controlled local validation")
     parser.add_argument("--harness-model", help="model name/alias to compose through the MC harness profile, e.g. sonnet")
     parser.add_argument("--harness-effort", help="effort level to compose through the MC harness profile, e.g. medium")
-    parser.add_argument("--worker-tools", default="", help="comma-separated worker tools expected for this run, e.g. copilot")
-    parser.add_argument("--worker-model", help="model name/alias the orchestrator should use for worker launches when supported")
-    parser.add_argument("--worker-effort", help="reasoning/effort level the orchestrator should use for worker launches when supported")
+    parser.add_argument("--reviewer-tools", default="", help="comma-separated reviewer tools expected for this run, e.g. copilot")
+    parser.add_argument("--reviewer-model", help="model name/alias the developer should use for reviewer launches when supported")
+    parser.add_argument("--reviewer-effort", help="reasoning/effort level the developer should use for reviewer launches when supported")
     parser.add_argument(
         "--allow-profile-command",
         action="store_true",
-        help="use MC's capability profile to compose the unattended harness command from run requirements",
+        help="use MC's mechanical profile to compose the unattended harness command from run requirements",
     )
 
 
 def add_runtime_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for orchestrator result")
+    parser.add_argument("--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="maximum seconds to wait for developer result")
     parser.add_argument("--poll-seconds", type=float, default=DEFAULT_POLL_SECONDS, help="seconds between tmux/result checks")
 
 
@@ -120,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         add_repo_run_args(command)
         command.set_defaults(func=func)
 
-    profiles_parser = subparsers.add_parser("profiles", help="list MC harness and worker capability profiles")
+    profiles_parser = subparsers.add_parser("profiles", help="list MC harness launch mechanics")
     profiles_parser.set_defaults(func=list_profiles)
 
     preflight_parser = subparsers.add_parser("preflight", help="check the next MC slice launch before running it")
@@ -213,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_unattended_default_arg(stop_parser)
     stop_parser.set_defaults(func=stop)
 
-    archive_parser = subparsers.add_parser("archive-sensitive", help="archive sensitive worker state from a run")
+    archive_parser = subparsers.add_parser("archive-sensitive", help="archive sensitive reviewer state from a run")
     add_repo_run_args(archive_parser)
     archive_parser.add_argument("--dry-run", action="store_true", help="print artifact moves without changing files")
     archive_parser.set_defaults(func=archive_sensitive)

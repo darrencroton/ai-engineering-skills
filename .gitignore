@@ -13,7 +13,7 @@ __pycache__/
 venv/
 
 # Local runtime artefacts written by skills during use
-.ai-orchestrator/
+.orchestrator/
 .ai-mc/
 .claude/
 

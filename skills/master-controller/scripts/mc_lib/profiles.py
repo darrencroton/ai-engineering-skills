@@ -16,13 +16,13 @@ _RUN_LAUNCH_STRING_FIELDS = (
     "harness_command",
     "harness_model",
     "harness_effort",
-    "worker_model",
-    "worker_effort",
+    "reviewer_model",
+    "reviewer_effort",
 )
 _RUN_LAUNCH_BOOLEAN_FIELDS = ("allow_profile_command", "allow_unattended_default")
 
 
-def parse_worker_tools(value: str | None) -> tuple[str, ...]:
+def parse_reviewer_tools(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(tool.strip().lower() for tool in value.split(",") if tool.strip())
@@ -31,7 +31,7 @@ def parse_worker_tools(value: str | None) -> tuple[str, ...]:
 def _launch_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
     return {
         **{field: getattr(args, field, None) for field in _RUN_LAUNCH_STRING_FIELDS},
-        "worker_tools": list(parse_worker_tools(getattr(args, "worker_tools", None))),
+        "reviewer_tools": list(parse_reviewer_tools(getattr(args, "reviewer_tools", None))),
         **{field: bool(getattr(args, field, False)) for field in _RUN_LAUNCH_BOOLEAN_FIELDS},
     }
 
@@ -47,9 +47,9 @@ def _validated_run_launch_config(state: dict[str, Any]) -> dict[str, Any] | None
         value = config.get(field)
         if value is not None and (not isinstance(value, str) or not value):
             raise McError(f"run-level harness.launch_config.{field} must be null or a non-empty string")
-    worker_tools = config.get("worker_tools")
-    if not isinstance(worker_tools, list) or not all(isinstance(tool, str) and tool for tool in worker_tools):
-        raise McError("run-level harness.launch_config.worker_tools must be a list of non-empty strings")
+    reviewer_tools = config.get("reviewer_tools")
+    if not isinstance(reviewer_tools, list) or not all(isinstance(tool, str) and tool for tool in reviewer_tools):
+        raise McError("run-level harness.launch_config.reviewer_tools must be a list of non-empty strings")
     for field in _RUN_LAUNCH_BOOLEAN_FIELDS:
         if not isinstance(config.get(field), bool):
             raise McError(f"run-level harness.launch_config.{field} must be a boolean")
@@ -75,13 +75,13 @@ def effective_run_launch_args(args: argparse.Namespace, state: dict[str, Any]) -
                 f"{field.replace('_', '-')} differs from the frozen run launch configuration; initialize a new run to reconfigure models or commands"
             )
         values[field] = expected
-    supplied_tools = parse_worker_tools(values.get("worker_tools"))
-    expected_tools = tuple(str(tool) for tool in persisted.get("worker_tools", ()))
+    supplied_tools = parse_reviewer_tools(values.get("reviewer_tools"))
+    expected_tools = tuple(str(tool) for tool in persisted.get("reviewer_tools", ()))
     if supplied_tools and supplied_tools != expected_tools:
         raise McError(
-            "worker-tools differs from the frozen run launch configuration; initialize a new run to reconfigure workers"
+            "reviewer-tools differs from the frozen run launch configuration; initialize a new run to reconfigure reviewers"
         )
-    values["worker_tools"] = ",".join(expected_tools)
+    values["reviewer_tools"] = ",".join(expected_tools)
     for field in _RUN_LAUNCH_BOOLEAN_FIELDS:
         supplied = bool(values.get(field))
         expected = bool(persisted.get(field))
@@ -100,10 +100,6 @@ def freeze_run_launch_config(args: argparse.Namespace, state: dict[str, Any]) ->
         state.setdefault("harness", {})["launch_config"] = _launch_config_from_args(args)
         return args
     return effective_run_launch_args(args, state)
-
-
-def harness_supports_role(harness_name: str, role: str) -> bool:
-    return role in HARNESS_PROFILES.get(harness_name, {}).get("roles", [])
 
 
 def query_profile_model_identity(harness_name: str, model: str) -> dict[str, str] | None:
@@ -183,17 +179,14 @@ def profile_command(
     harness_name: str,
     repo: Path,
     state: dict[str, Any],
-    worker_tools: tuple[str, ...],
-    orchestrator_session_id: str | None = None,
+    reviewer_tools: tuple[str, ...],
+    developer_session_id: str | None = None,
     harness_model: str | None = None,
     harness_effort: str | None = None,
 ) -> str:
     profile = HARNESS_PROFILES.get(harness_name)
     if not profile:
         raise McError(f"no MC harness profile is defined for {harness_name!r}")
-    if not harness_supports_role(harness_name, "orchestrator"):
-        raise McError(f"harness profile {harness_name!r} is not approved for the orchestrator role")
-
     command = list(profile.get("base_command") or [])
     if not command:
         raise McError(f"harness profile {harness_name!r} has no base command")
@@ -202,20 +195,18 @@ def profile_command(
     _append_effort_override(command, profile, harness_effort, harness_name)
 
     if harness_name == "codex":
-        if worker_tools:
-            command.extend(profile["worker_network_flag"])
+        if reviewer_tools:
+            command.extend(profile["reviewer_network_flag"])
         if state.get("policy", {}).get("commit_required", True):
             command.extend([profile["commit_git_access_flag"], str(git_access_path(repo))])
-    elif worker_tools and harness_name not in {"claude", "copilot", "opencode"}:
-        raise McError(f"harness profile {harness_name!r} has no tested worker-enabled launch path")
-    if harness_name == "claude" and orchestrator_session_id:
+    if harness_name == "claude" and developer_session_id:
         # Pins the session transcript to a deterministic path under
         # ~/.claude/projects/<repo-slug>/<session_id>.jsonl so MC can capture
         # it as a full-fidelity artifact after the run (see
-        # capture_orchestrator_transcript). Claude Code's interactive TUI
+        # capture_developer_transcript). Claude Code's interactive TUI
         # collapses verbose tool output behind "ctrl+o to expand" in the tmux
         # pane capture; this transcript is not subject to that collapsing.
-        command.extend(["--session-id", orchestrator_session_id])
+        command.extend(["--session-id", developer_session_id])
     return shlex.join(command)
 
 
@@ -223,7 +214,7 @@ def resolve_harness_command(
     args: argparse.Namespace,
     repo: Path,
     state: dict[str, Any],
-    orchestrator_session_id: str | None = None,
+    developer_session_id: str | None = None,
 ) -> str | None:
     if getattr(args, "harness_model", None) and not getattr(args, "allow_profile_command", False):
         raise McError("--harness-model is only supported with --allow-profile-command")
@@ -236,8 +227,8 @@ def resolve_harness_command(
             state["harness"]["name"],
             repo,
             state,
-            parse_worker_tools(getattr(args, "worker_tools", None)),
-            orchestrator_session_id,
+            parse_reviewer_tools(getattr(args, "reviewer_tools", None)),
+            developer_session_id,
             getattr(args, "harness_model", None),
             getattr(args, "harness_effort", None),
         )
@@ -252,8 +243,8 @@ def effective_launch_args(args: argparse.Namespace, state: dict[str, Any]) -> ar
     for field in _RUN_LAUNCH_STRING_FIELDS:
         if not values.get(field) and persisted.get(field):
             values[field] = persisted[field]
-    if not parse_worker_tools(values.get("worker_tools")) and persisted.get("worker_tools"):
-        values["worker_tools"] = ",".join(str(tool) for tool in persisted["worker_tools"])
+    if not parse_reviewer_tools(values.get("reviewer_tools")) and persisted.get("reviewer_tools"):
+        values["reviewer_tools"] = ",".join(str(tool) for tool in persisted["reviewer_tools"])
     for field in ("allow_profile_command", "allow_unattended_default"):
         if not values.get(field) and persisted.get(field):
             values[field] = True
@@ -264,9 +255,9 @@ def resolve_current_harness_command(
     args: argparse.Namespace,
     repo: Path,
     state: dict[str, Any],
-    orchestrator_session_id: str | None = None,
+    developer_session_id: str | None = None,
 ) -> str | None:
-    return resolve_harness_command(effective_launch_args(args, state), repo, state, orchestrator_session_id)
+    return resolve_harness_command(effective_launch_args(args, state), repo, state, developer_session_id)
 
 
 def current_allow_unattended_default(args: argparse.Namespace, state: dict[str, Any]) -> bool:

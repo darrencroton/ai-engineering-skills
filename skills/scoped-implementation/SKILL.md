@@ -35,13 +35,13 @@ If the contract is missing or too vague, stop after drafting a candidate contrac
 
 Keep small implementation slices local when delegation would add more prompt/context overhead than value.
 
-Use `ai-orchestrator` only when it is also explicitly requested or already active for the task. When using it:
+Use `orchestrator` only when it is also explicitly requested or already active for the task. When using it:
 
-- delegate codebase mapping, long-running tests, or implementation of a well-bounded slice when that improves quality or saves meaningful time
-- delegate the drift-audit skill only when the user explicitly called the drift-audit skill or explicitly asked to combine implementation and drift audit
-- never let a worker expand the slice, approve drift, or own the final verdict
-- give edit workers the frozen contract and exact authorized surface
-- give workers applying the drift-audit skill only the frozen contract, diff, and relevant tests
+- keep implementation, test execution, Git operations, commits, gate decisions, and final delivery with the Developer
+- use a read-only Reviewer only for investigation, evidence gathering, drift audit, or code review
+- invoke a Reviewer for drift audit only when the user explicitly called `drift-audit` or explicitly asked to combine implementation and drift audit
+- never let a Reviewer edit files, expand the slice, approve drift, own a gate, commit, or re-delegate
+- give a Reviewer applying `drift-audit` only the frozen contract, diff, and relevant validation evidence
 
 ## Implementation Receipt
 

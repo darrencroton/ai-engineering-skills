@@ -1,8 +1,8 @@
 # Master Controller
 
-Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, and verifies gates from outside the harness session. When verification finds a fixable gap, MC runs a bounded self-correcting repair loop: it surfaces the specific violation back into the live orchestrator session (preserving the context the orchestrator already built), lets it fix the gap, and re-verifies with the complete, unrelaxed gate. Only integrity breaches, an exhausted repair budget, a tripped same-signature circuit breaker, or policy-required approvals stop the run for a human.
+Master Controller (MC) supervises execution of an already-approved implementation plan. It is not a planner and it is not an implementer. It runs one frozen slice at a time through an AI coding harness, records durable artifacts, and verifies gates from outside the harness session. When verification finds a fixable gap, MC runs a bounded self-correcting repair loop: it surfaces the specific violation back into the live developer session (preserving the context the developer already built), lets it fix the gap, and re-verifies with the complete, unrelaxed gate. Only integrity breaches, an exhausted repair budget, a tripped same-signature circuit breaker, or policy-required approvals stop the run for a human.
 
-The three roles: **MC** is the deterministic supervisor — it owns run state, worker policy, and gates, steers repairs, never writes slice code, and never delegates to a worker itself. The **slice orchestrator** is the harness in tmux executing one slice (scoped-implementation → validation → drift-audit → code-review → commit); it reports a structured result but holds no final authority. A **worker** is a bounded helper requested semantically by the orchestrator and launched through `ai-orchestrator`'s deterministic policy/request interface; it owns no gates, never commits, and never re-delegates. In model-supervised operation a fourth seat, the **supervising model**, drives MC's commands and owns operational judgment only — never acceptance (see "Roles and Topology" in `SKILL.md`).
+The three roles: **MC** is the deterministic supervisor — it owns run state, Reviewer policy, and gates, steers repairs, never writes slice code, and never delegates to a Reviewer itself. The **slice Developer** is the harness in tmux executing one slice (scoped-implementation → validation → drift-audit → code-review → commit); it owns implementation, tests, fixes, and commits, but reports to MC for acceptance. A **Reviewer** is a read-only evidence provider requested semantically by the Developer and launched through `orchestrator`'s deterministic policy/request interface; it may investigate, gather evidence, perform drift audit, and perform code review, but never edits, runs mutation-prone tests, performs Git/GitHub mutations, owns gates, commits, or re-delegates. In model-supervised operation a fourth seat, the **supervising model**, drives MC's commands and owns operational judgment only — never acceptance (see "Roles and Topology" in `SKILL.md`).
 
 MC is one mode with a supervision dial, not two modes. Model-supervised operation is the default: the MC model stays in the loop for live operational judgment while deterministic commands own state transitions and gates. The fail-closed `run-next` and `run --scope remaining` paths are the unattended batch style — the fallback when no supervising model is available or a short conservative run is enough; they stop at the first operational ambiguity by design. Acceptance gates are identical in both styles. The current implementation provides contract docs, whole-plan sanity checking, durable run state, conservative plan discovery, tmux-backed slice execution, model-supervised observe/send/start/wait/pause/finalize/stop primitives, structured result capture, fail-closed gate verification, looping over remaining slices, cancellation, and summaries.
 
@@ -20,9 +20,9 @@ Runtime requirement: Python 3.13 or newer. MC uses Python 3.13's segment-aware `
 - Running one eligible slice with `run-next`.
 - Running eligible slices sequentially with `run --scope remaining`.
 - Capturing prompt, pane output, git status, git diff, validation, drift audit, code review, structured residual findings, per-slice summaries, and the aggregate run report.
-- Writing `worker-policy.json`, embedding the ai-orchestrator contract into the slice prompt, and verifying validated worker-launch evidence without composing worker harness commands itself.
+- Writing `reviewer-policy.json`, embedding the orchestrator contract into the slice prompt, and verifying validated reviewer-launch evidence without composing reviewer harness commands itself.
 - Recording supervision state and append-only operational event logs for model-supervised runs.
-- Verifying orchestrator claims against git evidence, classifying every non-pass gate outcome with a stable failure signature as repairable or terminal.
+- Verifying developer claims against git evidence, classifying every non-pass gate outcome with a stable failure signature as repairable or terminal.
 - Driving the bounded repair loop: archiving the stale result, steering the live session with a targeted correction (or relaunching a fresh session per the circuit breaker), re-verifying with unrelaxed gates, and enforcing the repair budget from persisted state.
 - Stopping for a human on integrity breaches (HEAD not advanced or not descended from the slice start, wrong slice reported), exhausted repair budget, a tripped circuit breaker, or approval-gated slices.
 
@@ -91,11 +91,11 @@ python3 skills/master-controller/scripts/mc.py status --repo /path/to/repo
 python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 ```
 
-Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, and the structured residual findings that Mode A would preserve through its slice summary and handoff. While a harness is live, the outside-worktree copy is Mode B's controller authority and `.ai-mc/current/run.json` is its auditable mirror; a mismatch fails normal commands closed, while `stop-with-evidence` can recover from the isolated copy. This protects against normal workspace edits and weak-model corruption, not a same-user unsandboxed process deliberately searching outside the worktree.
+Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, residual findings, and MC-derived provenance for each audit: `reviewer` with the successful tool/label, `developer-self-audit` only when the Developer result and non-empty in-slice audit artifact prove it occurred, or `not-observed` when neither evidence path exists (including timeouts, missing results, pre-audit stops, and operator-attested pre-run completion). While a harness is live, the outside-worktree copy is Mode B's controller authority and `.ai-mc/current/run.json` is its auditable mirror; a mismatch fails normal commands closed, while `stop-with-evidence` can recover from the isolated copy. This protects against normal workspace edits and weak-model corruption, not a same-user unsandboxed process deliberately searching outside the worktree.
 
 Repeated terminal outcomes for the same slice are grouped together in the run report. Earlier outcomes remain visible as superseded evidence and the final recorded outcome is marked authoritative; aggregate residual findings, blockers, and next actions come from the authoritative outcome.
 
-List harness and worker capability profiles:
+List harness launch mechanics:
 
 ```bash
 python3 skills/master-controller/scripts/mc.py profiles
@@ -106,7 +106,7 @@ Preflight the next slice before starting a tmux harness:
 ```bash
 python3 skills/master-controller/scripts/mc.py preflight \
   --repo /path/to/repo \
-  --worker-tools copilot \
+  --reviewer-tools copilot \
   --allow-profile-command
 ```
 
@@ -121,20 +121,20 @@ Run the next eligible slice:
 ```bash
 python3 skills/master-controller/scripts/mc.py run-next \
   --repo /path/to/repo \
-  --worker-tools copilot \
+  --reviewer-tools copilot \
   --allow-profile-command
 ```
 
-Run with explicit orchestrator and worker model/effort requests:
+Run with explicit developer and reviewer model/effort requests:
 
 ```bash
 python3 skills/master-controller/scripts/mc.py run-next \
   --repo /path/to/repo \
   --harness-model <model> \
   --harness-effort <effort> \
-  --worker-tools codex \
-  --worker-model <model> \
-  --worker-effort <effort> \
+  --reviewer-tools codex \
+  --reviewer-model <model> \
+  --reviewer-effort <effort> \
   --allow-profile-command
 ```
 
@@ -144,7 +144,7 @@ Run eligible slices until all are complete or a stop condition is reached:
 python3 skills/master-controller/scripts/mc.py run \
   --repo /path/to/repo \
   --scope remaining \
-  --worker-tools copilot \
+  --reviewer-tools copilot \
   --allow-profile-command
 ```
 
@@ -153,7 +153,7 @@ Start the next eligible slice in model-supervised mode and return immediately:
 ```bash
 python3 skills/master-controller/scripts/mc.py start-slice \
   --repo /path/to/repo \
-  --worker-tools copilot \
+  --reviewer-tools copilot \
   --allow-profile-command
 ```
 
@@ -198,7 +198,7 @@ Cancel a run and record the reason:
 python3 skills/master-controller/scripts/mc.py stop --repo /path/to/repo --reason "manual stop"
 ```
 
-Archive sensitive worker state from a completed or stopped run:
+Archive sensitive reviewer state from a completed or stopped run:
 
 ```bash
 python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to/repo --dry-run
@@ -213,37 +213,37 @@ python3 skills/master-controller/scripts/mc.py archive-sensitive --repo /path/to
 
 ## Default MC Execution Flow
 
-`SKILL.md` is the source of truth for the default operating path and holds the single authoritative Mode B launcher (this README previously duplicated the operating path and the two copies drifted). In short: **model-supervised operation is the default**; use the **unattended batch style** when no supervising model is available or a conservative fail-closed run is enough; follow the step sequences in `SKILL.md` → "Default Operating Path" and the launcher in `SKILL.md` → "Launcher". Do not ask users to hand-compose harness sandbox, model, or effort flags — use `profiles`, `preflight`, `--worker-tools`, `--harness-model`, `--harness-effort`, `--worker-model`, `--worker-effort`, and `--allow-profile-command`.
+`SKILL.md` is the source of truth for the default operating path and holds the single authoritative Mode B launcher (this README previously duplicated the operating path and the two copies drifted). In short: **model-supervised operation is the default**; use the **unattended batch style** when no supervising model is available or a conservative fail-closed run is enough; follow the step sequences in `SKILL.md` → "Default Operating Path" and the launcher in `SKILL.md` → "Launcher". Do not ask users to hand-compose harness sandbox, model, or effort flags — use `profiles`, `preflight`, `--reviewer-tools`, `--harness-model`, `--harness-effort`, `--reviewer-model`, `--reviewer-effort`, and `--allow-profile-command`.
 
 Two operational rules worth repeating here because they bite in practice (details in `SKILL.md` → "Long-Running Command Discipline"):
 
 - MC's blocking commands outlive assistant tool-call limits. Run `run`/`run-next` in the background and poll `status`; in model-supervised mode use repeated bounded `wait` calls, not one long wait.
-- For model-supervised runs on subscription harnesses, put the MC model on a different provider than the orchestrator harness so one usage window cannot stall both.
+- For model-supervised runs on subscription harnesses, put the MC model on a different provider than the developer harness so one usage window cannot stall both.
 - Keep live MC observation/control calls separate from supplementary commands that may need approval; an approval delay does not pause the harness.
 
 `observe` and `wait` expose `operational_hints` in their JSON output. These hints summarize common pane/transcript evidence such as rolling usage limits, weekly/monthly/account limits, service unavailable messages, network transients, auth/trust/permission prompts, external side-effect requests, idle/no-progress, result-ready, and process-exited-without-result. Ordinary hints are evidence for the MC model, not commands. Hard-stop hints are deterministic guards: `send`, `pause-until`, and wait/retry/resume paths refuse unattended continuation when weekly, monthly, account, billing, unknown-limit, auth, trust, permission, or external-side-effect evidence is present.
 
 MC automatically routes only an explicit high-confidence transient service-unavailable terminal report into the existing repair loop. Generic server/network text is not enough. Repeated idle observations spanning the configured ten-minute ceiling likewise use the existing repair signature streak: automatic in-session nudge, fresh-session retry, then terminal circuit breaker. This is operational recovery only; acceptance still requires every normal gate.
 
-Every idle escalation requires a fresh ten-minute no-progress window after the previous repair/send boundary. The first slice freezes the complete run launch configuration, including orchestrator and worker models/effort. Later slices and wait-triggered fresh sessions inherit it when flags are omitted; conflicting reconfiguration fails closed. Model identity evidence is refreshed and tagged to every slice launch instead of carrying a stale prior-slice check.
+Every idle escalation requires a fresh ten-minute no-progress window after the previous repair/send boundary. The first slice freezes the complete run launch configuration, including developer and reviewer models/effort. Later slices and wait-triggered fresh sessions inherit it when flags are omitted; conflicting reconfiguration fails closed. Model identity evidence is refreshed and tagged to every slice launch instead of carrying a stale prior-slice check.
 
 Reset parsing is intentionally narrow. Relative durations such as `try again in 3 hours` are preferred. Absolute local reset times are accepted only when they are unambiguously near-future in the controller timezone or include an explicit timezone; otherwise MC reports an unknown-limit hard stop for human judgment.
 
 ## Profiles and Launch Requirements
 
-MC stores one profile per tool instead of one profile per possible role combination. Tool profiles describe mechanical readiness, not suitability: Codex, Claude, Copilot, and OpenCode are all mechanically validated to run unattended in tmux (accept prompt injection, expose a ready state, fail closed on trust prompts) and are listed as orchestrator-capable in `HARNESS_PROFILES`. Which harness and role actually fits a given task is a per-run operator/model decision based on the configured model's demonstrated capability — see `references/harness-adapter-contract.md` for the validation evidence and residual coverage gaps, and `ai-orchestrator`'s `SKILL.md` for the functional role definitions.
+MC stores one mechanical profile per tool. Codex, Claude, Copilot, and OpenCode are equally eligible for Developer or Reviewer selection; the profile does not rank models, encode role suitability, or reject an operator's choice. It records command composition, authentication handling, readiness evidence, monitoring behavior, and the factual strength or limits of read-only enforcement. The user chooses the tool/model through the launcher or plan.
 
 At runtime, MC composes the launch command from the selected harness plus explicit requirements:
 
-- `--worker-tools copilot` tells MC the slice will use a Copilot worker and the harness needs worker-compatible setup.
+- `--reviewer-tools copilot` tells MC the slice will use a Copilot reviewer and the harness needs reviewer-compatible setup.
 - `--allow-profile-command` tells MC to use the tested profile command instead of requiring a hand-written `--harness-command`.
-- `--allow-unattended-default` opts in to the harness profile's known unattended-safe base command without full profile composition (no model/effort/worker flags). Like `--allow-profile-command`, it disables per-action approval, so MC's post-hoc gates are the safety boundary; without any of the three launch flags, a bare harness name fails closed rather than deadlocking on an approval prompt.
-- `--harness-model` and `--harness-effort` are composed by MC only when the selected orchestrator profile supports them.
+- `--allow-unattended-default` opts in to the harness profile's known unattended-safe base command without full profile composition (no model/effort/reviewer flags). Like `--allow-profile-command`, it disables per-action approval, so MC's post-hoc gates are the safety boundary; without any of the three launch flags, a bare harness name fails closed rather than deadlocking on an approval prompt.
+- `--harness-model` and `--harness-effort` are composed by MC only when the selected developer profile supports them.
 - When a profile exposes a model inventory, `preflight` and slice start require the exact requested id to exist. OpenCode also compares the inventory-provided display name with its ready-state TUI before prompt injection, preventing its known silent fallback behavior.
-- `--worker-model` and `--worker-effort` are rendered into the slice prompt with per-tool command guidance; the orchestrator must preserve worker evidence and stop if the selected worker cannot honor them.
+- `--reviewer-model` and `--reviewer-effort` are rendered into the slice prompt with per-tool command guidance. If the selected Reviewer cannot launch or honor its authentication/model/effort contract, the Developer preserves the exact failure in `reviewer-evidence.md`. On a default slice the Developer then self-audits and documents that fallback; only a slice marked `Independent audit required: yes` must stop because validated Reviewer evidence is mandatory.
 - `commit_required=true` in run policy tells the Codex profile to add scoped git-directory access for local commits.
 
-This avoids a large matrix of incomplete names such as `codex-copilot-commit`. The role information stays with each tool profile, and the slice requirements are visible on the command line.
+This avoids a large matrix of incomplete names such as `codex-copilot-commit`. Role selection remains an explicit run choice, and the slice requirements stay visible on the command line.
 
 ## Run State
 
@@ -262,7 +262,7 @@ State is stored under the target repository:
           activity-attempt-1.jsonl
           pane-capture.txt
           pane-capture-live-latest.txt
-          worker-runs/
+          reviewer-runs/
           tmp/
           tool-homes/
           copilot-home/
@@ -272,19 +272,19 @@ State is stored under the target repository:
           validation-summary.md
           drift-audit.md
           code-review.md
-          worker-evidence.md
-          orchestrator-result.json
+          reviewer-evidence.md
+          developer-result.json
 ```
 
-MC does not edit the project's own `.gitignore`. Instead, `init` writes a self-ignoring `.ai-mc/.gitignore` containing `*`, so the audit directory — including seeded worker credentials and full transcripts — is never staged by a stray `git add -A`. MC's own dirty-tree and changed-file checks already exclude `.ai-mc/`.
+MC does not edit the project's own `.gitignore`. Instead, `init` writes a self-ignoring `.ai-mc/.gitignore` containing `*`, so the audit directory — including seeded reviewer credentials and full transcripts — is never staged by a stray `git add -A`. MC's own dirty-tree and changed-file checks already exclude `.ai-mc/`.
 
 Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit. Batch polling also records `observation` operational events to `operational-events.jsonl` (on state change, with a 60-second floor while nothing changes) and refreshes `observation-latest.json` — the same evidence the model-supervised `observe`/`wait` primitives produce.
 
-`run.json` includes a required `supervision` object with pause/retry policy, pause budgets, and the default continuation prompt. MC supports only the complete current schema-v2 shape and fails closed with a fresh-init instruction when durable state is missing or uses another version. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
+`run.json` includes a required `supervision` object with pause/retry policy, pause budgets, and the default continuation prompt. MC supports only the complete current schema-v3 shape and fails closed with a fresh-init instruction when durable state is missing or uses another version. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
 
-While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, a `repair` object ({round, last_signature, signature_streak, session_generation} — the persisted repair-loop and circuit-breaker state), an optional `orchestrator_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`; it stays fixed across repair rounds and relaunches so verification remains cumulative. Repair rounds add per-round artifacts (`orchestrator-result-repair-<n>.json`, `repair-prompt-repair-<n>.md`, `pane-capture-repair-<n>.txt`, `git-status-repair-<n>.txt`) beside the standard slice artifacts. See `references/run-state-schema.md` for the full semantics.
+While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, a `repair` object ({round, last_signature, signature_streak, session_generation} — the persisted repair-loop and circuit-breaker state), an optional `developer_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`; it stays fixed across repair rounds and relaunches so verification remains cumulative. Repair rounds add per-round artifacts (`developer-result-repair-<n>.json`, `repair-prompt-repair-<n>.md`, `pane-capture-repair-<n>.txt`, `git-status-repair-<n>.txt`) beside the standard slice artifacts. See `references/run-state-schema.md` for the full semantics.
 
-Worker state and temporary files should stay under the slice artifact directory. MC exports fixed paths for worker runs, temporary files, and tool-specific home directories so orchestrators do not have to invent locations.
+Reviewer state and temporary files should stay under the slice artifact directory. MC exports fixed paths for reviewer runs, temporary files, and tool-specific home directories so developers do not have to invent locations.
 
 ## Plan Eligibility
 
@@ -315,7 +315,7 @@ The model-supervised transition adds these durable concepts without changing det
 - `supervision.pause_counters`: tracks consecutive pauses for the current slice and cumulative paused seconds for the run.
 - `operational_events_path`: points at the append-only JSONL event log for observations, sends, waits, pauses, resumes, and stops.
 - `current_slice.before_head`: records the commit at slice start for out-of-process finalization.
-- `current_slice.orchestrator_session_id`: records the launched Claude session id when MC composed one for transcript capture.
+- `current_slice.developer_session_id`: records the launched Claude session id when MC composed one for transcript capture.
 - `current_slice.pause`: records `paused_until`, `reason`, and an evidence event id when a bounded pause is active.
 - `operational_hints`: appears in observation JSON with `kind`, optional `subtype`, confidence, reset/retry fields when parseable, `hard_stop`, evidence excerpt, source, detection time, and recovery guidance.
 
@@ -323,19 +323,19 @@ The model-supervised primitives are `observe`, `send`, `wait`, `pause-until`, `s
 
 ## Privacy and Data Flows
 
-Everything MC produces is local: run state, artifacts, transcripts, and worker evidence live under `.ai-mc/` in the target repository, MC's deterministic tools make no network calls, and there is no telemetry. What leaves the machine is determined entirely by which models sit in which seats:
+Everything MC produces is local: run state, artifacts, transcripts, and reviewer evidence live under `.ai-mc/` in the target repository, MC's deterministic tools make no network calls, and there is no telemetry. What leaves the machine is determined entirely by which models sit in which seats:
 
 | Seat | Sees | Leaves the machine when |
 |---|---|---|
-| Slice orchestrator | The full repository, the plan, embedded skill instructions | Its model is a hosted API or subscription service |
-| Worker | The files named in its request, plus embedded worker/skill instructions | Its model is hosted |
-| Supervising model | `observe`/`wait`/`summarize` output: pane excerpts, operational hints, flagged worker-output tails — **which can include fragments of the code under work** | It is a hosted assistant |
+| Slice Developer | The full repository, the plan, embedded skill instructions | Its model is a hosted API or subscription service |
+| Reviewer | The files named in its request, plus embedded reviewer/skill instructions | Its model is hosted |
+| Supervising model | `observe`/`wait`/`summarize` output: pane excerpts, operational hints, flagged reviewer-output tails — **which can include fragments of the code under work** | It is a hosted assistant |
 | MC deterministic tools | Local git, tmux, and files | Never |
 
-The supervising seat is the one people forget: running local orchestrator and worker models but driving MC from a hosted assistant still sends code fragments to that assistant's provider through observation evidence. Two configurations keep everything on-machine:
+The supervising seat is the one people forget: running local developer and reviewer models but driving MC from a hosted assistant still sends code fragments to that assistant's provider through observation evidence. Two configurations keep everything on-machine:
 
-1. **Fully local supervision** — local models in all three seats (for example a local-model harness as orchestrator and worker, with a local model driving MC's commands).
-2. **No supervising model** — run the unattended batch style (`run --scope remaining`) from a shell; only the orchestrator and worker seats then matter, and you are the fallback when it fail-closed stops.
+1. **Fully local supervision** — local models in all three seats (for example a local-model harness as developer and reviewer, with a local model driving MC's commands).
+2. **No supervising model** — run the unattended batch style (`run --scope remaining`) from a shell; only the developer and reviewer seats then matter, and you are the fallback when it fail-closed stops.
 
 Artifact sensitivity, for cleanup and sharing decisions (per-slice under `.ai-mc/runs/<run-id>/slices/<slice>/`):
 
@@ -343,18 +343,18 @@ Artifact sensitivity, for cleanup and sharing decisions (per-slice under `.ai-mc
 |---|---|
 | `pane-capture*.txt`, `transcript.txt` | Full session output: code, diffs, command output |
 | `git-diff.patch` | The complete code change |
-| `worker-runs/` | Worker prompts and outputs, including code and embedded instructions |
+| `reviewer-runs/` | Reviewer prompts and outputs, including code and embedded instructions |
 | `validation-summary.md`, `drift-audit.md`, `code-review.md` | Code excerpts and findings |
-| `slice-summary.md`, `../run-report.md` | Gate outcomes, commit hashes, blockers, next actions, and residual post-plan considerations |
-| `prompt.md`, `orchestrator-result.json`, `git-status-*.txt` | Plan text, file paths, verdicts, commit hashes |
-| `tool-homes/`, `codex-home/`, `copilot-home/` | **Seeded worker credentials** — marked sensitive; move them out of a finished run with `archive-sensitive` |
+| `slice-summary.md`, `../run-report.md` | Gate outcomes, per-audit Reviewer/Developer provenance, commit hashes, blockers, next actions, and residual post-plan considerations |
+| `prompt.md`, `developer-result.json`, `git-status-*.txt` | Plan text, file paths, verdicts, commit hashes |
+| `tool-homes/`, `codex-home/`, `copilot-home/` | **Seeded reviewer credentials** — marked sensitive; move them out of a finished run with `archive-sensitive` |
 | `../operational-events.jsonl` (per run) | Operational events with pane-excerpt evidence fields |
 
 `init` writes a self-ignoring `.ai-mc/.gitignore` so none of this — credentials and transcripts included — can be staged by a stray `git add -A`.
 
 ## Verify Your Setup (Safe Local Trial)
 
-This is the "verify your setup" step the top-level README's Quickstart points at. Use a temporary git repo and a small plan before supervising real work. The local harness below writes the same structured artifacts expected from an AI orchestrator, commits only the authorized file, and then waits long enough for MC to capture the tmux pane:
+This is the "verify your setup" step the top-level README's Quickstart points at. Use a temporary git repo and a small plan before supervising real work. The local harness below writes the same structured artifacts expected from an AI developer, commits only the authorized file, and then waits long enough for MC to capture the tmux pane:
 
 ```bash
 tmp="$(mktemp -d)"
@@ -410,8 +410,8 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
 (artifact / "validation-summary.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "drift-audit.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "code-review.md").write_text("PASS\n", encoding="utf-8")
-(artifact / "orchestrator-result.json").write_text(json.dumps({
-    "schema_version": 2,
+(artifact / "developer-result.json").write_text(json.dumps({
+    "schema_version": 3,
     "slice_id": "Slice 1",
     "status": "pass",
     "summary": "toy slice complete",
@@ -472,8 +472,8 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
 (artifact / "validation-summary.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "drift-audit.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "code-review.md").write_text("PASS\n", encoding="utf-8")
-(artifact / "orchestrator-result.json").write_text(json.dumps({
-    "schema_version": 2,
+(artifact / "developer-result.json").write_text(json.dumps({
+    "schema_version": 3,
     "slice_id": "Slice 1",
     "status": "pass",
     "summary": "resumed after rolling limit",
@@ -504,7 +504,7 @@ python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
 
 The first `wait` should show a non-hard-stop rolling-window usage hint with recovery guidance to pause and send a continuation prompt. `pause-until` records the bounded pause, `send` delivers only the continuation text to the current slice session, and `finalize-slice` still requires the normal validation, drift-audit, code-review, commit, and clean-worktree evidence before accepting the slice.
 
-To trial the exited-process usage-limit path, use a fresh temporary repo from the setup above and a harness that exits before creating `orchestrator-result.json`:
+To trial the exited-process usage-limit path, use a fresh temporary repo from the setup above and a harness that exits before creating `developer-result.json`:
 
 ```bash
 cat > "$tmp/usage_limit_exit_harness.py" <<'PY'
@@ -522,7 +522,7 @@ python3 skills/master-controller/scripts/mc.py finalize-slice --repo "$tmp"
 python3 skills/master-controller/scripts/mc.py summarize --repo "$tmp"
 ```
 
-The first `wait` should preserve the rolling-limit pane evidence while the harness is still alive. The second `wait` should return after the process exits without a structured result, and MC must not send a continuation prompt into the old session. `finalize-slice` should block because `orchestrator-result.json` is missing, so the MC model should restart only from a clean authorized state or stop for the user.
+The first `wait` should preserve the rolling-limit pane evidence while the harness is still alive. The second `wait` should return after the process exits without a structured result, and MC must not send a continuation prompt into the old session. `finalize-slice` should block because `developer-result.json` is missing, so the MC model should restart only from a clean authorized state or stop for the user.
 
 For a minimal fast-exit variant that may close before tmux can preserve the final pane text, use:
 

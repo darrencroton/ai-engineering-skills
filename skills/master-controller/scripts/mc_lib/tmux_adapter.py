@@ -76,13 +76,13 @@ class TmuxHarnessAdapter:
         harness_name: str,
         command_override: str | None = None,
         allow_unattended_default: bool = False,
-        worker_tools: tuple[str, ...] = (),
+        reviewer_tools: tuple[str, ...] = (),
         expected_model_display: str | None = None,
     ):
         self.harness_name = harness_name
         self.command_override = command_override
         self.allow_unattended_default = allow_unattended_default
-        self.worker_tools = worker_tools
+        self.reviewer_tools = reviewer_tools
         self.expected_model_display = expected_model_display
         if command_override:
             self.command = command_override
@@ -117,7 +117,7 @@ class TmuxHarnessAdapter:
             raise McError(f"harness command not found: {executable}")
 
     def build_shell_command(self, slice_artifact_dir: Path, run_json: Path, plan_path: Path, plan_slice: PlanSlice) -> str:
-        env = slice_environment(slice_artifact_dir, run_json, plan_path, plan_slice, self.harness_name, self.worker_tools)
+        env = slice_environment(slice_artifact_dir, run_json, plan_path, plan_slice, self.harness_name, self.reviewer_tools)
         env_prefix = " ".join(
             f"{key}={shlex.quote(value)}"
             for key, value in env.items()

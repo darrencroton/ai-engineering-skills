@@ -10,7 +10,7 @@ Runtime requirement: Python 3.13 or newer. MC uses Python 3.13's segment-aware `
 
 ## What MC Owns
 
-- Creating `.ai-mc/runs/<timestamp>/run.json` under the target repo.
+- Creating an auditable `.ai-mc/runs/<timestamp>/run.json` mirror and, before the first harness launch, an undisclosed controller-owned state copy outside the worktree.
 - Updating `.ai-mc/current` to the active run.
 - Recording repo, branch, harness, plan, environment preflight, and policy.
 - Parsing implementation-plan markdown conservatively enough to identify frozen slice contracts.
@@ -91,7 +91,7 @@ python3 skills/master-controller/scripts/mc.py status --repo /path/to/repo
 python3 skills/master-controller/scripts/mc.py summarize --repo /path/to/repo
 ```
 
-Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, and the structured residual findings that Mode A would preserve through its slice summary and handoff, while `run.json` remains Mode B's continuation authority.
+Every run-state write refreshes `.ai-mc/current/run-report.md`. Each terminal slice also gets `slice-summary.md`. These deterministic reports carry gate results, commits, blockers, next actions, and the structured residual findings that Mode A would preserve through its slice summary and handoff. While a harness is live, the outside-worktree copy is Mode B's controller authority and `.ai-mc/current/run.json` is its auditable mirror; a mismatch fails normal commands closed, while `stop-with-evidence` can recover from the isolated copy. This protects against normal workspace edits and weak-model corruption, not a same-user unsandboxed process deliberately searching outside the worktree.
 
 Repeated terminal outcomes for the same slice are grouped together in the run report. Earlier outcomes remain visible as superseded evidence and the final recorded outcome is marked authoritative; aggregate residual findings, blockers, and next actions come from the authoritative outcome.
 
@@ -225,7 +225,7 @@ Two operational rules worth repeating here because they bite in practice (detail
 
 MC automatically routes only an explicit high-confidence transient service-unavailable terminal report into the existing repair loop. Generic server/network text is not enough. Repeated idle observations spanning the configured ten-minute ceiling likewise use the existing repair signature streak: automatic in-session nudge, fresh-session retry, then terminal circuit breaker. This is operational recovery only; acceptance still requires every normal gate.
 
-Every idle escalation requires a fresh ten-minute no-progress window after the previous repair/send boundary. The launch configuration is persisted with the active slice, so a wait-triggered fresh session reuses the same harness command, model, and effort even when the later `wait` invocation omits those flags.
+Every idle escalation requires a fresh ten-minute no-progress window after the previous repair/send boundary. The first slice freezes the complete run launch configuration, including orchestrator and worker models/effort. Later slices and wait-triggered fresh sessions inherit it when flags are omitted; conflicting reconfiguration fails closed. Model identity evidence is refreshed and tagged to every slice launch instead of carrying a stale prior-slice check.
 
 Reset parsing is intentionally narrow. Relative durations such as `try again in 3 hours` are preferred. Absolute local reset times are accepted only when they are unambiguously near-future in the controller timezone or include an explicit timezone; otherwise MC reports an unknown-limit hard stop for human judgment.
 

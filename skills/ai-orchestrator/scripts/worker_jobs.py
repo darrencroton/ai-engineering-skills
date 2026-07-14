@@ -59,6 +59,11 @@ INDEX_LOCK_NAME = ".index.lock"
 LABEL_RE = re.compile(r"^\d{2}-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r\d+)?$")
 # Match line-based SECTION headers even when a model prefixes them with Markdown.
 SECTION_RE = re.compile(r"^\s*(?:#+\s*)?SECTION:\s*([A-Za-z0-9_ -]+)\s*$", re.MULTILINE)
+AUDIT_VERDICT_RE = re.compile(
+    r"^MC_AUDIT_VERDICT:\s*(PASS WITH RISKS|PASS|FAIL|BLOCKED)\s*$",
+    re.MULTILINE | re.IGNORECASE,
+)
+_LIBRARY_WRAPPERS: dict[int, subprocess.Popen[bytes]] = {}
 
 
 class WorkerJobsError(RuntimeError):
@@ -150,6 +155,109 @@ def process_running(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+def process_identity(pid: int) -> str | None:
+    """Return the stable process start time used to reject a reused PID.
+
+    The command string is deliberately excluded: a freshly forked child may
+    cross ``exec`` between two observations while retaining the same PID and
+    start time.
+    """
+    if not process_running(pid):
+        return None
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "lstart="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    identity = result.stdout.strip()
+    return identity if result.returncode == 0 and identity else None
+
+
+def tracked_wrapper_running(entry: dict[str, Any]) -> bool:
+    """Confirm a manifest pid still belongs to this helper before signalling it."""
+    pid = int(entry.get("pid", 0))
+    if not process_running(pid):
+        return False
+    result = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    command = result.stdout.strip()
+    status_file = str(entry.get("status_file") or "")
+    return result.returncode == 0 and str(Path(__file__).resolve()) in command and "_runner" in command and status_file in command
+
+
+def tracked_child_running(entry: dict[str, Any]) -> bool:
+    """Confirm the recorded child still has the identity captured at launch."""
+    status_file = Path(str(entry.get("status_file") or ""))
+    status = read_json(status_file) if status_file.is_file() else {}
+    child_pid = int(status.get("child_pid") or 0)
+    expected_identity = status.get("child_identity")
+    return (
+        child_pid > 0
+        and isinstance(expected_identity, str)
+        and bool(expected_identity)
+        and process_identity(child_pid) == expected_identity
+    )
+
+
+def signal_tracked_child(entry: dict[str, Any], requested_signal: int) -> bool:
+    """Signal only the child whose launch identity is preserved in status."""
+    if not tracked_child_running(entry):
+        return False
+    status = read_json(Path(str(entry["status_file"])))
+    child_pid = int(status["child_pid"])
+    try:
+        if os.getpgid(child_pid) == child_pid:
+            os.killpg(child_pid, requested_signal)
+        else:
+            os.kill(child_pid, requested_signal)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def mark_cancelled_entry(entry: dict[str, Any], *, forced: bool, returncode: int) -> None:
+    """Persist a terminal cancellation after all tracked processes are gone."""
+    status_file = Path(str(entry.get("status_file") or ""))
+    status = read_json(status_file) if status_file.is_file() else {}
+    write_json(
+        status_file,
+        {
+            **status,
+            "label": entry.get("label"),
+            "state": "cancelled",
+            "finished_at": iso_now(),
+            "cancel_requested": True,
+            "forced": forced,
+            "returncode": status.get("returncode", returncode),
+        },
+    )
+
+
+def force_cancel_entry(entry: dict[str, Any]) -> None:
+    """Kill both helper wrapper and its separately-sessioned child process."""
+    permission_errors: list[str] = []
+    try:
+        signal_tracked_child(entry, signal.SIGKILL)
+    except PermissionError as exc:
+        permission_errors.append(f"child: {exc}")
+    wrapper_pid = int(entry.get("pid", 0))
+    if tracked_wrapper_running(entry):
+        try:
+            os.killpg(wrapper_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except PermissionError as exc:
+            permission_errors.append(f"wrapper: {exc}")
+    if permission_errors:
+        raise PermissionError("; ".join(permission_errors))
+    mark_cancelled_entry(entry, forced=True, returncode=-signal.SIGKILL)
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -451,6 +559,16 @@ def extract_best_text(entry: dict[str, Any]) -> str:
     return extract_best_result(entry)["text"]
 
 
+def audit_skill_verdicts(required_skills: list[str], text: str) -> dict[str, str | None]:
+    """Extract helper-owned semantic verdicts after the worker exits."""
+    audit_skills = [skill for skill in required_skills if skill in {"drift-audit", "code-review"}]
+    if not audit_skills:
+        return {}
+    matches = AUDIT_VERDICT_RE.findall(text)
+    verdict = matches[0].upper() if len(matches) == 1 else None
+    return {skill: verdict for skill in audit_skills}
+
+
 def command_init(args: argparse.Namespace) -> int:
     root = default_root()
     if args.root:
@@ -538,6 +656,8 @@ def start_tracked_worker(
             str(errfile),
             "--cwd",
             str(cwd),
+            "--required-skills-json",
+            json.dumps(list((launch_contract or {}).get("required_skills") or [])),
             "--",
             *command,
         ]
@@ -549,6 +669,10 @@ def start_tracked_worker(
             start_new_session=True,
             close_fds=True,
         )
+        if __name__ != "__main__":
+            # Library callers (principally tests and MC utilities) keep the
+            # Popen handle so they can reap it after an external cancel.
+            _LIBRARY_WRAPPERS[process.pid] = process
 
         manifest["workers"][label] = {
             "label": label,
@@ -878,22 +1002,43 @@ def command_cancel(args: argparse.Namespace) -> int:
     manifest = load_manifest(run_dir)
     entries = iter_selected_workers(manifest, args.label)
 
-    requested = False
+    requested_labels: set[str] = set()
+    signal_errors: dict[str, str] = {}
     for entry in entries:
-        pid = int(entry.get("pid", 0))
-        if pid <= 0 or not process_running(pid):
-            continue
-        os.kill(pid, signal.SIGTERM)
-        requested = True
+        label = str(entry["label"])
+        wrapper_running = tracked_wrapper_running(entry)
+        child_running = tracked_child_running(entry)
+        if wrapper_running or child_running:
+            requested_labels.add(label)
+        if wrapper_running:
+            try:
+                os.kill(int(entry["pid"]), signal.SIGTERM)
+            except PermissionError as exc:
+                signal_errors[label] = f"wrapper SIGTERM denied: {exc}"
+        if child_running:
+            try:
+                signal_tracked_child(entry, signal.SIGTERM)
+            except PermissionError as exc:
+                signal_errors[label] = f"child SIGTERM denied: {exc}"
 
-    if not requested:
-        raise WorkerJobsError("No matching running worker wrapper found to cancel.")
+    if not requested_labels:
+        return 0
 
     deadline = time.time() + args.timeout
     while time.time() < deadline:
         manifest = load_manifest(run_dir)
-        statuses = [worker_status(entry) for entry in iter_selected_workers(manifest, args.label)]
-        if not any(status["running"] for status in statuses):
+        current_entries = iter_selected_workers(manifest, args.label)
+        if not any(tracked_wrapper_running(entry) or tracked_child_running(entry) for entry in current_entries):
+            # A denied individual signal is not terminal if another owned
+            # process completed cleanup and every tracked identity is gone.
+            signal_errors.clear()
+            for entry in current_entries:
+                if str(entry["label"]) in requested_labels:
+                    status_path = Path(str(entry["status_file"]))
+                    status = read_json(status_path) if status_path.is_file() else {}
+                    if status.get("state") not in {"completed", "cancelled", "failed"}:
+                        mark_cancelled_entry(entry, forced=False, returncode=-signal.SIGTERM)
+            statuses = [worker_status(entry) for entry in current_entries]
             if args.json:
                 print(json.dumps(statuses, indent=2, sort_keys=True))
             else:
@@ -902,13 +1047,26 @@ def command_cancel(args: argparse.Namespace) -> int:
             return 0
         time.sleep(args.interval)
 
-    statuses = [worker_status(entry) for entry in iter_selected_workers(load_manifest(run_dir), args.label)]
+    manifest = load_manifest(run_dir)
+    remaining = iter_selected_workers(manifest, args.label)
+    for entry in remaining:
+        if tracked_wrapper_running(entry) or tracked_child_running(entry):
+            label = str(entry["label"])
+            try:
+                force_cancel_entry(entry)
+                signal_errors.pop(label, None)
+            except PermissionError as exc:
+                signal_errors[label] = f"SIGKILL denied: {exc}"
+    statuses = [worker_status(entry) for entry in remaining]
     if args.json:
         print(json.dumps(statuses, indent=2, sort_keys=True))
     else:
         for status in statuses:
             print(f"{status['label']}: state={status['state']} pid={status['pid']}")
-    return 1
+    if signal_errors:
+        details = "; ".join(f"{label}: {detail}" for label, detail in sorted(signal_errors.items()))
+        raise WorkerJobsError(f"Unable to cancel every selected worker: {details}")
+    return 0 if not any(status["running"] for status in statuses) else 1
 
 
 def command_runner(args: argparse.Namespace) -> int:
@@ -959,10 +1117,20 @@ def command_runner(args: argparse.Namespace) -> int:
                 "state": "running",
                 "started_at": iso_now(),
                 "child_pid": child.pid,
+                "child_identity": process_identity(child.pid),
                 "cwd": str(Path(args.cwd).resolve()),
             },
         )
         returncode = child.wait()
+    child_identity = read_json(status_file).get("child_identity")
+    try:
+        required_skills = json.loads(args.required_skills_json)
+    except json.JSONDecodeError:
+        required_skills = []
+    if not isinstance(required_skills, list) or not all(isinstance(skill, str) for skill in required_skills):
+        required_skills = []
+    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
+    skill_verdicts = audit_skill_verdicts(required_skills, stdout_text)
     final_state = "cancelled" if cancel_requested else ("completed" if returncode == 0 else "failed")
     write_json(
         status_file,
@@ -972,8 +1140,10 @@ def command_runner(args: argparse.Namespace) -> int:
             "started_at": read_json(status_file).get("started_at"),
             "finished_at": iso_now(),
             "child_pid": child.pid,
+            "child_identity": child_identity,
             "cancel_requested": cancel_requested,
             "returncode": returncode,
+            "skill_verdicts": skill_verdicts,
             "cwd": str(Path(args.cwd).resolve()),
         },
     )
@@ -1066,6 +1236,7 @@ def build_parser() -> argparse.ArgumentParser:
     runner_parser.add_argument("--stdout", required=True)
     runner_parser.add_argument("--stderr", required=True)
     runner_parser.add_argument("--cwd", required=True)
+    runner_parser.add_argument("--required-skills-json", default="[]")
     runner_parser.add_argument("command", nargs=argparse.REMAINDER)
     runner_parser.set_defaults(func=command_runner)
 

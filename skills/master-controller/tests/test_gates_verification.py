@@ -591,6 +591,109 @@ class GateVerificationTests(McTestCase):
 
         self.assertEqual(decision.status, "pass")
 
+    def test_gate_rejects_completed_worker_with_adverse_audit_verdict(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
+        self.write_validated_worker_run(artifact)
+        worker_run = artifact / "worker-runs" / "workers-1"
+        status_path = next(worker_run.glob("*code-review-status.json"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status["skill_verdicts"]["code-review"] = "FAIL"
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("code-review=FAIL", decision.reason)
+
+    def test_gate_rejects_completed_worker_without_helper_recorded_verdict(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
+        self.write_validated_worker_run(artifact)
+        worker_run = artifact / "worker-runs" / "workers-1"
+        status_path = next(worker_run.glob("*drift-audit-status.json"))
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        del status["skill_verdicts"]
+        status_path.write_text(json.dumps(status), encoding="utf-8")
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("drift-audit=missing", decision.reason)
+
+    def test_gate_rejects_latest_adverse_audit_verdict_after_earlier_pass(self):
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        (artifact / "worker-evidence.md").write_text("# Worker Evidence\n", encoding="utf-8")
+        self.write_validated_worker_run(artifact)
+        worker_run = artifact / "worker-runs" / "workers-1"
+        manifest_path = worker_run / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        original_label = next(label for label in manifest["workers"] if "code-review" in label)
+        retry_label = f"{original_label}-r1"
+        retry_entry = dict(manifest["workers"][original_label])
+        retry_entry["outfile"] = str(worker_run / f"{retry_label}-out.txt")
+        retry_entry["errfile"] = str(worker_run / f"{retry_label}-err.txt")
+        Path(retry_entry["outfile"]).write_text("", encoding="utf-8")
+        Path(retry_entry["errfile"]).write_text("", encoding="utf-8")
+        manifest["workers"][retry_label] = retry_entry
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        (worker_run / f"{retry_label}-status.json").write_text(
+            json.dumps(
+                {
+                    "label": retry_label,
+                    "state": "completed",
+                    "returncode": 0,
+                    "finished_at": "2026-01-01T00:01:00Z",
+                    "skill_verdicts": {"code-review": "FAIL"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        mc.capture_worker_runs_summary(artifact)
+        state = self.init_run()
+        self.attach_worker_policy_snapshot(state, artifact)
+
+        decision = mc.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, mc.git_status_text(self.repo), ("opencode",)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "worker-evidence")
+        self.assertIn("code-review=FAIL", decision.reason)
+
     def test_gate_opt_in_requires_distinct_drift_and_code_review_contracts(self):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")

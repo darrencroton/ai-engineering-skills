@@ -27,8 +27,33 @@ def normalize_stop_status(gate_status: str) -> str:
     return status_value if status_value in RUN_STOP_STATUSES else "blocked"
 
 
-def load_run(run_path: Path) -> dict[str, Any]:
+def controller_state_path(run_path: Path) -> Path | None:
+    """Return the controller-owned state path outside the target worktree.
+
+    Slice harnesses need writable artifacts under ``.ai-mc`` but never need
+    mutable controller state. The protected copy lives in Git metadata, which
+    is outside normal worktree sandboxes (including linked worktrees).
+    """
     path = run_json_path(run_path)
+    run_dir = path.parent
+    if run_dir.parent.name != "runs" or run_dir.parent.parent.name != ".ai-mc":
+        return None
+    repo = run_dir.parent.parent.parent
+    git_marker = repo / ".git"
+    if git_marker.is_dir():
+        git_dir = git_marker.resolve()
+    elif git_marker.is_file():
+        marker = git_marker.read_text(encoding="utf-8", errors="replace").strip()
+        if not marker.startswith("gitdir:"):
+            return None
+        configured = Path(marker.split(":", 1)[1].strip())
+        git_dir = (repo / configured).resolve() if not configured.is_absolute() else configured.resolve()
+    else:
+        return None
+    return git_dir / "ai-mc-control" / run_dir.name / "run.json"
+
+
+def _read_run_file(path: Path) -> dict[str, Any]:
     try:
         state = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -44,11 +69,71 @@ def load_run(run_path: Path) -> dict[str, Any]:
     return validate_run_state(state, path)
 
 
+def load_run(run_path: Path) -> dict[str, Any]:
+    path = run_json_path(run_path)
+    state = _read_run_file(path)
+    controller_path = controller_state_path(path)
+    controller_required = isinstance(state.get("harness"), dict) and state["harness"].get("launch_config") is not None
+    if controller_path is None:
+        if controller_required:
+            raise McError(f"controller-owned run state cannot be located for active run mirror: {path}")
+        return state
+    if not controller_path.exists():
+        if controller_required:
+            raise McError(
+                f"controller-owned run state is missing for active run mirror: {path}; "
+                "use stop-with-evidence to halt safely"
+            )
+    else:
+        controller_state = _read_run_file(controller_path)
+        if state != controller_state:
+            raise McError(
+                f"worktree run-state mirror differs from controller-owned state: {path}; "
+                "use stop-with-evidence to halt safely and preserve tamper evidence"
+            )
+    return state
+
+
+def load_controller_run(run_path: Path) -> dict[str, Any]:
+    """Load the isolated controller copy without trusting the worktree mirror."""
+    controller_path = controller_state_path(run_path)
+    if controller_path is None or not controller_path.exists():
+        raise McError(f"controller-owned run state not found for {run_json_path(run_path)}")
+    return _read_run_file(controller_path)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
+
+
 def write_run(path: Path, state: dict[str, Any]) -> None:
     state["updated_at"] = utc_now()
     validate_run_state(state, path)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (path.parent / "run-report.md").write_text(render_run_report(state), encoding="utf-8")
+    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    controller_path = controller_state_path(path)
+    controller_required = isinstance(state.get("harness"), dict) and state["harness"].get("launch_config") is not None
+    if controller_required and (controller_path is None or not controller_path.exists()):
+        raise McError(f"controller-owned run state is missing for active run mirror: {path}")
+    if controller_path is not None and controller_path.exists():
+        _atomic_write_text(controller_path, payload)
+    _atomic_write_text(path, payload)
+    _atomic_write_text(path.parent / "run-report.md", render_run_report(state))
+
+
+def activate_controller_state(path: Path, state: dict[str, Any]) -> None:
+    """Create the protected state copy immediately before a harness launch."""
+    controller_path = controller_state_path(path)
+    if controller_path is None:
+        raise McError(f"cannot isolate controller state for run path: {path}")
+    state["updated_at"] = utc_now()
+    validate_run_state(state, path)
+    payload = json.dumps(state, indent=2, sort_keys=True) + "\n"
+    _atomic_write_text(controller_path, payload)
+    _atomic_write_text(path, payload)
+    _atomic_write_text(path.parent / "run-report.md", render_run_report(state))
 
 
 def _residual_lines(findings: Any) -> list[str]:
@@ -267,6 +352,8 @@ _PREFLIGHT_FIELDS = {"platform", "python", "python_version", "git", "tmux"}
 _POLICY_FIELDS = {"dirty_state", "approval_gated_slices", "max_repair_attempts", "commit_required"}
 _PLAN_FIELDS = {"slice_count", "parser", "sha256"}
 _WORKER_POLICY_FIELDS = {"sha256", "policy"}
+_LAUNCH_STRING_FIELDS = {"harness_command", "harness_model", "harness_effort", "worker_model", "worker_effort"}
+_LAUNCH_BOOLEAN_FIELDS = {"allow_profile_command", "allow_unattended_default"}
 _PAUSE_FIELDS = {"paused_until", "reason", "evidence_event_id"}
 _APPROVAL_FIELDS = {"approved_at", "reason", "approved_by"}
 _RUN_STATUSES = RUN_ACTIVE_STATUSES | RUN_STOP_STATUSES | {"complete"}
@@ -334,6 +421,18 @@ def _validate_worker_policy(value: Any, label: str, path: Path) -> None:
         raise McError(f"invalid schema-v2 run state at {path}: {label}.policy must be an object")
 
 
+def _validate_launch_config(value: Any, label: str, path: Path) -> None:
+    if not isinstance(value, dict):
+        raise McError(f"invalid schema-v2 run state at {path}: {label} must be an object")
+    for field in _LAUNCH_BOOLEAN_FIELDS:
+        if not isinstance(value.get(field), bool):
+            raise McError(f"invalid schema-v2 run state at {path}: {label}.{field} must be a boolean")
+    for field in _LAUNCH_STRING_FIELDS:
+        if value.get(field) is not None:
+            _require_string(value[field], f"{label}.{field}", path)
+    _require_string_list(value.get("worker_tools"), f"{label}.worker_tools", path)
+
+
 def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
     """Validate the one supported durable run-state shape without migration."""
     if not isinstance(state, dict):
@@ -367,6 +466,8 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
         value = harness["preflight"][field]
         if value is not None:
             _require_string(value, f"harness.preflight.{field}", path)
+    if harness.get("launch_config") is not None:
+        _validate_launch_config(harness["launch_config"], "harness.launch_config", path)
 
     policy = state["policy"]
     if not isinstance(policy, dict):
@@ -454,14 +555,7 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
         _validate_worker_policy(current["worker_policy"], "current_slice.worker_policy", path)
         launch_config = current.get("launch_config")
         if launch_config is not None:
-            if not isinstance(launch_config, dict):
-                raise McError(f"invalid schema-v2 run state at {path}: current_slice.launch_config must be an object")
-            for field in ("allow_profile_command", "allow_unattended_default"):
-                if not isinstance(launch_config.get(field), bool):
-                    raise McError(f"invalid schema-v2 run state at {path}: current_slice.launch_config.{field} must be a boolean")
-            for field in ("harness_command", "harness_model", "harness_effort"):
-                if launch_config.get(field) is not None:
-                    _require_string(launch_config[field], f"current_slice.launch_config.{field}", path)
+            _validate_launch_config(launch_config, "current_slice.launch_config", path)
         _require_integer(current["attempt"], "current_slice.attempt", path, minimum=1)
         for field in ("slice_id", "title", "artifact_dir", "tmux_session", "started_at"):
             _require_string(current[field], f"current_slice.{field}", path)

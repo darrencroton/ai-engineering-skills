@@ -34,7 +34,7 @@ from .git_ops import (
     resolve_plan,
     resolve_repo,
 )
-from .models import GateDecision, McError
+from .models import GateDecision, McError, PlanSlice
 from .observation import (
     _current_adapter,
     _raise_on_hard_stop_hints,
@@ -56,6 +56,7 @@ from .plan import (
 )
 from .profiles import (
     current_allow_unattended_default,
+    effective_run_launch_args,
     harness_supports_role,
     parse_worker_tools,
     profile_command,
@@ -64,6 +65,7 @@ from .profiles import (
     resolve_harness_command,
 )
 from .runtime import (
+    cancel_run_workers,
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
     environment_preflight,
@@ -88,6 +90,7 @@ from .state import (
     default_repair_state,
     idle_status_after_pass,
     load_run,
+    load_controller_run,
     normalize_stop_status,
     operational_events_file,
     relative_artifact_path,
@@ -699,19 +702,57 @@ def finalize_slice(args: argparse.Namespace) -> int:
     return 0 if result.get("status") in {"pass", "repairable"} else 2
 
 
+def _emergency_halt_without_state(repo: Path, run_dir: Path, args: argparse.Namespace, load_error: str) -> int:
+    """Last-resort stop that requires neither valid JSON nor a plan."""
+    evidence_dir = run_dir / "emergency-stop"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    adapter = TmuxHarnessAdapter("unknown", "true")
+    sessions = adapter.sessions_with_prefix(f"mc_{run_dir.name}_")
+    session_evidence: list[dict[str, str]] = []
+    for session_name in sessions:
+        capture_path = evidence_dir / f"{session_name}-pane.txt"
+        adapter.capture(session_name, capture_path)
+        adapter.request_stop(session_name)
+        adapter.force_stop(session_name)
+        session_evidence.append({"session": session_name, "capture": str(capture_path)})
+    worker_results = cancel_run_workers(run_dir)
+    record = {
+        "stopped": True,
+        "state_updated": False,
+        "status": args.status,
+        "reason": args.reason,
+        "state_error": load_error,
+        "sessions": session_evidence,
+        "worker_runs": worker_results,
+        "stopped_at": utc_now(),
+    }
+    record_path = evidence_dir / "emergency-stop.json"
+    record_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    _json_print({**record, "evidence_path": str(record_path)})
+    return 0
+
+
 def stop_with_evidence(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
-    state = load_run(run_dir)
+    recovery_error: str | None = None
+    tamper_evidence_path: str | None = None
+    try:
+        state = load_run(run_dir)
+    except McError as exc:
+        recovery_error = str(exc)
+        public_state = run_dir / "run.json"
+        if public_state.exists():
+            evidence_copy = run_dir / f"run.json.tampered-{utc_now().replace(':', '').replace('-', '')}"
+            shutil.copy2(public_state, evidence_copy)
+            tamper_evidence_path = str(evidence_copy)
+        try:
+            state = load_controller_run(run_dir)
+        except McError as controller_exc:
+            return _emergency_halt_without_state(repo, run_dir, args, f"{exc}; {controller_exc}")
     current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
     if not current:
         raise McError("run has no current slice")
-    # Same digest discipline as every other runtime path: the terminal slice
-    # entry below is rendered from the parsed plan, so it must never be built
-    # from a plan edited mid-run. The plain `stop` command (which reads no plan
-    # content) remains the escape hatch for cancelling such a run.
-    plan = resolve_plan(Path(state["plan_path"]))
-    verify_plan_unchanged(state, plan)
     artifact_dir = _slice_artifact_dir(repo, current)
     attempt = int(current.get("attempt") or 1)
     session_name = str(current.get("tmux_session") or "")
@@ -734,6 +775,7 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
     adapter.request_stop(session_name)
     time.sleep(0.5)
     adapter.force_stop(session_name)
+    cancel_run_workers(run_dir)
     append_operational_event(
         repo,
         state,
@@ -744,11 +786,23 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
             "attempt": attempt,
             "reason": args.reason,
             "evidence_path": relative_artifact_path(repo, artifact_dir / "pane-capture.txt"),
+            "controller_state_recovered": recovery_error is not None,
+            "tamper_evidence_path": tamper_evidence_path,
         },
     )
-    plan_slice = plan_slice_by_id(parse_plan(plan), str(current.get("slice_id") or ""))
+    try:
+        plan = resolve_plan(Path(state["plan_path"]))
+        verify_plan_unchanged(state, plan)
+        plan_slice = plan_slice_by_id(parse_plan(plan), str(current.get("slice_id") or ""))
+    except McError:
+        plan_slice = None
     if plan_slice is None:
-        raise McError(f"current slice is not present in plan: {current.get('slice_id')}")
+        slice_id = str(current.get("slice_id") or "Slice 0")
+        try:
+            number = int(slice_id.rsplit(" ", 1)[-1])
+        except ValueError:
+            number = 0
+        plan_slice = PlanSlice(number, str(current.get("title") or "Emergency stop"), "", {})
     changed_files = tuple(
         sorted(changed_files_between(repo, str(current.get("before_head") or "") or None, after_head, after_status))
     )
@@ -775,7 +829,16 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
         )
     )
     update_state_for_stop(run_dir / "run.json", state, args.status, args.reason)
-    _json_print({"stopped": True, "status": args.status, "reason": args.reason, "artifact_dir": relative_artifact_path(repo, artifact_dir)})
+    _json_print(
+        {
+            "stopped": True,
+            "status": args.status,
+            "reason": args.reason,
+            "artifact_dir": relative_artifact_path(repo, artifact_dir),
+            "controller_state_recovered": recovery_error is not None,
+            "tamper_evidence_path": tamper_evidence_path,
+        }
+    )
     return 0
 
 
@@ -911,7 +974,14 @@ def reconcile(args: argparse.Namespace) -> int:
 def stop(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
-    state = load_run(run_dir)
+    try:
+        state = load_run(run_dir)
+    except McError as exc:
+        try:
+            state = load_controller_run(run_dir)
+        except McError as controller_exc:
+            emergency_args = argparse.Namespace(**vars(args), status="cancelled")
+            return _emergency_halt_without_state(repo, run_dir, emergency_args, f"{exc}; {controller_exc}")
     current = state.get("current_slice") or {}
     session_name = current.get("tmux_session")
     if session_name:
@@ -923,6 +993,7 @@ def stop(args: argparse.Namespace) -> int:
         adapter.request_stop(str(session_name))
         time.sleep(0.5)
         adapter.force_stop(str(session_name))
+    cancel_run_workers(run_dir)
     update_state_for_stop(run_dir / "run.json", state, "cancelled", args.reason)
     print(f"Run cancelled: {args.reason}")
     return 0
@@ -953,6 +1024,7 @@ def preflight(args: argparse.Namespace) -> int:
     repo = resolve_repo(Path(args.repo))
     run_dir = resolve_run_dir(repo, args.run)
     state = load_run(run_dir)
+    args = effective_run_launch_args(args, state)
     errors: list[str] = []
 
     def check(label: str, ok: bool, detail: str = "") -> None:

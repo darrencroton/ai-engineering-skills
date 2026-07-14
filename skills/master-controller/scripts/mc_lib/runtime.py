@@ -16,6 +16,7 @@ from typing import Any
 from .constants import REQUIRED_AUDIT_SKILLS, SENSITIVE_ARTIFACT_NAMES, WORKER_CREDENTIAL_HOMES
 from .git_ops import meaningful_status_lines, normalize_authorized_entry, unauthorized_files
 from .models import GateDecision, McError, PlanSlice
+from .process import run_command
 
 
 _WORKER_JOBS_MODULE: Any = None
@@ -565,11 +566,11 @@ def slice_environment(
     orchestrator_harness_name: str = "",
     worker_tools: tuple[str, ...] = (),
 ) -> dict[str, str]:
+    del run_json  # Controller state is intentionally not exposed to the harness.
     paths = slice_paths(slice_artifact_dir)
     env = {
         "AI_ORCHESTRATOR_ARTIFACT_ROOT": str(paths["worker_artifact_root"]),
         "MC_RESULT_SCHEMA_PATH": str(result_schema_path()),
-        "MC_RUN_JSON_PATH": str(run_json),
         "MC_PLAN_PATH": str(plan_path),
         "MC_SLICE_ARTIFACT_DIR": str(slice_artifact_dir),
         "MC_SLICE_ID": plan_slice.slice_id,
@@ -643,6 +644,7 @@ def render_orchestrator_prompt(
     worker_model: str | None = None,
     worker_effort: str | None = None,
 ) -> str:
+    del run_json  # The rendered prompt must not disclose controller state.
     template = load_prompt_template()
     paths = slice_paths(slice_artifact_dir)
     example_tool = worker_tools[0] if len(worker_tools) == 1 else "<one required tool; create one request per tool>"
@@ -666,7 +668,6 @@ def render_orchestrator_prompt(
     }
     values = {
         "plan_path": state["plan_path"],
-        "run_json_path": str(run_json),
         "slice_artifact_dir": str(slice_artifact_dir),
         "result_schema_path": str(result_schema_path()),
         "worker_jobs_path": str(worker_jobs_path()),
@@ -887,6 +888,47 @@ def capture_worker_runs_summary(slice_artifact_dir: Path) -> None:
     if not runs:
         return
     (slice_artifact_dir / "worker-runs-summary.json").write_text(json.dumps({"runs": runs}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def cancel_worker_runs(slice_artifact_dir: Path) -> list[dict[str, Any]]:
+    """Idempotently stop every helper-tracked worker for a terminal slice."""
+    worker_root = slice_artifact_dir / "worker-runs"
+    results: list[dict[str, Any]] = []
+    if not worker_root.exists():
+        return results
+    for run_dir in sorted(path for path in worker_root.iterdir() if path.is_dir() and not path.is_symlink()):
+        if not (run_dir / "manifest.json").is_file():
+            continue
+        result = run_command(
+            [sys.executable, str(worker_jobs_path()), "cancel", "--run-dir", str(run_dir), "--json"],
+            allow_failure=True,
+        )
+        results.append(
+            {
+                "run_dir": str(run_dir),
+                "returncode": result.returncode,
+                "stdout": result.stdout.strip(),
+                "stderr": result.stderr.strip(),
+            }
+        )
+    if results:
+        (slice_artifact_dir / "worker-cancel-summary.json").write_text(
+            json.dumps({"runs": results}, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    return results
+
+
+def cancel_run_workers(run_dir: Path) -> list[dict[str, Any]]:
+    """Cancel tracked workers across every slice, including stale prior slices."""
+    results: list[dict[str, Any]] = []
+    slices_dir = run_dir / "slices"
+    if not slices_dir.exists():
+        return results
+    for artifact_dir in sorted(path for path in slices_dir.glob("slice-*") if path.is_dir() and not path.is_symlink()):
+        results.extend(cancel_worker_runs(artifact_dir))
+        capture_worker_runs_summary(artifact_dir)
+    return results
 
 
 def worker_delegation_overview(slice_artifact_dir: Path) -> list[dict[str, Any]]:

@@ -26,6 +26,9 @@ class PromptRenderingTests(McTestCase):
         self.assertIn("Master Controller Slice Delegation Contract", prompt)
         self.assertIn("worker-evidence.md", prompt)
         self.assertIn("Available worker tool(s) for this run: none available for this run", prompt)
+        self.assertNotIn(str(run_json), prompt)
+        self.assertIn("Controller state is not an orchestrator input", prompt)
+        self.assertNotIn("ai-mc-control", prompt)
 
     def test_prompt_rendering_states_available_worker_tools_for_delegation(self):
         state = self.init_run()

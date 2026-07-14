@@ -15,12 +15,14 @@ from .observation import _current_adapter, _slice_artifact_dir, wait_observing
 from .plan import eligibility
 from .profiles import (
     current_allow_unattended_default,
+    freeze_run_launch_config,
     parse_worker_tools,
     query_profile_model_identity,
     resolve_current_harness_command,
     resolve_harness_command,
 )
 from .runtime import (
+    cancel_run_workers,
     capture_orchestrator_transcript,
     capture_worker_runs_summary,
     ensure_slice_runtime_dirs,
@@ -33,6 +35,7 @@ from .runtime import (
     worker_policy_snapshot,
 )
 from .state import (
+    activate_controller_state,
     append_operational_event,
     approved_slice_ids,
     current_slice_state,
@@ -239,23 +242,38 @@ def start_model_supervised_slice(
     if not _check_runtime_start_preconditions(repo, state, plan_slice, run_json):
         return {"started": False, "status": state.get("status"), "reason": state.get("stop_reason")}
 
+    args = freeze_run_launch_config(args, state)
     harness_name = state["harness"]["name"]
     configured_worker_tools = parse_worker_tools(getattr(args, "worker_tools", None))
     harness_model = getattr(args, "harness_model", None)
     harness_effort = getattr(args, "harness_effort", None)
-    harness_identity = None
+    checked_at = utc_now()
+    harness_identity: dict[str, Any] | None = None
     if harness_model:
         harness_identity = query_profile_model_identity(harness_name, harness_model)
         state.setdefault("harness", {})["model_requested"] = harness_model
         state["harness"]["model_identity"] = {
             **(harness_identity or {"requested": harness_model, "resolved_id": harness_model, "display_name": ""}),
             "catalog_verified": harness_identity is not None,
-            "checked_at": utc_now(),
+            "checked_at": checked_at,
+            "slice_id": plan_slice.slice_id,
+        }
+    else:
+        # Do not let a prior slice's verified model identity masquerade as
+        # current when this run intentionally uses an ambient default.
+        state.setdefault("harness", {}).pop("model_requested", None)
+        state["harness"]["model_identity"] = {
+            "requested": None,
+            "resolved_id": None,
+            "display_name": "",
+            "catalog_verified": False,
+            "checked_at": checked_at,
+            "slice_id": plan_slice.slice_id,
         }
     if harness_effort:
         state.setdefault("harness", {})["effort_requested"] = harness_effort
-    if harness_model or harness_effort:
-        write_run(run_json, state)
+    else:
+        state.setdefault("harness", {}).pop("effort_requested", None)
 
     slice_artifact_dir = run_dir / "slices" / slice_dir_name(plan_slice)
     credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_worker_tools, harness_name)
@@ -269,13 +287,26 @@ def start_model_supervised_slice(
         getattr(args, "worker_model", None),
         getattr(args, "worker_effort", None),
     )
-    worker_identities: dict[str, dict[str, str]] = {}
+    worker_identities: dict[str, dict[str, Any]] = {}
     worker_model = getattr(args, "worker_model", None)
-    if worker_model:
-        for tool in configured_worker_tools:
+    for tool in configured_worker_tools:
+        if worker_model:
             identity = query_profile_model_identity(tool, worker_model)
-            if identity is not None:
-                worker_identities[tool] = identity
+            worker_identities[tool] = {
+                **(identity or {"requested": worker_model, "resolved_id": worker_model, "display_name": ""}),
+                "catalog_verified": identity is not None,
+                "checked_at": checked_at,
+                "slice_id": plan_slice.slice_id,
+            }
+        else:
+            worker_identities[tool] = {
+                "requested": None,
+                "resolved_id": None,
+                "display_name": "",
+                "catalog_verified": False,
+                "checked_at": checked_at,
+                "slice_id": plan_slice.slice_id,
+            }
     (slice_artifact_dir / "model-identities.json").write_text(
         json.dumps(
             {
@@ -354,6 +385,9 @@ def start_model_supervised_slice(
             "harness_command": getattr(args, "harness_command", None),
             "harness_model": getattr(args, "harness_model", None),
             "harness_effort": getattr(args, "harness_effort", None),
+            "worker_tools": list(configured_worker_tools),
+            "worker_model": getattr(args, "worker_model", None),
+            "worker_effort": getattr(args, "worker_effort", None),
             "allow_profile_command": bool(getattr(args, "allow_profile_command", False)),
             "allow_unattended_default": bool(getattr(args, "allow_unattended_default", False)),
         },
@@ -361,7 +395,7 @@ def start_model_supervised_slice(
     state.setdefault("supervision", {})["mode"] = supervision_mode
     reset_slice_pause_counters(state)
     state["stop_reason"] = None
-    write_run(run_json, state)
+    activate_controller_state(run_json, state)
 
     try:
         result_path = slice_artifact_dir / "orchestrator-result.json"
@@ -423,6 +457,7 @@ def _finalize_terminal(
     writes the pass/stop state.
     """
     adapter.force_stop(session_name)
+    cancel_run_workers(run_json.parent)
     entry = slice_entry_from_gate(
         repo,
         plan_slice,

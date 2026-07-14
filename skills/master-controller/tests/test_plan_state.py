@@ -4,6 +4,45 @@ from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harne
 
 
 class PlanStateTests(McTestCase):
+    def test_controller_owned_state_detects_worktree_mirror_tampering(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        mc.activate_controller_state(run_json, state)
+        tampered = json.loads(run_json.read_text(encoding="utf-8"))
+        tampered["status"] = "complete"
+        run_json.write_text(json.dumps(tampered), encoding="utf-8")
+
+        with self.assertRaisesRegex(mc.McError, "mirror differs from controller-owned state"):
+            mc.load_run(run_json)
+        recovered = mc.load_controller_run(run_json)
+        self.assertEqual(recovered["status"], "initialized")
+
+    def test_active_run_fails_closed_when_controller_state_is_deleted(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_json = (self.repo / ".ai-mc" / "current").resolve() / "run.json"
+        args = argparse.Namespace(
+            harness_command=None,
+            harness_model=None,
+            harness_effort=None,
+            worker_tools="",
+            worker_model=None,
+            worker_effort=None,
+            allow_profile_command=False,
+            allow_unattended_default=False,
+        )
+        mc.freeze_run_launch_config(args, state)
+        mc.activate_controller_state(run_json, state)
+        controller_path = mc.controller_state_path(run_json)
+        self.assertIsNotNone(controller_path)
+        controller_path.unlink()
+
+        with self.assertRaisesRegex(mc.McError, "controller-owned run state is missing"):
+            mc.load_run(run_json)
+        with self.assertRaisesRegex(mc.McError, "controller-owned run state is missing"):
+            mc.write_run(run_json, state)
+
     def test_load_run_backfills_additive_idle_supervision_defaults_for_schema_v2(self):
         self.prepare_committed_repo()
         state = self.init_run()

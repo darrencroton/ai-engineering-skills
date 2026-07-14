@@ -217,6 +217,8 @@ def worker_evidence_failure(
     required_audits = set(REQUIRED_AUDIT_SKILLS)
     contracted_audits: set[str] = set()
     successful_audits: set[str] = set()
+    audit_records: dict[str, list[tuple[str | None, int, str | None]]] = {skill: [] for skill in required_audits}
+    audit_sequence = 0
     for run in runs:
         if not isinstance(run, dict):
             continue
@@ -302,7 +304,14 @@ def worker_evidence_failure(
                 label = str(status.get("label", ""))
                 successful_tools.add(tool_by_label[label])
                 if label in audit_by_label:
-                    successful_audits.add(audit_by_label[label])
+                    audit = audit_by_label[label]
+                    skill_verdicts = status.get("skill_verdicts") if isinstance(status.get("skill_verdicts"), dict) else {}
+                    verdict = skill_verdicts.get(audit)
+                    normalized_verdict = str(verdict).upper() if isinstance(verdict, str) else None
+                    finished_at = status.get("finished_at")
+                    normalized_finished_at = finished_at if isinstance(finished_at, str) and finished_at else None
+                    audit_sequence += 1
+                    audit_records[audit].append((normalized_finished_at, audit_sequence, normalized_verdict))
     if not any_worker:
         return (
             f"required worker tool(s) ({tools_label}) were never launched: a worker_jobs.py run directory was "
@@ -339,12 +348,25 @@ def worker_evidence_failure(
             + ". Launch one read-only request with required_skills ['drift-audit'], wait for and read its PASS verdict, "
             "then launch a separate read-only request with required_skills ['code-review']; one generic worker run does not prove both audits"
         )
+    latest_audit_verdicts: dict[str, str | None] = {}
+    for audit, records in audit_records.items():
+        if not records or any(finished_at is None for finished_at, _, _ in records):
+            latest_audit_verdicts[audit] = None
+            continue
+        latest_audit_verdicts[audit] = max(records, key=lambda record: (record[0], record[1]))[2]
+        if latest_audit_verdicts[audit] == "PASS":
+            successful_audits.add(audit)
     missing_audit_success = sorted(required_audits - successful_audits)
     if missing_audit_success:
+        details = ", ".join(
+            f"{audit}={latest_audit_verdicts.get(audit) or 'missing'}"
+            for audit in missing_audit_success
+        )
         return (
-            "opt-in independent audit launch(es) did not complete successfully for: "
-            + ", ".join(missing_audit_success)
-            + ". Each distinct audit worker must finish with state 'completed' and returncode 0"
+            "opt-in independent audit worker verdict is not PASS for: "
+            + details
+            + ". Each distinct audit worker must complete successfully and emit its helper-recorded "
+            "MC_AUDIT_VERDICT: PASS; fix and re-run the audit or stop for human judgment"
         )
     return None
 

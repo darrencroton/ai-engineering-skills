@@ -1,6 +1,6 @@
 # Run State Schema
 
-MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target repository. The schema is intentionally explicit so a stopped run can be audited or resumed without reading chat history. MC supports only the complete current schema and performs no migration or compatibility backfill; an older or incomplete run must be archived and reinitialized.
+MC writes an auditable JSON state mirror under `.ai-mc/runs/<run-id>/run.json` in the target repository. Immediately before the first harness launch it creates an undisclosed controller-owned copy outside the worktree; linked worktrees resolve their external Git directory correctly. Harness prompts and environments receive neither control-state path. While the protected copy exists, normal reads require the mirror and controller copy to match exactly. This detects and recovers from accidental or model-driven worktree corruption, but it is not an OS security boundary against a same-user unsandboxed process that deliberately searches and rewrites arbitrary filesystem locations. The schema is intentionally explicit so a stopped run can be audited or resumed without reading chat history. MC supports only the complete current schema and performs no migration or compatibility backfill; an older or incomplete run must be archived and reinitialized.
 
 ## `run.json`
 
@@ -18,6 +18,16 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
   "harness": {
     "name": "codex",
     "adapter": null,
+    "launch_config": {
+      "harness_command": null,
+      "harness_model": "gpt-5.4",
+      "harness_effort": "high",
+      "worker_tools": ["claude"],
+      "worker_model": "sonnet",
+      "worker_effort": "high",
+      "allow_profile_command": true,
+      "allow_unattended_default": false
+    },
     "preflight": {
       "platform": "macOS-15.5-arm64-arm-64bit",
       "git": "/usr/bin/git",
@@ -50,6 +60,16 @@ MC writes durable JSON state under `.ai-mc/runs/<run-id>/run.json` in the target
     "worker_policy": {
       "sha256": "<digest of the exact MC-generated worker-policy.json>",
       "policy": {"<normalized policy object>": "<stored before orchestrator launch>"}
+    },
+    "launch_config": {
+      "harness_command": null,
+      "harness_model": "gpt-5.4",
+      "harness_effort": "high",
+      "worker_tools": ["claude"],
+      "worker_model": "sonnet",
+      "worker_effort": "high",
+      "allow_profile_command": true,
+      "allow_unattended_default": false
     },
     "repair": {
       "round": 0,
@@ -115,6 +135,10 @@ Allowed run `status` values:
 - `cancelled`
 
 ## Run Integrity
+
+- The first live slice freezes `harness.launch_config` for the whole run. Omitted flags on later `start-slice`, `wait`, or `finalize-slice` invocations inherit that exact harness command/model/effort, worker tools/model/effort, and launch-policy configuration. Supplying a conflicting value fails closed and requires a new run. Boolean launch-policy options are affirmative `store_true` flags: omission inherits a frozen `true`, while an affirmative flag conflicts with a frozen `false`. `current_slice.launch_config` snapshots the same complete contract for repair relaunches.
+- Every slice launch replaces `harness.model_identity` with a fresh, slice-tagged check. Profiles with a queryable inventory (currently OpenCode) fail closed on inventory mismatch and verify the live display before prompt injection. Ambient-default or non-queryable profiles record `catalog_verified: false`; they never retain a prior slice's verified identity.
+- Once controller state is activated, `load_run` requires the Git-metadata copy to remain present and compares it with the worktree mirror; deletion, corruption, or mismatch fails closed. `stop-with-evidence` is deliberately independent of a valid mirror: it recovers from the controller copy, archives the tampered mirror, stops the harness and workers, and rewrites a consistent terminal state. If neither copy parses, it still scans the run namespace, stops matching processes, and writes `emergency-stop/emergency-stop.json` with `state_updated: false`.
 
 - `plan.sha256` freezes the plan file at init. Before each slice, MC re-hashes
   the plan and stops with an error if it changed, so a mid-run plan edit cannot
@@ -316,7 +340,7 @@ Runtime slices append entries to `slices`:
 
 Completed statuses for slice selection are `pass` and `assumed-complete` (the latter written only by `init --assume-complete` as an operator attestation). Any other status is not completed. Only an `assumed-complete` entry has null `before_head` and `artifact_dir` fields and omits runtime-only `worker_policy` and `slice_summary` evidence; every slice MC actually runs records those fields.
 
-Each slice artifact directory contains the rendered `prompt.md`, authoritative `worker-policy.json`, `model-identities.json`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe`, `wait`, or batch polling has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, MC-generated `slice-summary.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. When a configured profile can query model identity, `harness.model_identity` records the requested id, exact resolved id, inventory command, expected display name, whether catalog verification was available, and the check time; the per-slice identity artifact carries the orchestrator and queryable worker identities. `current_slice.launch_config` optionally persists the profile/custom-command, model, effort, and unattended-default choices so later `wait` and `finalize-slice` invocations can relaunch the same configuration even when those flags are omitted; older active slices without the field continue to use invocation flags. Repair rounds add `repair-prompt-repair-<n>.md` and archived `orchestrator-result-repair-<n>.json` evidence; a relaunched harness receives `fresh-session-prompt-repair-<n>.md`, which combines the frozen prompt, targeted repair, and the cumulative residual-findings ledger recovered from archived results. The run directory also contains an MC-generated `run-report.md`, refreshed with every run-state write, that groups repeated outcomes by slice, marks the final outcome authoritative, and aggregates authoritative gates, commits, blockers, next actions, and residual findings for both partial and complete runs. Worker run directories preserve the semantic request, copied policy, complete embedded skill prompt, normalized launch contract, resolved argv, enforced repository working directory, process status, stdout, stderr, and actionable rejection feedback when validation fails. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
+Each slice artifact directory contains the rendered `prompt.md`, authoritative `worker-policy.json`, `model-identities.json`, `activity-attempt-<n>.jsonl`, `pane-capture.txt`, `pane-capture-live-latest.txt` when live pane text was observed, `observation-latest.json` when `observe`, `wait`, or batch polling has run, `git-status-before.txt`, `git-status-after.txt`, `git-diff.patch`, `validation-summary.md`, `drift-audit.md`, `code-review.md`, MC-generated `slice-summary.md`, optional `worker-evidence.md`, optional `worker-runs-summary.json`, optional `worker-cancel-summary.json`, optional `mc-reconciliation.json` / `mc-reconciliation.md`, and `orchestrator-result.json` when the orchestrator reaches the structured result stage. `harness.model_identity` and the per-slice identity artifact record a fresh launch-scoped identity state, including `catalog_verified: false` when no positive inventory check exists. Repair rounds add `repair-prompt-repair-<n>.md` and archived `orchestrator-result-repair-<n>.json` evidence; a relaunched harness receives `fresh-session-prompt-repair-<n>.md`, which combines the frozen prompt, targeted repair, and the cumulative residual-findings ledger recovered from archived results. The run directory also contains an MC-generated `run-report.md`, refreshed with every run-state write, that groups repeated outcomes by slice, marks the final outcome authoritative, and aggregates authoritative gates, commits, blockers, next actions, and residual findings for both partial and complete runs. Worker run directories preserve the semantic request, copied policy, complete embedded skill prompt, normalized launch contract, resolved argv, enforced repository working directory, process status, stdout, stderr, helper-recorded audit verdicts, and actionable rejection feedback when validation fails. The latest chronologically completed verdict for each required audit is authoritative; a later non-PASS supersedes any earlier PASS. Terminal paths scan every slice's worker-run directory so stale prior-slice processes are also cancelled. Timeout and failure paths preserve whatever capture and git evidence is available. Each activity log line is a JSON object with `checked_at`, `running`, and `active` fields.
 
 Repair rounds add per-round artifacts keyed on the round number, so evidence from rounds sharing one session is never overwritten: `orchestrator-result-repair-<round>.json` (the failing result, archived before deletion so the re-poll waits for a genuinely new result), `pane-capture-repair-<round>.txt`, `git-status-repair-<round>.txt`, `repair-prompt-repair-<round>.md` (plus `repair-prompt.md` as the latest), `pane-capture-repair-refused-<round>.txt` when repair delivery was refused by a hard prompt on screen, and one `"kind": "repair"` operational event per round recording the signature and delivery mode (`in-session`, `fresh-session`, or `relaunch`).
 

@@ -668,9 +668,18 @@ class McTestCase(unittest.TestCase):
             json.dumps({"workers": workers}),
             encoding="utf-8",
         )
-        for audit_label in labels:
+        for audit_label, required_skill in labels.items():
             (worker_run / f"{audit_label}-status.json").write_text(
-                json.dumps({"label": audit_label, "state": state, "returncode": returncode}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "label": audit_label,
+                        "state": state,
+                        "returncode": returncode,
+                        "finished_at": "2026-01-01T00:00:00Z",
+                        "skill_verdicts": {required_skill: "PASS"},
+                    }
+                ),
+                encoding="utf-8",
             )
         mc.capture_worker_runs_summary(artifact)
 

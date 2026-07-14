@@ -519,6 +519,13 @@ RETURN:
 """
     if embedded:
         prompt += f"\nEMBEDDED SKILL INSTRUCTIONS:\n{embedded}\n"
+    if any(name in {"drift-audit", "code-review"} for name in skills):
+        prompt += (
+            "\nMACHINE-READABLE AUDIT VERDICT (required):\n"
+            "After the skill's normal report, end with exactly one final line in this form:\n"
+            "MC_AUDIT_VERDICT: PASS | PASS WITH RISKS | FAIL | BLOCKED\n"
+            "Use the verdict you actually reached; do not change it merely to satisfy the caller.\n"
+        )
     return prompt
 
 

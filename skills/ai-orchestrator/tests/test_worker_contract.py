@@ -5,6 +5,8 @@ import contextlib
 import io
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -348,6 +350,168 @@ class WorkerContractTests(unittest.TestCase):
             worker_jobs.start_tracked_worker(self.run_dir, "01-opencode-cwd-check", ["opencode", "run"], cwd=self.repo)
         wrapper = popen.call_args.args[0]
         self.assertEqual(Path(wrapper[wrapper.index("--cwd") + 1]), self.repo)
+
+    def test_audit_skill_prompt_requires_machine_readable_verdict(self):
+        self.request["required_skills"] = ["drift-audit"]
+        contract = worker_contract.validate_contract(self.policy, self.request, self.run_dir)
+
+        prompt = worker_contract.render_worker_prompt(contract)
+
+        self.assertIn("MC_AUDIT_VERDICT: PASS | PASS WITH RISKS | FAIL | BLOCKED", prompt)
+        self.assertTrue(prompt.rstrip().endswith("Use the verdict you actually reached; do not change it merely to satisfy the caller."))
+
+    def test_worker_helper_extracts_exactly_one_audit_verdict(self):
+        worker_jobs = load_worker_jobs()
+
+        self.assertEqual(
+            worker_jobs.audit_skill_verdicts(["code-review"], "report\nMC_AUDIT_VERDICT: PASS\n"),
+            {"code-review": "PASS"},
+        )
+        self.assertEqual(
+            worker_jobs.audit_skill_verdicts(["drift-audit"], "report without sentinel\n"),
+            {"drift-audit": None},
+        )
+
+    def test_force_cancel_does_not_signal_reused_child_pid(self):
+        worker_jobs = load_worker_jobs()
+        status_file = self.run_dir / "01-opencode-check-status.json"
+        status_file.write_text(
+            json.dumps(
+                {
+                    "label": "01-opencode-check",
+                    "state": "running",
+                    "child_pid": 4242,
+                    "child_identity": "original-start original-command",
+                }
+            ),
+            encoding="utf-8",
+        )
+        entry = {
+            "label": "01-opencode-check",
+            "pid": 3131,
+            "status_file": str(status_file),
+        }
+
+        with mock.patch.object(worker_jobs, "process_identity", return_value="reused-start unrelated-command"), mock.patch.object(
+            worker_jobs, "tracked_wrapper_running", return_value=False
+        ), mock.patch.object(worker_jobs.os, "killpg") as killpg:
+            worker_jobs.force_cancel_entry(entry)
+
+        killpg.assert_not_called()
+        self.assertEqual(
+            worker_jobs.audit_skill_verdicts(
+                ["drift-audit"],
+                "MC_AUDIT_VERDICT: FAIL\nMC_AUDIT_VERDICT: PASS\n",
+            ),
+            {"drift-audit": None},
+        )
+
+    def test_force_cancel_surfaces_permission_failure_without_claiming_cancelled(self):
+        worker_jobs = load_worker_jobs()
+        status_file = self.run_dir / "01-opencode-permission-status.json"
+        status_file.write_text(
+            json.dumps(
+                {
+                    "label": "01-opencode-permission",
+                    "state": "running",
+                    "child_pid": 4242,
+                    "child_identity": "original-start",
+                }
+            ),
+            encoding="utf-8",
+        )
+        entry = {"label": "01-opencode-permission", "pid": 3131, "status_file": str(status_file)}
+
+        with mock.patch.object(worker_jobs, "process_identity", return_value="original-start"), mock.patch.object(
+            worker_jobs.os, "getpgid", return_value=4242
+        ), mock.patch.object(worker_jobs.os, "killpg", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                worker_jobs.force_cancel_entry(entry)
+
+        status = json.loads(status_file.read_text(encoding="utf-8"))
+        self.assertEqual(status["state"], "running")
+
+    def test_cancel_terminates_identity_verified_orphan_child(self):
+        worker_jobs = load_worker_jobs()
+        worker_jobs.ensure_manifest(self.run_dir)
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        try:
+            status_file = self.run_dir / "01-opencode-orphan-child.status.json"
+            outfile = self.run_dir / "01-opencode-orphan-child.stdout.log"
+            errfile = self.run_dir / "01-opencode-orphan-child.stderr.log"
+            worker_jobs.write_json(
+                status_file,
+                {
+                    "label": "01-opencode-orphan-child",
+                    "state": "running",
+                    "child_pid": child.pid,
+                    "child_identity": worker_jobs.process_identity(child.pid),
+                },
+            )
+            manifest = worker_jobs.load_manifest(self.run_dir)
+            manifest["workers"]["01-opencode-orphan-child"] = {
+                "label": "01-opencode-orphan-child",
+                "pid": 99999999,
+                "status_file": str(status_file),
+                "outfile": str(outfile),
+                "errfile": str(errfile),
+            }
+            worker_jobs.save_manifest(self.run_dir, manifest)
+            args = mock.Mock(run_dir=str(self.run_dir), label=None, timeout=2.0, interval=0.05, json=True)
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(worker_jobs.command_cancel(args), 0)
+
+            child.wait(timeout=5)
+            self.assertEqual(child.returncode, -signal.SIGTERM)
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["state"], "cancelled")
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait(timeout=5)
+
+    def test_cancel_attempts_remaining_workers_after_one_permission_failure(self):
+        worker_jobs = load_worker_jobs()
+        worker_jobs.ensure_manifest(self.run_dir)
+        manifest = worker_jobs.load_manifest(self.run_dir)
+        for index in (1, 2):
+            label = f"0{index}-opencode-worker"
+            status_file = self.run_dir / f"{label}-status.json"
+            outfile = self.run_dir / f"{label}-out.txt"
+            errfile = self.run_dir / f"{label}-err.txt"
+            outfile.write_text("", encoding="utf-8")
+            errfile.write_text("", encoding="utf-8")
+            worker_jobs.write_json(status_file, {"label": label, "state": "running"})
+            manifest["workers"][label] = {
+                "label": label,
+                "pid": 9000 + index,
+                "status_file": str(status_file),
+                "outfile": str(outfile),
+                "errfile": str(errfile),
+            }
+        worker_jobs.save_manifest(self.run_dir, manifest)
+
+        def force(entry):
+            if entry["label"].startswith("01-"):
+                raise PermissionError("denied")
+            worker_jobs.mark_cancelled_entry(entry, forced=True, returncode=-signal.SIGKILL)
+
+        args = mock.Mock(run_dir=str(self.run_dir), label=None, timeout=0.0, interval=0.01, json=True)
+        with mock.patch.object(worker_jobs, "tracked_wrapper_running", return_value=False), mock.patch.object(
+            worker_jobs, "tracked_child_running", return_value=True
+        ), mock.patch.object(worker_jobs, "signal_tracked_child", return_value=True), mock.patch.object(
+            worker_jobs, "force_cancel_entry", side_effect=force
+        ) as force_cancel, contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(worker_jobs.WorkerJobsError, "01-opencode-worker"):
+                worker_jobs.command_cancel(args)
+
+        self.assertEqual(force_cancel.call_count, 2)
+        second_status = json.loads((self.run_dir / "02-opencode-worker-status.json").read_text(encoding="utf-8"))
+        self.assertEqual(second_status["state"], "cancelled")
 
 
 if __name__ == "__main__":

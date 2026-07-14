@@ -12,10 +12,94 @@ from .models import McError
 from .process import run_command
 
 
+_RUN_LAUNCH_STRING_FIELDS = (
+    "harness_command",
+    "harness_model",
+    "harness_effort",
+    "worker_model",
+    "worker_effort",
+)
+_RUN_LAUNCH_BOOLEAN_FIELDS = ("allow_profile_command", "allow_unattended_default")
+
+
 def parse_worker_tools(value: str | None) -> tuple[str, ...]:
     if not value:
         return ()
     return tuple(tool.strip().lower() for tool in value.split(",") if tool.strip())
+
+
+def _launch_config_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        **{field: getattr(args, field, None) for field in _RUN_LAUNCH_STRING_FIELDS},
+        "worker_tools": list(parse_worker_tools(getattr(args, "worker_tools", None))),
+        **{field: bool(getattr(args, field, False)) for field in _RUN_LAUNCH_BOOLEAN_FIELDS},
+    }
+
+
+def _validated_run_launch_config(state: dict[str, Any]) -> dict[str, Any] | None:
+    harness = state.get("harness") if isinstance(state.get("harness"), dict) else {}
+    config = harness.get("launch_config")
+    if config is None:
+        return None
+    if not isinstance(config, dict):
+        raise McError("run-level harness.launch_config is malformed")
+    for field in _RUN_LAUNCH_STRING_FIELDS:
+        value = config.get(field)
+        if value is not None and (not isinstance(value, str) or not value):
+            raise McError(f"run-level harness.launch_config.{field} must be null or a non-empty string")
+    worker_tools = config.get("worker_tools")
+    if not isinstance(worker_tools, list) or not all(isinstance(tool, str) and tool for tool in worker_tools):
+        raise McError("run-level harness.launch_config.worker_tools must be a list of non-empty strings")
+    for field in _RUN_LAUNCH_BOOLEAN_FIELDS:
+        if not isinstance(config.get(field), bool):
+            raise McError(f"run-level harness.launch_config.{field} must be a boolean")
+    return config
+
+
+def effective_run_launch_args(args: argparse.Namespace, state: dict[str, Any]) -> argparse.Namespace:
+    """Apply the immutable run-level launch contract to one CLI invocation.
+
+    Omitted flags inherit the first slice's configuration. Supplying a
+    different value is a reconfiguration attempt and fails closed; model/tool
+    changes require a new run so every slice has one auditable identity.
+    """
+    persisted = _validated_run_launch_config(state)
+    if persisted is None:
+        return args
+    values = dict(vars(args))
+    for field in _RUN_LAUNCH_STRING_FIELDS:
+        supplied = values.get(field)
+        expected = persisted.get(field)
+        if supplied is not None and supplied != expected:
+            raise McError(
+                f"{field.replace('_', '-')} differs from the frozen run launch configuration; initialize a new run to reconfigure models or commands"
+            )
+        values[field] = expected
+    supplied_tools = parse_worker_tools(values.get("worker_tools"))
+    expected_tools = tuple(str(tool) for tool in persisted.get("worker_tools", ()))
+    if supplied_tools and supplied_tools != expected_tools:
+        raise McError(
+            "worker-tools differs from the frozen run launch configuration; initialize a new run to reconfigure workers"
+        )
+    values["worker_tools"] = ",".join(expected_tools)
+    for field in _RUN_LAUNCH_BOOLEAN_FIELDS:
+        supplied = bool(values.get(field))
+        expected = bool(persisted.get(field))
+        if supplied and not expected:
+            raise McError(
+                f"{field.replace('_', '-')} differs from the frozen run launch configuration; initialize a new run to reconfigure launch policy"
+            )
+        values[field] = expected
+    return argparse.Namespace(**values)
+
+
+def freeze_run_launch_config(args: argparse.Namespace, state: dict[str, Any]) -> argparse.Namespace:
+    """Freeze the first slice's complete launch configuration for the run."""
+    persisted = _validated_run_launch_config(state)
+    if persisted is None:
+        state.setdefault("harness", {})["launch_config"] = _launch_config_from_args(args)
+        return args
+    return effective_run_launch_args(args, state)
 
 
 def harness_supports_role(harness_name: str, role: str) -> bool:
@@ -162,12 +246,14 @@ def resolve_harness_command(
 
 def effective_launch_args(args: argparse.Namespace, state: dict[str, Any]) -> argparse.Namespace:
     """Fill omitted per-invocation launch flags from the active slice snapshot."""
-    values = dict(vars(args))
+    values = dict(vars(effective_run_launch_args(args, state)))
     current = state.get("current_slice") if isinstance(state.get("current_slice"), dict) else None
     persisted = current.get("launch_config") if current and isinstance(current.get("launch_config"), dict) else {}
-    for field in ("harness_command", "harness_model", "harness_effort"):
+    for field in _RUN_LAUNCH_STRING_FIELDS:
         if not values.get(field) and persisted.get(field):
             values[field] = persisted[field]
+    if not parse_worker_tools(values.get("worker_tools")) and persisted.get("worker_tools"):
+        values["worker_tools"] = ",".join(str(tool) for tool in persisted["worker_tools"])
     for field in ("allow_profile_command", "allow_unattended_default"):
         if not values.get(field) and persisted.get(field):
             values[field] = True

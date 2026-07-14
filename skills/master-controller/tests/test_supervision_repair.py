@@ -1,9 +1,52 @@
 """Model-supervised primitives and repair/circuit-breaker state tests."""
 
+import time
+
 from mc_test_helpers import *  # noqa: F401,F403 — shared fixtures, fake harnesses, and the mc module
 
 
 class SupervisionRepairTests(McTestCase):
+    def test_cancel_run_workers_scans_current_and_prior_slice_artifacts(self):
+        run_dir = self.repo / ".ai-mc" / "runs" / "test"
+        first = run_dir / "slices" / "slice-001"
+        second = run_dir / "slices" / "slice-002"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+
+        with mock.patch.object(mc_runtime, "cancel_worker_runs", side_effect=[[{"slice": 1}], [{"slice": 2}]]) as cancel, mock.patch.object(
+            mc_runtime, "capture_worker_runs_summary"
+        ) as capture:
+            results = mc.cancel_run_workers(run_dir)
+
+        self.assertEqual(results, [{"slice": 1}, {"slice": 2}])
+        self.assertEqual(cancel.call_args_list, [mock.call(first), mock.call(second)])
+        self.assertEqual(capture.call_args_list, [mock.call(first), mock.call(second)])
+
+    def test_cancel_worker_runs_terminates_tracked_wrapper_and_child_group(self):
+        artifact = self.repo / ".ai-mc" / "runs" / "test" / "slices" / "slice-001"
+        run_dir = artifact / "worker-runs" / "workers-test"
+        run_dir.mkdir(parents=True)
+        worker_jobs = mc.worker_jobs_module()
+        worker_jobs.ensure_manifest(run_dir)
+        launched = worker_jobs.start_tracked_worker(
+            run_dir,
+            "01-python-long-worker",
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            cwd=self.repo,
+        )
+        status_path = Path(launched["status_file"])
+        deadline = time.time() + 5
+        while not status_path.exists() and time.time() < deadline:
+            time.sleep(0.05)
+
+        results = mc.cancel_worker_runs(artifact)
+
+        self.assertEqual(results[0]["returncode"], 0, results)
+        status = json.loads(status_path.read_text(encoding="utf-8"))
+        self.assertEqual(status["state"], "cancelled")
+        worker_jobs._LIBRARY_WRAPPERS.pop(int(launched["pid"])).wait(timeout=5)
+        self.assertFalse(worker_jobs.process_running(int(launched["pid"])))
+
     def test_idle_stall_signature_uses_shared_repair_escalation(self):
         repair = mc_state.default_repair_state()
         gate = mc.GateDecision("repairable", "idle", signature="idle-no-progress")
@@ -518,7 +561,100 @@ class SupervisionRepairTests(McTestCase):
         self.assertEqual(stopped["slices"][0]["changed_files"], ["README.md"])
         self.assertEqual(stopped["slices"][0]["gate_reason"], "worker contract violation")
 
-    def test_stop_with_evidence_rejects_plan_changed_mid_run(self):
+    def test_stop_with_evidence_recovers_from_corrupted_worktree_state(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        plan_slice = mc.parse_plan(self.plan)[0]
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        state["status"] = "running"
+        state["current_slice"] = mc.current_slice_state(
+            self.repo.resolve(),
+            plan_slice,
+            artifact,
+            "mc_test_slice-001_a1",
+            1,
+            mc.utc_now(),
+            git(self.repo, "rev-parse", "HEAD"),
+            worker_policy={"sha256": "a" * 64, "policy": {}},
+        )
+        mc.activate_controller_state(run_dir / "run.json", state)
+        (run_dir / "run.json").write_text("{corrupted", encoding="utf-8")
+        fake_adapter = mock.Mock()
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            reason="controller integrity breach",
+            status="needs-human",
+            harness_command="python fake.py",
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+            harness_effort=None,
+            worker_model=None,
+            worker_effort=None,
+        )
+        output = io.StringIO()
+
+        with mock.patch.object(mc_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(output):
+            self.assertEqual(mc.stop_with_evidence(args), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["controller_state_recovered"])
+        self.assertTrue(Path(result["tamper_evidence_path"]).is_file())
+        stopped = mc.load_run(run_dir)
+        self.assertEqual(stopped["status"], "needs-human")
+        self.assertIsNone(stopped["current_slice"])
+        fake_adapter.force_stop.assert_called_once_with("mc_test_slice-001_a1")
+
+    def test_stop_with_evidence_halts_when_both_state_copies_are_unreadable(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-mc" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        mc.activate_controller_state(run_dir / "run.json", state)
+        (run_dir / "run.json").write_text("{broken mirror", encoding="utf-8")
+        controller_path = mc.controller_state_path(run_dir)
+        self.assertIsNotNone(controller_path)
+        controller_path.write_text("{broken controller", encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.sessions_with_prefix.return_value = ["mc_test_slice-001_a1"]
+
+        def fake_capture(session_name, destination):
+            destination.write_text(f"captured {session_name}\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        args = argparse.Namespace(
+            repo=str(self.repo),
+            run="current",
+            reason="unreadable state",
+            status="needs-human",
+            harness_command=None,
+            worker_tools="",
+            allow_profile_command=False,
+            allow_unattended_default=False,
+            harness_model=None,
+            harness_effort=None,
+            worker_model=None,
+            worker_effort=None,
+        )
+        output = io.StringIO()
+
+        with mock.patch.object(mc_commands, "TmuxHarnessAdapter", return_value=fake_adapter), mock.patch.object(
+            mc_commands, "cancel_run_workers", return_value=[]
+        ) as cancel_workers, contextlib.redirect_stdout(output):
+            self.assertEqual(mc.stop_with_evidence(args), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertFalse(result["state_updated"])
+        self.assertTrue(Path(result["evidence_path"]).is_file())
+        fake_adapter.force_stop.assert_called_once_with("mc_test_slice-001_a1")
+        cancel_workers.assert_called_once_with(run_dir)
+
+    def test_stop_with_evidence_halts_even_when_plan_changed_mid_run(self):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-mc" / "current").resolve()
@@ -551,12 +687,13 @@ class SupervisionRepairTests(McTestCase):
             harness_model=None,
         )
 
-        with (
-            mock.patch.object(mc_commands, "_current_adapter") as current_adapter,
-            self.assertRaisesRegex(mc.McError, "plan file changed"),
-        ):
-            mc.stop_with_evidence(args)
-        current_adapter.assert_not_called()
+        fake_adapter = mock.Mock()
+        with mock.patch.object(mc_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(mc.stop_with_evidence(args), 0)
+        fake_adapter.force_stop.assert_called_once_with("mc_test_slice-001_a1")
+        stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(stopped["status"], "needs-human")
+        self.assertIsNone(stopped["current_slice"])
 
     def test_finalize_enforces_worker_evidence_from_persisted_state(self):
         # finalize-slice is a separate invocation that may not re-supply

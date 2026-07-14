@@ -15,6 +15,7 @@ class HarnessAdapterProfileTests(McTestCase):
         self.assertNotIn("COPILOT_HOME=", command)
         self.assertNotIn("CODEX_HOME=", command)
         self.assertIn("MC_RESULT_SCHEMA_PATH=", command)
+        self.assertNotIn("MC_RUN_JSON_PATH=", command)
         self.assertIn("MC_SLICE_ARTIFACT_DIR=/tmp/artifacts", command)
         self.assertIn("MC_SLICE_ID='Slice 1'", command)
         self.assertIn("MC_SLICE_TMP_DIR=/tmp/artifacts/tmp", command)
@@ -94,6 +95,60 @@ class HarnessAdapterProfileTests(McTestCase):
         self.assertTrue(effective.allow_profile_command)
         self.assertEqual(effective.harness_model, "persisted-model")
         self.assertEqual(effective.harness_effort, "high")
+
+    def test_run_launch_configuration_persists_harness_and_worker_identity_across_slices(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        first = argparse.Namespace(
+            harness_command=None,
+            harness_model="provider/orchestrator",
+            harness_effort="high",
+            worker_tools="claude",
+            worker_model="sonnet",
+            worker_effort="high",
+            allow_profile_command=True,
+            allow_unattended_default=False,
+        )
+        mc.freeze_run_launch_config(first, state)
+        later = argparse.Namespace(
+            harness_command=None,
+            harness_model=None,
+            harness_effort=None,
+            worker_tools="",
+            worker_model=None,
+            worker_effort=None,
+            allow_profile_command=False,
+            allow_unattended_default=False,
+        )
+
+        effective = mc.effective_run_launch_args(later, state)
+
+        self.assertEqual(effective.harness_model, "provider/orchestrator")
+        self.assertEqual(effective.harness_effort, "high")
+        self.assertEqual(effective.worker_tools, "claude")
+        self.assertEqual(effective.worker_model, "sonnet")
+        self.assertEqual(effective.worker_effort, "high")
+        self.assertTrue(effective.allow_profile_command)
+
+    def test_run_launch_configuration_rejects_cross_slice_model_change(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        first = argparse.Namespace(
+            harness_command=None,
+            harness_model="provider/original",
+            harness_effort=None,
+            worker_tools="opencode",
+            worker_model="provider/worker",
+            worker_effort=None,
+            allow_profile_command=True,
+            allow_unattended_default=False,
+        )
+        mc.freeze_run_launch_config(first, state)
+        changed = argparse.Namespace(**vars(first))
+        changed.harness_model = "provider/different"
+
+        with self.assertRaisesRegex(mc.McError, "frozen run launch configuration"):
+            mc.effective_run_launch_args(changed, state)
 
     def test_copilot_profile_composes_orchestrator_command(self):
         self.prepare_committed_repo()

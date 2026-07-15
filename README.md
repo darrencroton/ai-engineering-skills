@@ -1,4 +1,4 @@
-# AI Engineering Skills
+# AI Agent Coder
 
 **One safety chain for AI coding agents, applied at increasing levels of independence — from a single standalone review to a fully unattended multi-slice run.**
 
@@ -16,8 +16,8 @@ Each skill is a self-contained directory under [`skills/`](skills/) with a stand
 - **Clone the repo and symlink every skill:**
 
   ```bash
-  git clone git@github.com:darrencroton/ai-engineering-skills.git
-  for s in ai-engineering-skills/skills/*/; do
+  git clone git@github.com:darrencroton/ai-agent-coder.git
+  for s in ai-agent-coder/skills/*/; do
     ln -s "$(realpath "$s")" ~/.claude/skills/"$(basename "$s")"
   done
   ```

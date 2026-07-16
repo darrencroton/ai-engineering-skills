@@ -522,8 +522,25 @@ def write_reviewer_policy(
     reviewer_tools: tuple[str, ...],
     reviewer_model: str | None,
     reviewer_effort: str | None,
+    *,
+    before_head: str,
+    session_generation: int,
+    repair_round: int,
 ) -> Path:
-    """Write the authoritative semantic boundary consumed by orchestrator."""
+    """Write the authoritative semantic boundary consumed by orchestrator.
+
+    `before_head`, `session_generation`, and `repair_round` bind the policy —
+    and therefore its SHA-256, which every validated launch contract must
+    echo (gates.py's exact-match `policy_sha256` check) — to one specific
+    slice attempt and repair round. Without this, the digest stays constant
+    across repair rounds of a slice, so a Reviewer PASS obtained before a
+    tree-changing repair (an unauthorized-files restore, a dirty-worktree
+    cleanup) would still satisfy an opt-in independent-audit gate for final
+    work the Reviewer never saw. Rewriting the policy at the start of every
+    repair round (see runner.py's `_refresh_reviewer_policy_for_repair` and
+    `_relaunch_fresh_session`) invalidates any launch contract minted under
+    the previous digest with no new gate logic required.
+    """
     policy_path = slice_artifact_dir / "reviewer-policy.json"
     policy = {
         "schema_version": 2,
@@ -542,6 +559,13 @@ def write_reviewer_policy(
         # unrelated to either audit), so this cannot catch every misdraft —
         # only a request that already names a reserved skill incorrectly.
         "reserved_skill_sets": [[skill] for skill in REQUIRED_AUDIT_SKILLS] if plan_slice.independent_audit_required else [],
+        # Attempt/round binding (Finding 15): constant across repair rounds of
+        # one slice attempt lineage, so `before_head` verifies cumulatively,
+        # while `session_generation`/`repair_round` change every round and so
+        # change the digest every round.
+        "before_head": before_head,
+        "session_generation": int(session_generation),
+        "repair_round": int(repair_round),
     }
     policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return policy_path

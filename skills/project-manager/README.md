@@ -282,7 +282,7 @@ PM does not edit the project's own `.gitignore`. Instead, `init` writes a self-i
 
 Each `activity-attempt-<n>.jsonl` line records `checked_at`, `running`, and `active` fields from the tmux pane activity check. `pane-capture-live-latest.txt` preserves the last live pane text seen during polling, which is useful when the final pane capture is unavailable after a fast harness exit. Batch polling also records `observation` operational events to `operational-events.jsonl` (on state change, with a 60-second floor while nothing changes) and refreshes `observation-latest.json` — the same evidence the model-supervised `observe`/`wait` primitives produce.
 
-`run.json` includes a required `supervision` object with pause/retry policy, pause budgets, and the default continuation prompt. PM supports only the complete current schema-v4 shape and fails closed with a fresh-init instruction when durable state is missing or uses another version. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
+`run.json` includes a required `supervision` object with pause/retry policy, pause budgets, and the default continuation prompt. PM supports only the complete current schema-v5 shape and fails closed with a fresh-init instruction when durable state is missing or uses another version. High-frequency model-supervised observations and actions belong in `operational-events.jsonl`, an append-only log, rather than repeated `run.json` rewrites.
 
 While a slice is running, `current_slice` records the slice id, title, artifact directory, tmux session, attempt, start time, `before_head`, a `repair` object ({round, last_signature, signature_streak, session_generation} — the persisted repair-loop and circuit-breaker state), an optional `developer_session_id` for transcript lookup, and an optional `pause` object. Persisting `before_head` is required for model-supervised finalization because changed-file verification must compare against the real slice start, not guess `HEAD^`; it stays fixed across repair rounds and relaunches so verification remains cumulative. Repair rounds add per-round artifacts (`developer-result-repair-<n>.json`, `repair-prompt-repair-<n>.md`, `pane-capture-repair-<n>.txt`, `git-status-repair-<n>.txt`) beside the standard slice artifacts. See `references/run-state-schema.md` for the full semantics.
 
@@ -413,7 +413,7 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
 (artifact / "drift-audit.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "code-review.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "developer-result.json").write_text(json.dumps({
-    "schema_version": 4,
+    "schema_version": 5,
     "slice_id": "Slice 1",
     "status": "pass",
     "summary": "toy slice complete",
@@ -476,7 +476,7 @@ commit_hash = subprocess.run(["git", "rev-parse", "HEAD"], check=True, text=True
 (artifact / "drift-audit.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "code-review.md").write_text("PASS\n", encoding="utf-8")
 (artifact / "developer-result.json").write_text(json.dumps({
-    "schema_version": 4,
+    "schema_version": 5,
     "slice_id": "Slice 1",
     "status": "pass",
     "summary": "resumed after rolling limit",

@@ -315,6 +315,7 @@ class SupervisionRepairTests(PmTestCase):
                 git(self.repo, "rev-parse", "HEAD"),
                 repair=pm_state.default_repair_state(),
                 reviewer_policy={"sha256": "a" * 64, "policy": {}},
+                prior_slice_context={"path": "prior-slice-context.md", "sha256": "b" * 64},
             )
         )
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
@@ -394,6 +395,75 @@ class SupervisionRepairTests(PmTestCase):
         self.assertEqual(repair_events[0]["mode"], "in-session")
         self.assertEqual(repair_events[0]["signature"], "validation")
         self.assertEqual(repair_events[0]["round"], 1)
+
+    def test_repair_round_refreshes_reviewer_policy_and_invalidates_stale_evidence(self):
+        # Finding 15: reviewer-policy.json's digest binds Reviewer launch
+        # contracts to one slice attempt/repair round (gates.py's exact-match
+        # policy_sha256 check). Without a per-round refresh, a Reviewer PASS
+        # obtained before a tree-changing repair keeps satisfying the opt-in
+        # independent-audit gate for final work the Reviewer never saw.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_validated_reviewer_run(artifact, tool="opencode")
+        old_digest = hashlib.sha256((artifact / "reviewer-policy.json").read_bytes()).hexdigest()
+        (artifact / "reviewer-evidence.md").write_text(
+            "# Reviewer Evidence\n- Label: 01-opencode-drift-audit\n- Result summary: reviewer ran.\n",
+            encoding="utf-8",
+        )
+        self._write_failing_validation_result(artifact)
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "pm_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": pm.utc_now(),
+            "before_head": before,
+            "reviewer_tools": ["opencode"],
+            "pause": None,
+            "repair": pm_state.default_repair_state(),
+            "reviewer_policy": pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
+            "prior_slice_context": self.prior_context_metadata(artifact),
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        output = io.StringIO()
+        with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["mode"], "in-session")
+
+        new_digest = hashlib.sha256((artifact / "reviewer-policy.json").read_bytes()).hexdigest()
+        self.assertNotEqual(new_digest, old_digest)
+        state_after = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        new_snapshot = state_after["current_slice"]["reviewer_policy"]
+        self.assertEqual(new_snapshot["sha256"], new_digest)
+        self.assertEqual(new_snapshot["policy"]["repair_round"], 1)
+        self.assertEqual(new_snapshot["policy"]["session_generation"], 1)
+        self.assertEqual(new_snapshot["policy"]["before_head"], before)
+
+        # Reviewer evidence minted under the OLD digest (before this repair
+        # round) must no longer satisfy the gate against the refreshed policy.
+        failure = pm_gates.reviewer_evidence_failure(artifact, ("opencode",), new_snapshot)
+        self.assertIsNotNone(failure)
+        self.assertIn("opencode", failure)
+
+        provenance = pm.reviewer_audit_provenance(artifact, ("opencode",), new_snapshot)
+        for audit in ("drift-audit", "code-review"):
+            self.assertNotEqual(provenance[audit]["performed_by"], "reviewer")
 
     def test_fresh_session_repair_prompt_preserves_archived_context_ledgers(self):
         self.prepare_committed_repo()
@@ -490,7 +560,10 @@ class SupervisionRepairTests(PmTestCase):
         read_only_slice = pm.PlanSlice(plan_slice.number, plan_slice.title, plan_slice.body, sections)
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        policy_path = pm.write_reviewer_policy(state, read_only_slice, artifact, ("opencode",), "model", None)
+        policy_path = pm.write_reviewer_policy(
+            state, read_only_slice, artifact, ("opencode",), "model", None,
+            before_head="a" * 40, session_generation=1, repair_round=0,
+        )
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
         self.assertEqual(policy["schema_version"], 2)
         self.assertNotIn("allowed_access", policy)
@@ -503,7 +576,10 @@ class SupervisionRepairTests(PmTestCase):
         plan_slice = pm.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        policy_path = pm.write_reviewer_policy(state, plan_slice, artifact, ("opencode",), "model", None)
+        policy_path = pm.write_reviewer_policy(
+            state, plan_slice, artifact, ("opencode",), "model", None,
+            before_head="a" * 40, session_generation=1, repair_round=0,
+        )
         policy = json.loads(policy_path.read_text(encoding="utf-8"))
         reviewer_run = artifact / "reviewer-runs" / "reviewers-contract-test"
         reviewer_run.mkdir(parents=True)
@@ -547,7 +623,10 @@ class SupervisionRepairTests(PmTestCase):
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
 
-        default_policy_path = pm.write_reviewer_policy(state, base, artifact, ("opencode",), "model", None)
+        default_policy_path = pm.write_reviewer_policy(
+            state, base, artifact, ("opencode",), "model", None,
+            before_head="a" * 40, session_generation=1, repair_round=0,
+        )
         default_policy = json.loads(default_policy_path.read_text(encoding="utf-8"))
         self.assertEqual(default_policy["reserved_skill_sets"], [])
 
@@ -555,7 +634,10 @@ class SupervisionRepairTests(PmTestCase):
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
         opt_in_slice = pm.PlanSlice(base.number, base.title, base.body, sections)
         self.assertTrue(opt_in_slice.independent_audit_required)
-        opt_in_policy_path = pm.write_reviewer_policy(state, opt_in_slice, artifact, ("opencode",), "model", None)
+        opt_in_policy_path = pm.write_reviewer_policy(
+            state, opt_in_slice, artifact, ("opencode",), "model", None,
+            before_head="a" * 40, session_generation=1, repair_round=0,
+        )
         opt_in_policy = json.loads(opt_in_policy_path.read_text(encoding="utf-8"))
         self.assertEqual(opt_in_policy["reserved_skill_sets"], [["drift-audit"], ["code-review"]])
 
@@ -855,6 +937,137 @@ class SupervisionRepairTests(PmTestCase):
         self.assertEqual(state["status"], "partial")
         self.assertIsNone(state["current_slice"])
         self.assertEqual(state["slices"][0]["status"], "pass")
+
+    def test_finalize_persists_gate_time_reviewer_provenance_despite_adverse_cancel(self):
+        # Finding 17: cancel_run_reviewers refreshes reviewer-runs-summary.json
+        # for evidence capture, but it must run only after the slice entry is
+        # built and persisted. If the entry were rebuilt from post-cancel
+        # evidence (or cancel ran first), a reviewer that turns adverse in
+        # that window would become the durable "latest" verdict even though
+        # the gate itself saw a clean PASS.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        self.write_validated_reviewer_run(artifact)
+        reviewer_policy = pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "pm_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": pm.utc_now(),
+            "before_head": before,
+            "reviewer_tools": ["opencode"],
+            "pause": None,
+            "repair": pm_state.default_repair_state(),
+            "reviewer_policy": reviewer_policy,
+            "prior_slice_context": self.prior_context_metadata(artifact),
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+
+        def adversarial_cancel(_run_dir):
+            reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
+            status_path = next(reviewer_run.glob("*code-review-status.json"))
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            status["skill_verdicts"]["code-review"] = "FAIL"
+            status["finished_at"] = "2026-01-01T00:05:00Z"
+            status_path.write_text(json.dumps(status), encoding="utf-8")
+            pm.capture_reviewer_runs_summary(artifact)
+            return []
+
+        with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with mock.patch.object(pm_runner, "cancel_run_reviewers", side_effect=adversarial_cancel) as cancel:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+
+        cancel.assert_called_once()
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["entry"]["audit_provenance"]["code-review"]["performed_by"], "reviewer")
+        persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["slices"][0]["audit_provenance"]["code-review"]["performed_by"], "reviewer")
+        self.assertEqual(persisted["slices"][0]["audit_provenance"]["code-review"]["reviewer_tool"], "opencode")
+        # The adverse rewrite did land on disk (evidence capture still ran) —
+        # only the persisted *entry* must stay unaffected by it.
+        summary = json.loads((artifact / "reviewer-runs-summary.json").read_text(encoding="utf-8"))
+        adverse_status = next(
+            status
+            for run in summary["runs"]
+            for status in run["reviewers"]
+            if "code-review" in status.get("label", "")
+        )
+        self.assertEqual(adverse_status["skill_verdicts"]["code-review"], "FAIL")
+
+    def test_finalize_pass_builds_slice_entry_exactly_once(self):
+        # Finding 17: the passing path must build the slice entry a single
+        # time and reuse it for the context-budget projection and the
+        # persisted record, rather than building a projected entry and then a
+        # second, independent one inside _finalize_terminal.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        state["status"] = "running"
+        state["supervision"]["mode"] = "model-supervised"
+        state["current_slice"] = {
+            "slice_id": "Slice 1",
+            "title": "First Slice",
+            "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
+            "tmux_session": "pm_test_slice-001_a1",
+            "attempt": 1,
+            "started_at": pm.utc_now(),
+            "before_head": before,
+            "reviewer_tools": [],
+            "pause": None,
+            "repair": pm_state.default_repair_state(),
+            "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
+            "prior_slice_context": self.prior_context_metadata(artifact),
+        }
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        fake_adapter = mock.Mock()
+        fake_adapter.session_exists.return_value = True
+
+        def fake_capture(session_name, destination):
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_text("pane\n", encoding="utf-8")
+
+        fake_adapter.capture.side_effect = fake_capture
+        with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
+            with mock.patch.object(pm_runner, "slice_entry_from_gate", wraps=pm_runner.slice_entry_from_gate) as spy:
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+
+        self.assertEqual(spy.call_count, 1)
+        result = json.loads(output.getvalue())
+        persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(persisted["slices"][0], result["entry"])
+        self.assertIsNotNone(persisted["slices"][0]["completed_at"])
 
     def test_finalize_routes_oversized_projected_context_into_repair_before_acceptance(self):
         self.prepare_committed_repo()

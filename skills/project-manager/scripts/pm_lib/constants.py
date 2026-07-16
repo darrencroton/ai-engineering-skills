@@ -5,7 +5,7 @@ import shlex
 from typing import Any
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 PARSER_NAME = "implementation-plan-markdown-v2"
 FULL_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 REQUIRED_SECTIONS = (

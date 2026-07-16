@@ -24,7 +24,6 @@ Reviewer self-audit fallback is allowed on default slices and must be reported a
 - `scripts/reviewer_jobs.py` — tracked Reviewer lifecycle
 - `scripts/reviewer_sessions.py` — session discovery and transcript extraction
 - `tests/` — contract, launcher, lifecycle, and transcript tests
-- `ai-reminder` — optional reminder helper for long-running Developer sessions
 
 ## Quick verification
 

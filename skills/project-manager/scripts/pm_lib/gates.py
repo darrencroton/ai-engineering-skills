@@ -3,8 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from .constants import (
     CONTINUATION_NOTE_CATEGORIES,
@@ -218,6 +219,92 @@ def _normalized_reviewer_contract(
     return contract_tool, audit
 
 
+class ReviewerCompletion(NamedTuple):
+    """One label's validated, successfully-completed reviewer run.
+
+    Shared by reviewer_audit_provenance and reviewer_evidence_failure: both
+    require the identical exact-match launch contract and the identical
+    completed/returncode==0 status bar before trusting a record. `finished_at`
+    is pre-normalized to None for anything but a non-empty string; the two
+    consumers deliberately disagree on what a None finished_at means for
+    latest-verdict selection (see _iter_reviewer_completions), so that
+    decision stays with each caller rather than living here.
+    """
+
+    tool: str
+    label: str
+    audit: str | None
+    verdict: str | None
+    finished_at: str | None
+
+
+def _normalized_run_reviewers(
+    run: dict[str, Any],
+    *,
+    required: set[str],
+    policy: dict[str, Any],
+    policy_sha256: str,
+    reviewer_artifact_root: Path | None,
+) -> dict[str, tuple[str, str | None]]:
+    """Normalize one run's manifest reviewer entries into {label: (tool, audit)}.
+
+    Includes every label whose tool is in `required` and whose launch contract
+    validates against the immutable policy snapshot — a plain reviewer entry
+    (audit is None) and an audit-bearing entry are both included here; a
+    caller that only cares about audits filters on `audit is not None` itself.
+    """
+    manifest = run.get("manifest") if isinstance(run.get("manifest"), dict) else {}
+    manifest_reviewers = object_field(manifest, "reviewers")
+    normalized_by_label: dict[str, tuple[str, str | None]] = {}
+    for label, entry in (manifest_reviewers.items() if isinstance(manifest_reviewers, dict) else ()):
+        if not isinstance(entry, dict) or str(entry.get("tool", "")).lower() not in required:
+            continue
+        normalized = _normalized_reviewer_contract(
+            entry,
+            required_tools=required,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            reviewer_artifact_root=reviewer_artifact_root,
+        )
+        if normalized is not None:
+            normalized_by_label[str(label)] = normalized
+    return normalized_by_label
+
+
+def _iter_reviewer_completions(
+    run: dict[str, Any], normalized_by_label: dict[str, tuple[str, str | None]]
+) -> Iterator[ReviewerCompletion]:
+    """Yield one ReviewerCompletion per normalized label with a successful status.
+
+    Launch alone is not enough: a required reviewer that crashed on start (or
+    is still running at finalize) proves nothing was delegated. The status
+    payloads come from reviewer_jobs.py's own *-status.json files, so like the
+    tool name they are mechanically derived, not narrated.
+    """
+    for status in run.get("reviewers") or ():
+        if not isinstance(status, dict):
+            continue
+        normalized = normalized_by_label.get(str(status.get("label", "")))
+        if normalized is None:
+            continue
+        if str(status.get("state", "")).lower() != "completed" or status.get("returncode") != 0:
+            continue
+        tool, audit = normalized
+        verdict = None
+        if audit is not None:
+            verdicts = status.get("skill_verdicts") if isinstance(status.get("skill_verdicts"), dict) else {}
+            raw_verdict = verdicts.get(audit)
+            verdict = str(raw_verdict).upper() if isinstance(raw_verdict, str) else None
+        finished_at = status.get("finished_at")
+        yield ReviewerCompletion(
+            tool=tool,
+            label=str(status.get("label", "")),
+            audit=audit,
+            verdict=verdict,
+            finished_at=finished_at if isinstance(finished_at, str) and finished_at else None,
+        )
+
+
 def reviewer_audit_provenance(
     slice_artifact_dir: Path,
     reviewer_tools: tuple[str, ...],
@@ -308,38 +395,25 @@ def reviewer_audit_provenance(
     for run in runs if isinstance(runs, list) else ():
         if not isinstance(run, dict):
             continue
-        manifest = run.get("manifest") if isinstance(run.get("manifest"), dict) else {}
-        manifest_reviewers = object_field(manifest, "reviewers")
-        normalized_by_label: dict[str, tuple[str, str]] = {}
-        for label, entry in manifest_reviewers.items():
-            if not isinstance(entry, dict):
-                continue
-            normalized = _normalized_reviewer_contract(
-                entry,
-                required_tools=required,
-                policy=policy,
-                policy_sha256=policy_sha256,
-                reviewer_artifact_root=reviewer_root,
-            )
-            if normalized is not None and normalized[1] is not None:
-                normalized_by_label[str(label)] = (normalized[0], normalized[1])
-        for status in run.get("reviewers") or ():
-            if not isinstance(status, dict):
-                continue
-            label = str(status.get("label", ""))
-            if label not in normalized_by_label:
-                continue
-            if str(status.get("state", "")).lower() != "completed" or status.get("returncode") != 0:
-                continue
-            tool, audit = normalized_by_label[label]
-            verdicts = status.get("skill_verdicts") if isinstance(status.get("skill_verdicts"), dict) else {}
-            raw_verdict = verdicts.get(audit)
-            verdict = str(raw_verdict).upper() if isinstance(raw_verdict, str) else None
-            finished_at = status.get("finished_at")
-            if not isinstance(finished_at, str) or not finished_at:
+        normalized_by_label = {
+            label: normalized
+            for label, normalized in _normalized_run_reviewers(
+                run, required=required, policy=policy, policy_sha256=policy_sha256, reviewer_artifact_root=reviewer_root
+            ).items()
+            if normalized[1] is not None
+        }
+        for completion in _iter_reviewer_completions(run, normalized_by_label):
+            # A completed reviewer with no recorded finished_at cannot be
+            # ordered against other candidates for this audit; skipping just
+            # this record (rather than disqualifying the whole audit, as
+            # reviewer_evidence_failure does below) still lets a well-formed
+            # record for the same audit win the latest-verdict selection.
+            if completion.finished_at is None:
                 continue
             sequence += 1
-            records[audit].append((finished_at, sequence, tool, label, verdict))
+            records[completion.audit].append(
+                (completion.finished_at, sequence, completion.tool, completion.label, completion.verdict)
+            )
     for audit, candidates in records.items():
         if not candidates:
             continue
@@ -429,62 +503,42 @@ def reviewer_evidence_failure(
         if run.get("reviewers"):
             any_reviewer = True
         manifest_reviewers = object_field(run.get("manifest") or {}, "reviewers") if isinstance(run.get("manifest"), dict) else {}
-        tool_by_label: dict[str, str] = {}
-        audit_by_label: dict[str, str] = {}
         for label, entry in (manifest_reviewers.items() if isinstance(manifest_reviewers, dict) else ()):
-            if not isinstance(entry, dict) or str(entry.get("tool", "")).lower() not in required:
-                continue
-            entry_tool = str(entry.get("tool", "")).lower()
-            matched_tools.add(entry_tool)
-            normalized = _normalized_reviewer_contract(
-                entry,
-                required_tools=required,
-                policy=policy,
-                policy_sha256=policy_sha256,
-                reviewer_artifact_root=reviewer_artifact_root,
-            )
-            if normalized is None:
-                continue
-            contract_tool, audit = normalized
-            # A manifest/status pair alone is just JSON on disk — the
-            # developer has full write access to its own reviewer-runs tree
-            # and could hand-author a matching manifest entry, launch
-            # contract, and completed status without ever invoking
-            # reviewer_jobs.py or a real harness process. start_tracked_reviewer
-            # always records a positive subprocess pid and always creates
-            # outfile/errfile via `.open("wb")` before the child process
-            # starts, regardless of whether the tool produces output, and
-            # always writes them inside the policy's reviewer_artifact_root.
-            # Requiring that real filesystem footprint closes the
-            # zero-effort forgery (three hand-written JSON files, no other
-            # artifacts) without depending on content that could itself be
-            # fabricated.
+            if isinstance(entry, dict) and str(entry.get("tool", "")).lower() in required:
+                matched_tools.add(str(entry.get("tool", "")).lower())
+        # A manifest/status pair alone is just JSON on disk — the developer
+        # has full write access to its own reviewer-runs tree and could
+        # hand-author a matching manifest entry, launch contract, and
+        # completed status without ever invoking reviewer_jobs.py or a real
+        # harness process. start_tracked_reviewer always records a positive
+        # subprocess pid and always creates outfile/errfile via `.open("wb")`
+        # before the child process starts, regardless of whether the tool
+        # produces output, and always writes them inside the policy's
+        # reviewer_artifact_root. _normalized_run_reviewers requiring that
+        # real filesystem footprint (via _normalized_reviewer_contract) closes
+        # the zero-effort forgery (three hand-written JSON files, no other
+        # artifacts) without depending on content that could itself be
+        # fabricated.
+        normalized_by_label = _normalized_run_reviewers(
+            run,
+            required=required,
+            policy=policy,
+            policy_sha256=policy_sha256,
+            reviewer_artifact_root=reviewer_artifact_root,
+        )
+        for contract_tool, audit in normalized_by_label.values():
             contracted_tools.add(contract_tool)
-            tool_by_label[str(label)] = contract_tool
             if audit is not None:
                 contracted_audits.add(audit)
-                audit_by_label[str(label)] = audit
         # Launch alone is not enough: a required reviewer that crashed on start
         # (or is still running at finalize) proves nothing was delegated. The
         # status payloads come from reviewer_jobs.py's own *-status.json files,
         # so like the tool name they are mechanically derived, not narrated.
-        for status in run.get("reviewers") or ():
-            if not isinstance(status, dict):
-                continue
-            if str(status.get("label", "")) not in tool_by_label:
-                continue
-            if str(status.get("state", "")).lower() == "completed" and status.get("returncode") == 0:
-                label = str(status.get("label", ""))
-                successful_tools.add(tool_by_label[label])
-                if label in audit_by_label:
-                    audit = audit_by_label[label]
-                    skill_verdicts = status.get("skill_verdicts") if isinstance(status.get("skill_verdicts"), dict) else {}
-                    verdict = skill_verdicts.get(audit)
-                    normalized_verdict = str(verdict).upper() if isinstance(verdict, str) else None
-                    finished_at = status.get("finished_at")
-                    normalized_finished_at = finished_at if isinstance(finished_at, str) and finished_at else None
-                    audit_sequence += 1
-                    audit_records[audit].append((normalized_finished_at, audit_sequence, normalized_verdict))
+        for completion in _iter_reviewer_completions(run, normalized_by_label):
+            successful_tools.add(completion.tool)
+            if completion.audit is not None:
+                audit_sequence += 1
+                audit_records[completion.audit].append((completion.finished_at, audit_sequence, completion.verdict))
     if not any_reviewer:
         return (
             f"required reviewer tool(s) ({tools_label}) were never launched: a reviewer_jobs.py run directory was "

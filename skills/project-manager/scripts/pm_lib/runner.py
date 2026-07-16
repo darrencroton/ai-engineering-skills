@@ -5,7 +5,7 @@ import json
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .constants import DEFAULT_MAX_REPAIR_ATTEMPTS, KNOWN_UNATTENDED_HARNESS_COMMANDS, RUN_STOP_STATUSES
 from .gates import verify_gate
@@ -15,6 +15,7 @@ from .observation import _current_adapter, _slice_artifact_dir, wait_observing
 from .plan import eligibility
 from .profiles import (
     current_allow_unattended_default,
+    effective_launch_args,
     freeze_run_launch_config,
     parse_reviewer_tools,
     query_profile_model_identity,
@@ -47,6 +48,7 @@ from .state import (
     load_run,
     normalize_stop_status,
     relative_artifact_path,
+    render_slice_summary,
     repair_state,
     reset_slice_pause_counters,
     slice_entry_from_gate,
@@ -282,6 +284,14 @@ def start_model_supervised_slice(
     credential_warnings = ensure_slice_runtime_dirs(slice_artifact_dir, configured_reviewer_tools, harness_name)
     for warning in credential_warnings:
         print(f"warning: {warning}")
+    # before_head and attempt are captured before the policy is written (the
+    # clean-worktree precondition has already run above) so the policy binds
+    # to this exact slice attempt from the start: session_generation seeds
+    # from the attempt number, matching initial_repair below, and
+    # before_head is the slice-attempt-lineage constant every repair round
+    # keeps unchanged. See write_reviewer_policy for why this binding matters.
+    before_head = git_head(repo)
+    attempt = _attempt_for_slice(state, plan_slice)
     policy_path = write_reviewer_policy(
         state,
         plan_slice,
@@ -289,6 +299,9 @@ def start_model_supervised_slice(
         configured_reviewer_tools,
         getattr(args, "reviewer_model", None),
         getattr(args, "reviewer_effort", None),
+        before_head=before_head,
+        session_generation=attempt,
+        repair_round=0,
     )
     reviewer_identities: dict[str, dict[str, Any]] = {}
     reviewer_model = getattr(args, "reviewer_model", None)
@@ -323,7 +336,6 @@ def start_model_supervised_slice(
         + "\n",
         encoding="utf-8",
     )
-    before_head = git_head(repo)
     prior_context_path, prior_context_sha256 = write_prior_slice_context(state, plan_slice, slice_artifact_dir, before_head)
     prompt_path = slice_artifact_dir / "prompt.md"
     prompt_path.write_text(
@@ -340,7 +352,6 @@ def start_model_supervised_slice(
     )
 
     max_attempts = int(state.get("policy", {}).get("max_repair_attempts", 1)) + 1
-    attempt = _attempt_for_slice(state, plan_slice)
     if attempt > max_attempts:
         reason = f"repair attempt cap exhausted for {plan_slice.slice_id}: {attempt - 1}/{max_attempts}"
         update_state_for_stop(run_json, state, "blocked", reason)
@@ -455,6 +466,7 @@ def _finalize_terminal(
     reviewer_tools: tuple[str, ...],
     repair: dict[str, Any],
     terminal_gate: GateDecision,
+    entry: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Record a slice's terminal outcome: the single end-of-slice transition.
 
@@ -463,29 +475,192 @@ def _finalize_terminal(
     forced terminals (timeout, interrupt, refused repair delivery). It tears
     down the session, appends the slice entry, clears current_slice, and
     writes the pass/stop state.
+
+    `cancel_run_reviewers` — which rewrites reviewer-runs-summary.json for
+    every slice — must run after the entry is built and persisted, never
+    before: audit_provenance is derived from that file, so cancelling first
+    let an adverse verdict racing in during finalize become durable "latest"
+    evidence while the persisted entry still recorded the gate's earlier
+    pass. `entry` lets the passing path reuse the exact snapshot the gate and
+    the context-budget projection already saw (built with
+    write_summary=False) instead of re-deriving a second entry here from
+    whatever reviewer-runs-summary.json holds at this later moment; every
+    other caller still builds its entry from current on-disk evidence.
     """
     adapter.force_stop(session_name)
-    cancel_run_reviewers(run_json.parent)
-    entry = slice_entry_from_gate(
-        repo,
-        plan_slice,
-        slice_artifact_dir,
-        started_at,
-        terminal_gate,
-        before_head,
-        reviewer_tools,
-        repair=dict(repair),
-        reviewer_policy=(state.get("current_slice") or {}).get("reviewer_policy"),
-    )
+    if entry is None:
+        entry = slice_entry_from_gate(
+            repo,
+            plan_slice,
+            slice_artifact_dir,
+            started_at,
+            terminal_gate,
+            before_head,
+            reviewer_tools,
+            repair=dict(repair),
+            reviewer_policy=(state.get("current_slice") or {}).get("reviewer_policy"),
+            prior_slice_context=(state.get("current_slice") or {}).get("prior_slice_context"),
+        )
+    else:
+        slice_summary_path = slice_artifact_dir / "slice-summary.md"
+        slice_summary_path.parent.mkdir(parents=True, exist_ok=True)
+        slice_summary_path.write_text(render_slice_summary(entry), encoding="utf-8")
     state["slices"].append(entry)
     state["current_slice"] = None
     if terminal_gate.status == "pass":
         state["status"] = idle_status_after_pass(state)
         state["stop_reason"] = None
         write_run(run_json, state)
+        cancel_run_reviewers(run_json.parent)
         return {"finalized": True, "status": "pass", "reason": terminal_gate.reason, "entry": entry}
     update_state_for_stop(run_json, state, normalize_stop_status(terminal_gate.status), terminal_gate.reason)
+    cancel_run_reviewers(run_json.parent)
     return {"finalized": True, "status": terminal_gate.status, "reason": terminal_gate.reason, "entry": entry}
+
+
+def _refresh_reviewer_policy_for_repair(
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    current: dict[str, Any],
+    repair: dict[str, Any],
+) -> None:
+    """Rewrite reviewer-policy.json and current_slice.reviewer_policy for one repair round.
+
+    Finding 15: gates.py matches a Reviewer's launch contract against the
+    policy's exact SHA-256, and without a per-round refresh that digest is
+    identical across every repair round of a slice, so a Reviewer PASS
+    obtained before a tree-changing repair still satisfies an opt-in
+    independent-audit gate for final work the Reviewer never saw. Calling
+    this at the start of every repair round — before that round's state is
+    persisted — rewrites both the on-disk policy and the persisted snapshot
+    together, so they always agree, and any launch contract minted under the
+    previous digest stops matching with no new gate logic required.
+    `before_head` is read from `current` unchanged (the slice-attempt-lineage
+    constant); `session_generation`/`repair_round` come from the live
+    `repair` state, which the caller has already updated for this round.
+    """
+    reviewer_tools = tuple(str(tool) for tool in current.get("reviewer_tools") or ())
+    launch_args = effective_launch_args(args, state)
+    policy_path = write_reviewer_policy(
+        state,
+        plan_slice,
+        slice_artifact_dir,
+        reviewer_tools,
+        getattr(launch_args, "reviewer_model", None),
+        getattr(launch_args, "reviewer_effort", None),
+        before_head=str(current["before_head"]),
+        session_generation=int(repair["session_generation"]),
+        repair_round=int(repair["round"]),
+    )
+    current["reviewer_policy"] = reviewer_policy_snapshot(policy_path)
+
+
+def _relaunch_fresh_session(
+    args: argparse.Namespace,
+    repo: Path,
+    state: dict[str, Any],
+    plan_slice: PlanSlice,
+    slice_artifact_dir: Path,
+    run_json: Path,
+    *,
+    adapter: TmuxHarnessAdapter,
+    session_name: str,
+    harness_name: str,
+    reviewer_tools: tuple[str, ...],
+    current: dict[str, Any],
+    repair: dict[str, Any],
+    round_number: int,
+    repair_prompt_text: str,
+    before_head: str | None,
+    regenerate_missing_prompt: bool,
+    failure_gate: Callable[[Exception], GateDecision],
+    finalize_terminal: Callable[[GateDecision], dict[str, Any]],
+) -> dict[str, Any]:
+    """Force-stop the old session and launch a fresh one for the same slice's repair.
+
+    Shared by finalize_model_supervised_slice's fresh-session/relaunch branch
+    and handle_idle_stall's relaunch tail: both force-stop the dead/escalated
+    session, bump session_generation, mint an optional fresh developer session
+    id, build a relaunch adapter, write the fresh-session prompt, refresh the
+    Finding-15 reviewer policy for the new round, persist state BEFORE
+    launching, and launch with failure-evidence capture.
+
+    Persisting before launching is a safety-ordering invariant: a crash after
+    the launch then finds run.json already pointing at the live session
+    (fully recoverable), and a crash before it leaves a recorded session that
+    simply does not exist (the next finalize fails closed) — the old ordering
+    could leave an unrecorded live session actively editing.
+    `current_slice.before_head` stays the slice starting commit so
+    verification remains cumulative across sessions.
+
+    `regenerate_missing_prompt` and `failure_gate` carry the two ways the
+    call sites differ (finalize re-renders prompt.md if it is missing;
+    finalize's and handle_idle_stall's terminal-failure GateDecision differ
+    in status/reason/result) without changing either site's observable
+    behavior. On success returns {"relaunched": True, "session_name",
+    "fresh_prompt_path", "generation"}; on a launch failure it has already
+    called `finalize_terminal` itself and returns {"relaunched": False,
+    "result": <that return value>} for the caller to propagate directly.
+    """
+    adapter.force_stop(session_name)
+    repair["session_generation"] = int(repair["session_generation"]) + 1
+    generation = int(repair["session_generation"])
+    new_developer_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
+    relaunch_adapter = TmuxHarnessAdapter(
+        harness_name,
+        resolve_current_harness_command(args, repo, state, new_developer_session_id),
+        current_allow_unattended_default(args, state),
+        reviewer_tools,
+        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
+    )
+    new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
+    prompt_path = slice_artifact_dir / "prompt.md"
+    if regenerate_missing_prompt and not prompt_path.is_file():
+        prompt_path.write_text(
+            render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json, reviewer_tools),
+            encoding="utf-8",
+        )
+    fresh_prompt_path = slice_artifact_dir / f"fresh-session-prompt-repair-{round_number}.md"
+    fresh_prompt_path.write_text(
+        _fresh_session_repair_prompt(prompt_path, repair_prompt_text, slice_artifact_dir, round_number),
+        encoding="utf-8",
+    )
+    _refresh_reviewer_policy_for_repair(args, state, plan_slice, slice_artifact_dir, current, repair)
+    current["tmux_session"] = new_session_name
+    current["attempt"] = generation
+    current["started_at"] = utc_now()
+    current["repair"] = dict(repair)
+    if new_developer_session_id:
+        current["developer_session_id"] = new_developer_session_id
+    else:
+        current.pop("developer_session_id", None)
+    state["status"] = "running"
+    state["stop_reason"] = None
+    write_run(run_json, state)
+    try:
+        relaunch_adapter.start(repo, new_session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
+        relaunch_adapter.send_prompt(new_session_name, fresh_prompt_path)
+    except Exception as exc:
+        _capture_failure_evidence(
+            relaunch_adapter,
+            session_name=new_session_name,
+            harness_name=harness_name,
+            repo=repo,
+            developer_session_id=new_developer_session_id,
+            slice_artifact_dir=slice_artifact_dir,
+            attempt=generation,
+            before_head=before_head,
+        )
+        relaunch_adapter.force_stop(new_session_name)
+        return {"relaunched": False, "result": finalize_terminal(failure_gate(exc))}
+    return {
+        "relaunched": True,
+        "session_name": new_session_name,
+        "fresh_prompt_path": fresh_prompt_path,
+        "generation": generation,
+    }
 
 
 def finalize_model_supervised_slice(
@@ -536,8 +711,13 @@ def finalize_model_supervised_slice(
         if context_failure
         else verify_gate(repo, state, plan_slice, slice_artifact_dir, before_head, after_head, after_status, reviewer_tools)
     )
+    # Built once here (write_summary=False) and reused as the persisted entry
+    # below: gate verification, the budget projection, and the durable record
+    # must all come from this one snapshot, not three separate reads of
+    # reviewer-runs-summary.json taken at different moments.
+    passing_entry: dict[str, Any] | None = None
     if gate.status == "pass":
-        projected_entry = slice_entry_from_gate(
+        passing_entry = slice_entry_from_gate(
             repo,
             plan_slice,
             slice_artifact_dir,
@@ -547,15 +727,17 @@ def finalize_model_supervised_slice(
             reviewer_tools,
             repair=repair_state(current),
             reviewer_policy=current.get("reviewer_policy"),
+            prior_slice_context=current.get("prior_slice_context"),
             write_summary=False,
         )
         budget_failure = projected_prior_slice_context_budget_failure(
-            state, plan_slice, projected_entry, after_head or before_head or "unknown"
+            state, plan_slice, passing_entry, after_head or before_head or "unknown"
         )
         if budget_failure:
             gate = GateDecision(
                 "repairable", budget_failure, gate.result, gate.actual_changed_files, "context-budget"
             )
+            passing_entry = None
     if gate.status in {"blocked", "fail"}:
         # Use only the fresh current-attempt pane tail. A cumulative session
         # transcript can retain an already-recovered outage from an earlier
@@ -579,7 +761,7 @@ def finalize_model_supervised_slice(
     repair = repair_state(current)
     max_repairs = int(state.get("policy", {}).get("max_repair_attempts", DEFAULT_MAX_REPAIR_ATTEMPTS))
 
-    def finalize_terminal(terminal_gate: GateDecision) -> dict[str, Any]:
+    def finalize_terminal(terminal_gate: GateDecision, entry: dict[str, Any] | None = None) -> dict[str, Any]:
         return _finalize_terminal(
             adapter,
             repo=repo,
@@ -593,13 +775,14 @@ def finalize_model_supervised_slice(
             reviewer_tools=reviewer_tools,
             repair=repair,
             terminal_gate=terminal_gate,
+            entry=entry,
         )
 
     if gate.status != "repairable":
         # pass, or a terminal decision (integrity/trust breaches and the
         # developer's own considered stops): force_stop, append the entry,
         # clear current_slice, and stop or idle as today.
-        return finalize_terminal(gate)
+        return finalize_terminal(gate, passing_entry if gate.status == "pass" else None)
 
     signature = gate.signature or "developer-repairable"
     session_alive = adapter.session_exists(session_name)
@@ -634,6 +817,7 @@ def finalize_model_supervised_slice(
         # `resuming` status accepts — waits for a fresh result, and
         # finalizes again.
         current["repair"] = dict(repair)
+        _refresh_reviewer_policy_for_repair(args, state, plan_slice, slice_artifact_dir, current, repair)
         state["status"] = "resuming"
         state["stop_reason"] = None
         write_run(run_json, state)
@@ -655,79 +839,42 @@ def finalize_model_supervised_slice(
     # start-slice cannot be used here — it refuses while current_slice is
     # populated, and clearing current_slice would drop the persisted repair
     # state the circuit breaker depends on.
-    adapter.force_stop(session_name)
-    repair["session_generation"] = int(repair["session_generation"]) + 1
-    generation = int(repair["session_generation"])
-    new_developer_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
-    relaunch_adapter = TmuxHarnessAdapter(
-        harness_name,
-        resolve_current_harness_command(args, repo, state, new_developer_session_id),
-        current_allow_unattended_default(args, state),
-        reviewer_tools,
-        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
+    outcome = _relaunch_fresh_session(
+        args,
+        repo,
+        state,
+        plan_slice,
+        slice_artifact_dir,
+        run_json,
+        adapter=adapter,
+        session_name=session_name,
+        harness_name=harness_name,
+        reviewer_tools=reviewer_tools,
+        current=current,
+        repair=repair,
+        round_number=round_number,
+        repair_prompt_text=repair_prompt_text,
+        before_head=before_head,
+        regenerate_missing_prompt=True,
+        failure_gate=lambda exc: GateDecision(
+            "failed",
+            f"failed to relaunch developer session for repair: {exc}",
+            gate.result,
+            gate.actual_changed_files,
+            signature,
+        ),
+        finalize_terminal=finalize_terminal,
     )
-    new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
-    prompt_path = slice_artifact_dir / "prompt.md"
-    if not prompt_path.is_file():
-        prompt_path.write_text(
-            render_developer_prompt(state, plan_slice, slice_artifact_dir, run_json, reviewer_tools),
-            encoding="utf-8",
-        )
-    fresh_prompt_path = slice_artifact_dir / f"fresh-session-prompt-repair-{round_number}.md"
-    fresh_prompt_path.write_text(
-        _fresh_session_repair_prompt(prompt_path, repair_prompt_text, slice_artifact_dir, round_number),
-        encoding="utf-8",
-    )
-    # Persist the new generation/session BEFORE launching it: a crash after
-    # the launch then finds run.json already pointing at the live session
-    # (fully recoverable), and a crash before it leaves a recorded session
-    # that simply does not exist (the next finalize fails closed). The old
-    # ordering could leave an unrecorded live session actively editing.
-    # current_slice.before_head stays the slice starting commit so
-    # verification remains cumulative across sessions.
-    current["tmux_session"] = new_session_name
-    current["attempt"] = generation
-    current["started_at"] = utc_now()
-    current["repair"] = dict(repair)
-    if new_developer_session_id:
-        current["developer_session_id"] = new_developer_session_id
-    else:
-        current.pop("developer_session_id", None)
-    state["status"] = "running"
-    state["stop_reason"] = None
-    write_run(run_json, state)
-    try:
-        relaunch_adapter.start(repo, new_session_name, slice_artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
-        relaunch_adapter.send_prompt(new_session_name, fresh_prompt_path)
-    except Exception as exc:
-        _capture_failure_evidence(
-            relaunch_adapter,
-            session_name=new_session_name,
-            harness_name=harness_name,
-            repo=repo,
-            developer_session_id=new_developer_session_id,
-            slice_artifact_dir=slice_artifact_dir,
-            attempt=generation,
-            before_head=before_head,
-        )
-        relaunch_adapter.force_stop(new_session_name)
-        return finalize_terminal(
-            GateDecision(
-                "failed",
-                f"failed to relaunch developer session for repair: {exc}",
-                gate.result,
-                gate.actual_changed_files,
-                signature,
-            )
-        )
+    if not outcome["relaunched"]:
+        return outcome["result"]
     return {
         "finalized": False,
         "status": "repairable",
         "reason": gate.reason,
         "repair": dict(repair),
         "mode": mode,
-        "tmux_session": new_session_name,
-        "repair_prompt_path": relative_artifact_path(repo, fresh_prompt_path),
+        "tmux_session": outcome["session_name"],
+        "repair_prompt_path": relative_artifact_path(repo, outcome["fresh_prompt_path"]),
         "next_action": "wait for a fresh result from the relaunched session, then finalize again",
     }
 
@@ -831,6 +978,7 @@ def handle_idle_stall(
 
     if mode == "in-session":
         current["repair"] = dict(repair)
+        _refresh_reviewer_policy_for_repair(args, state, plan_slice, artifact_dir, current, repair)
         state["status"] = "resuming"
         state["stop_reason"] = None
         write_run(run_json, state)
@@ -865,58 +1013,36 @@ def handle_idle_stall(
             "automatic_nudge_sent": True,
         }
 
-    adapter.force_stop(session_name)
-    repair["session_generation"] = int(repair["session_generation"]) + 1
-    generation = int(repair["session_generation"])
-    new_developer_session_id = str(uuid.uuid4()) if harness_name == "claude" else None
-    relaunch_adapter = TmuxHarnessAdapter(
-        harness_name,
-        resolve_current_harness_command(args, repo, state, new_developer_session_id),
-        current_allow_unattended_default(args, state),
-        reviewer_tools,
-        expected_model_display=str(state.get("harness", {}).get("model_identity", {}).get("display_name") or "") or None,
+    outcome = _relaunch_fresh_session(
+        args,
+        repo,
+        state,
+        plan_slice,
+        artifact_dir,
+        run_json,
+        adapter=adapter,
+        session_name=session_name,
+        harness_name=harness_name,
+        reviewer_tools=reviewer_tools,
+        current=current,
+        repair=repair,
+        round_number=round_number,
+        repair_prompt_text=repair_prompt_text,
+        before_head=before_head,
+        regenerate_missing_prompt=False,
+        failure_gate=lambda exc: GateDecision(
+            "failed", f"failed to relaunch stalled developer session: {exc}", signature=gate.signature
+        ),
+        finalize_terminal=finalize_terminal,
     )
-    new_session_name = tmux_session_name(state["run_id"], plan_slice, generation)
-    prompt_path = artifact_dir / "prompt.md"
-    fresh_prompt_path = artifact_dir / f"fresh-session-prompt-repair-{round_number}.md"
-    fresh_prompt_path.write_text(
-        _fresh_session_repair_prompt(prompt_path, repair_prompt_text, artifact_dir, round_number), encoding="utf-8"
-    )
-    current["tmux_session"] = new_session_name
-    current["attempt"] = generation
-    current["started_at"] = utc_now()
-    current["repair"] = dict(repair)
-    if new_developer_session_id:
-        current["developer_session_id"] = new_developer_session_id
-    else:
-        current.pop("developer_session_id", None)
-    state["status"] = "running"
-    state["stop_reason"] = None
-    write_run(run_json, state)
-    try:
-        relaunch_adapter.start(repo, new_session_name, artifact_dir, run_json, Path(state["plan_path"]), plan_slice)
-        relaunch_adapter.send_prompt(new_session_name, fresh_prompt_path)
-    except Exception as exc:
-        _capture_failure_evidence(
-            relaunch_adapter,
-            session_name=new_session_name,
-            harness_name=harness_name,
-            repo=repo,
-            developer_session_id=new_developer_session_id,
-            slice_artifact_dir=artifact_dir,
-            attempt=generation,
-            before_head=before_head,
-        )
-        relaunch_adapter.force_stop(new_session_name)
-        return finalize_terminal(
-            GateDecision("failed", f"failed to relaunch stalled developer session: {exc}", signature=gate.signature)
-        )
+    if not outcome["relaunched"]:
+        return outcome["result"]
     return {
         "status": "repairable",
         "mode": mode,
         "reason": gate.reason,
         "repair": dict(repair),
-        "tmux_session": new_session_name,
+        "tmux_session": outcome["session_name"],
         "automatic_nudge_sent": False,
     }
 

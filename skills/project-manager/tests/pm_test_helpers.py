@@ -32,6 +32,7 @@ SPEC.loader.exec_module(pm)
 from pm_lib import runtime as pm_runtime  # noqa: E402
 from pm_lib import tmux_adapter as pm_tmux_adapter  # noqa: E402
 from pm_lib import commands as pm_commands  # noqa: E402
+from pm_lib import gates as pm_gates  # noqa: E402
 from pm_lib import observation as pm_observation  # noqa: E402
 from pm_lib import runner as pm_runner  # noqa: E402
 from pm_lib import state as pm_state  # noqa: E402
@@ -147,7 +148,7 @@ def write_fake_harness(path):
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
             result = {
-                "schema_version": 4,
+                "schema_version": 5,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": f"{slice_id} done",
@@ -241,7 +242,7 @@ def write_usage_limit_resume_harness(path):
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "developer-result.json").write_text(json.dumps({
-                "schema_version": 4,
+                "schema_version": 5,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "resumed after rolling limit",
@@ -279,7 +280,7 @@ def write_repairable_then_pass_harness(path):
             if not marker.exists():
                 marker.write_text("seen\\n", encoding="utf-8")
                 (artifact / "developer-result.json").write_text(json.dumps({
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "slice_id": slice_id,
                     "status": "repairable",
                     "summary": "retry",
@@ -304,7 +305,7 @@ def write_repairable_then_pass_harness(path):
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "developer-result.json").write_text(json.dumps({
-                "schema_version": 4,
+                "schema_version": 5,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "repaired",
@@ -346,7 +347,7 @@ termios.tcsetattr(sys.stdin, termios.TCSANOW, attrs)
 
 def write_failing_validation_result():
     (artifact / "developer-result.json").write_text(json.dumps({
-        "schema_version": 4,
+        "schema_version": 5,
         "slice_id": slice_id,
         "status": "pass",
         "summary": "no validation yet",
@@ -414,7 +415,7 @@ def write_in_session_repair_harness(path):
             (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "code-review.md").write_text("PASS\\n", encoding="utf-8")
             (artifact / "developer-result.json").write_text(json.dumps({
-                "schema_version": 4,
+                "schema_version": 5,
                 "slice_id": slice_id,
                 "status": "pass",
                 "summary": "repaired in session",
@@ -467,7 +468,7 @@ def write_alternating_failure_harness(path):
                 (artifact / "validation-summary.md").write_text("PASS\\n", encoding="utf-8")
                 (artifact / "drift-audit.md").write_text("PASS\\n", encoding="utf-8")
                 (artifact / "developer-result.json").write_text(json.dumps({
-                    "schema_version": 4,
+                    "schema_version": 5,
                     "slice_id": slice_id,
                     "status": "pass",
                     "summary": "review failed",
@@ -537,7 +538,7 @@ def write_wrong_slice_id_harness(path):
 
             artifact = Path(os.environ["PM_SLICE_ARTIFACT_DIR"])
             (artifact / "developer-result.json").write_text(json.dumps({
-                "schema_version": 4,
+                "schema_version": 5,
                 "slice_id": "Slice 99",
                 "status": "pass",
                 "summary": "worked the wrong slice",
@@ -557,6 +558,9 @@ def write_wrong_slice_id_harness(path):
         + "\n",
         encoding="utf-8",
     )
+
+
+_UNSET = object()
 
 
 class PmTestCase(unittest.TestCase):
@@ -589,8 +593,20 @@ class PmTestCase(unittest.TestCase):
         artifact_dir=None,
         before_head=None,
         commit=None,
+        prior_slice_context=_UNSET,
     ):
-        """Return a complete schema-v4 terminal entry for state-focused tests."""
+        """Return a complete current-schema terminal entry for state-focused tests.
+
+        `prior_slice_context` defaults to a synthetic {path, sha256} for any
+        non-`assumed-complete` status (required by validation) and to `None`
+        for `assumed-complete` (which never ran, so it must be absent).
+        Pass an explicit value — including `None` on a non-assumed status —
+        to exercise the negative/integrity paths directly.
+        """
+        if prior_slice_context is _UNSET:
+            prior_slice_context = (
+                None if status == "assumed-complete" else {"path": "prior-slice-context.md", "sha256": "b" * 64}
+            )
         ordinal = int(slice_id.rsplit(" ", 1)[-1])
         return {
             "slice_id": slice_id,
@@ -624,6 +640,7 @@ class PmTestCase(unittest.TestCase):
             "repair": pm_state.default_repair_state(),
             "reviewer_policy": {"sha256": "a" * 64, "policy": {}},
             "slice_summary": f".ai-pm/runs/{state['run_id']}/slices/slice-{ordinal:03d}/slice-summary.md",
+            "prior_slice_context": prior_slice_context,
         }
 
     def prior_context_metadata(self, artifact, text="test prior context\n"):
@@ -734,7 +751,7 @@ class PmTestCase(unittest.TestCase):
         (artifact / "drift-audit.md").write_text("drift\n", encoding="utf-8")
         (artifact / "code-review.md").write_text("review\n", encoding="utf-8")
         result = {
-            "schema_version": 4,
+            "schema_version": pm.SCHEMA_VERSION,
             "slice_id": "Slice 1",
             "status": "pass",
             "summary": "",
@@ -768,7 +785,7 @@ class PmTestCase(unittest.TestCase):
         (artifact / "developer-result.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 4,
+                    "schema_version": pm.SCHEMA_VERSION,
                     "slice_id": slice_id,
                     "status": "pass",
                     "summary": "",

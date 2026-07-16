@@ -64,10 +64,13 @@ from .profiles import (
     resolve_harness_command,
 )
 from .runtime import (
+    cancel_reviewer_runs,
     cancel_run_reviewers,
     capture_developer_transcript,
     capture_reviewer_runs_summary,
     environment_preflight,
+    prior_slice_context_integrity_failure,
+    projected_prior_slice_context_budget_failure,
     result_schema_path,
     sensitive_artifact_dirs,
     slice_dir_name,
@@ -845,6 +848,7 @@ def stop_with_evidence(args: argparse.Namespace) -> int:
             tuple(str(tool) for tool in current.get("reviewer_tools") or ()),
             repair=dict(repair_state(current)),
             reviewer_policy=current.get("reviewer_policy") if isinstance(current.get("reviewer_policy"), dict) else None,
+            prior_slice_context=current.get("prior_slice_context") if isinstance(current.get("prior_slice_context"), dict) else None,
         )
     )
     update_state_for_stop(run_dir / "run.json", state, args.status, args.reason)
@@ -963,7 +967,20 @@ def reconcile(args: argparse.Namespace) -> int:
     # --reviewer-tools flag: reconcile is a separate invocation and the original
     # slice attempt's reviewer requirement must not be lost on reconciliation.
     reviewer_tools = tuple(entry["reviewer_tools"])
-    gate = verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, reviewer_tools)
+    prior_slice_context = entry.get("prior_slice_context") if isinstance(entry.get("prior_slice_context"), dict) else None
+    # Re-run the full gate, not just verify_gate: the runner path also enforces
+    # prior-context integrity and the next-slice context-budget projection, and
+    # a separate reconcile invocation must not let a terminal integrity breach
+    # (evidence that reality and the record disagree — never steered, only
+    # stopped) become acceptable just because it runs out-of-process, nor let
+    # an oversized reconciled result skip the projection that keeps the next
+    # slice's launch from wedging.
+    context_failure = prior_slice_context_integrity_failure(repo, entry)
+    gate = (
+        GateDecision("needs-human", context_failure, signature="prior-context-integrity")
+        if context_failure
+        else verify_gate(repo, state, plan_slice, artifact_dir, before_head, after_head, after_status, reviewer_tools)
+    )
     reconciled_entry = slice_entry_from_gate(
         repo,
         plan_slice,
@@ -974,18 +991,44 @@ def reconcile(args: argparse.Namespace) -> int:
         reviewer_tools,
         repair=dict(entry["repair"]),
         reviewer_policy=entry.get("reviewer_policy") if isinstance(entry.get("reviewer_policy"), dict) else None,
+        prior_slice_context=prior_slice_context,
     )
+    if gate.status == "pass":
+        budget_failure = projected_prior_slice_context_budget_failure(
+            state, plan_slice, reconciled_entry, after_head or before_head
+        )
+        if budget_failure:
+            # Reconcile cannot steer a repair; the operator must condense the
+            # result and re-run reconcile once it fits the launch budget.
+            gate = GateDecision("blocked", budget_failure, gate.result, gate.actual_changed_files, "context-budget")
+            reconciled_entry = slice_entry_from_gate(
+                repo,
+                plan_slice,
+                artifact_dir,
+                str(entry.get("started_at") or utc_now()),
+                gate,
+                before_head,
+                reviewer_tools,
+                repair=dict(entry["repair"]),
+                reviewer_policy=entry.get("reviewer_policy") if isinstance(entry.get("reviewer_policy"), dict) else None,
+                prior_slice_context=prior_slice_context,
+            )
     state["slices"][entry_index] = reconciled_entry
     state["current_slice"] = None
     if gate.status == "pass":
         state["status"] = idle_status_after_pass(state)
         state["stop_reason"] = None
         write_run(run_json, state)
+        # A stopped slice can still have reviewers left running from its
+        # original attempt; reconcile never cancelled them, so do it now that
+        # the reconciled entry (accept or remain-stopped) is durable.
+        cancel_reviewer_runs(artifact_dir)
         print(f"{slice_id} reconciled and accepted: {gate.reason}")
         return 0
     state["status"] = normalize_stop_status(gate.status)
     state["stop_reason"] = gate.reason
     write_run(run_json, state)
+    cancel_reviewer_runs(artifact_dir)
     print(f"{slice_id} remains stopped: {gate.reason}")
     return 2
 

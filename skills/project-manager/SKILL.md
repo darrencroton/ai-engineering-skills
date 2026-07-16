@@ -204,7 +204,7 @@ Runtime commands require `tmux`, the selected harness command, and a clean targe
 
 When all other slice gates pass and the only defect is an incorrect or abbreviated reported `commit.hash`, PM may correct `developer-result.json` to the proven current `HEAD`, write `pm-reconciliation.json` / `pm-reconciliation.md`, and accept the slice. This recovery is allowed only when local git evidence proves the commit advanced from the slice starting point, changed files match the authorized surface and reported result, validation/drift/review artifacts pass, and the post-commit worktree is clean.
 
-For a run that already stopped on a recoverable evidence problem, use `reconcile` to re-run PM's local gates against the stopped slice and update run state only when the same strict reconciliation criteria pass.
+For a run that already stopped on a recoverable evidence problem, use `reconcile` to re-run PM's local gates against the stopped slice and update run state only when the same strict reconciliation criteria pass. `reconcile` re-runs the full gate the runner itself enforces, including the prior-slice-context integrity check and the next-slice context-budget projection, not just `verify_gate`: an integrity mismatch (or an entry with no protected context metadata at all) stays terminal and is never steered by `reconcile`, and a result that would exceed the next slice's launch budget is refused so the operator can condense it and re-run.
 
 ## References
 

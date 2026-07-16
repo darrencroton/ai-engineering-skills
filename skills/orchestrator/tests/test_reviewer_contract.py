@@ -122,6 +122,23 @@ class ReviewerContractTests(unittest.TestCase):
                 self.assertEqual(raised.exception.issues[0].code, "unknown-field")
                 self.assertEqual(raised.exception.issues[0].field, f"policy.{field}")
 
+    def test_policy_accepts_pm_binding_fields_with_or_without_them(self):
+        # Finding 15: PM always writes before_head/session_generation/
+        # repair_round to bind the policy digest to one slice attempt and
+        # repair round. A standalone hand-written policy may omit them —
+        # neither shape should be rejected as an unknown or missing field.
+        policy_with_binding_fields = dict(
+            self.policy,
+            before_head="a" * 40,
+            session_generation=2,
+            repair_round=1,
+        )
+        contract = reviewer_contract.validate_contract(policy_with_binding_fields, self.request, self.run_dir)
+        self.assertEqual(contract["role"], "reviewer")
+
+        contract_without = reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
+        self.assertEqual(contract_without["role"], "reviewer")
+
     def test_schema_v1_is_rejected_for_policy_and_request(self):
         for target in ("policy", "request"):
             policy = dict(self.policy)

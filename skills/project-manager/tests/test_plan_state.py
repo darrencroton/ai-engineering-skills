@@ -319,7 +319,7 @@ class PlanStateTests(PmTestCase):
 
     def test_run_state_creation(self):
         state = self.init_run()
-        self.assertEqual(state["schema_version"], 4)
+        self.assertEqual(state["schema_version"], pm.SCHEMA_VERSION)
         self.assertEqual(state["repo_path"], str(self.repo.resolve()))
         self.assertEqual(state["plan_path"], str(self.plan.resolve()))
         self.assertEqual(state["harness"]["name"], "codex")
@@ -391,12 +391,12 @@ class PlanStateTests(PmTestCase):
     def test_run_state_rejects_unsupported_schema_and_missing_required_fields(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
-        state["schema_version"] = 1
+        state["schema_version"] = pm.SCHEMA_VERSION - 1
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(pm.PmError, "unsupported run-state schema"):
             pm.load_run(run_json)
 
-        state["schema_version"] = 4
+        state["schema_version"] = pm.SCHEMA_VERSION
         state.pop("supervision")
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(pm.PmError, "missing required field.*supervision"):
@@ -406,6 +406,59 @@ class PlanStateTests(PmTestCase):
         state["supervision"]["pause_counters"].pop("cumulative_pause_seconds_run")
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(pm.PmError, "supervision.pause_counters missing required field"):
+            pm.load_run(run_json)
+
+    def test_run_state_carrying_prior_schema_version_is_rejected_with_fresh_init_message(self):
+        # A run initialized under the retired schema-v4 shape (before
+        # prior_slice_context became a required terminal-entry field) must not
+        # be silently upgraded or partially trusted: PM performs no migration.
+        state = self.init_run()
+        run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
+        state["schema_version"] = 4
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(pm.PmError, "unsupported run-state schema.*initialize a new PM run"):
+            pm.load_run(run_json)
+
+    def test_terminal_slice_entry_requires_prior_slice_context_shape(self):
+        # Finding 16: reconcile can only re-verify a stopped slice's protected
+        # context if every non-assumed-complete entry actually carries it, so
+        # validation must require the field (and its {path, sha256} shape)
+        # rather than merely tolerate it.
+        state = self.init_run()
+        run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
+
+        entry = self.terminal_slice_entry(state)
+        self.assertIn("prior_slice_context", entry)
+        state["slices"] = [entry]
+        pm.write_run(run_json, state)
+        reloaded = pm.load_run(run_json)
+        self.assertEqual(
+            reloaded["slices"][0]["prior_slice_context"], entry["prior_slice_context"]
+        )
+
+        missing = self.terminal_slice_entry(state, prior_slice_context=None)
+        state["slices"] = [missing]
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].prior_slice_context must be an object"):
+            pm.load_run(run_json)
+
+        malformed = self.terminal_slice_entry(
+            state, prior_slice_context={"path": "prior-slice-context.md", "sha256": "not-a-digest"}
+        )
+        state["slices"] = [malformed]
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(
+            pm.PmError, r"slices\[0\].prior_slice_context.sha256 must be a 64-character lowercase hex digest"
+        ):
+            pm.load_run(run_json)
+
+        assumed = self.terminal_slice_entry(state, status="assumed-complete")
+        assumed["before_head"] = None
+        assumed["artifact_dir"] = None
+        assumed["prior_slice_context"] = {"path": "prior-slice-context.md", "sha256": "b" * 64}
+        state["slices"] = [assumed]
+        run_json.write_text(json.dumps(state), encoding="utf-8")
+        with self.assertRaisesRegex(pm.PmError, "assumed-complete slice prior_slice_context must be absent or null"):
             pm.load_run(run_json)
 
     def test_run_state_rejects_incomplete_or_unsafe_nested_schema_v3_state(self):

@@ -38,6 +38,7 @@ class RuntimeBatchTests(PmTestCase):
             artifact_dir=str(artifact.relative_to(self.repo.resolve())),
             before_head=before,
             commit={"requested": True, "created": True, "hash": "0" * 40},
+            prior_slice_context=self.prior_context_metadata(artifact),
         )
         entry.update(
             changed_files=["README.md"],
@@ -59,6 +60,171 @@ class RuntimeBatchTests(PmTestCase):
         self.assertEqual(repaired["slices"][0]["status"], "pass")
         self.assertEqual(repaired["slices"][0]["commit"]["hash"], after)
         self.assertEqual(repaired["status"], "partial")
+
+    def test_reconcile_cancels_tracked_reviewers_after_persisting_accepted_entry(self):
+        # Finding 17: reconcile previously accepted a stopped slice without
+        # ever cancelling reviewers still tracked from its original attempt.
+        # Cancellation must happen, and only after the reconciled entry is
+        # already durable — never before.
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        entry = self.terminal_slice_entry(
+            state,
+            status="fail",
+            artifact_dir=str(artifact.relative_to(self.repo.resolve())),
+            before_head=before,
+            commit={"requested": True, "created": True, "hash": after},
+            prior_slice_context=self.prior_context_metadata(artifact),
+        )
+        entry.update(
+            changed_files=["README.md"],
+            validation=[{"command": "test", "result": "pass", "notes": ""}],
+            drift_audit={"verdict": "PASS", "path": "drift-audit.md"},
+            code_review={"verdict": "PASS", "path": "code-review.md"},
+            gate_reason="stopped pending reconciliation",
+        )
+        state["slices"].append(entry)
+        state["status"] = "failed"
+        state["stop_reason"] = "stopped pending reconciliation"
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+
+        persisted_status_at_cancel = {}
+
+        def fake_cancel(artifact_dir):
+            persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            persisted_status_at_cancel["status"] = persisted["slices"][0]["status"]
+            return []
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with mock.patch.object(pm_commands, "cancel_reviewer_runs", side_effect=fake_cancel) as cancel:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pm.reconcile(args), 0)
+
+        cancel.assert_called_once_with(artifact)
+        self.assertEqual(persisted_status_at_cancel["status"], "pass")
+
+    def test_reconcile_cancels_tracked_reviewers_when_slice_remains_stopped(self):
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        artifact = run_dir / "slices" / "slice-001"
+        artifact.mkdir(parents=True)
+        entry = self.terminal_slice_entry(
+            state,
+            status="fail",
+            artifact_dir=str(artifact.relative_to(self.repo.resolve())),
+        )
+        state["slices"].append(entry)
+        state["status"] = "failed"
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with mock.patch.object(pm_commands, "cancel_reviewer_runs", return_value=[]) as cancel:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pm.reconcile(args), 2)
+
+        cancel.assert_called_once_with(artifact)
+
+    def _reconcile_fixture_with_real_prior_context(self):
+        """Build a stopped slice entry with real prior-slice-context evidence.
+
+        Backs prior_slice_context with an actual file (via prior_context_metadata)
+        so verify_gate would pass, isolating each test's assertion to the specific
+        prior-context-integrity or context-budget re-check reconcile now runs.
+        """
+        self.prepare_committed_repo()
+        state = self.init_run()
+        run_dir = (self.repo / ".ai-pm" / "current").resolve()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = run_dir / "slices" / "slice-001"
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        prior_context = self.prior_context_metadata(artifact)
+        entry = self.terminal_slice_entry(
+            state,
+            status="fail",
+            artifact_dir=str(artifact.relative_to(self.repo.resolve())),
+            before_head=before,
+            commit={"requested": True, "created": True, "hash": after},
+            prior_slice_context=prior_context,
+        )
+        entry.update(
+            changed_files=["README.md"],
+            validation=[{"command": "test", "result": "pass", "notes": ""}],
+            drift_audit={"verdict": "PASS", "path": "drift-audit.md"},
+            code_review={"verdict": "PASS", "path": "code-review.md"},
+            gate_reason="stopped pending reconciliation",
+        )
+        state["slices"].append(entry)
+        state["status"] = "failed"
+        (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
+        return run_dir, artifact, prior_context
+
+    def test_reconcile_refuses_needs_human_on_prior_context_digest_mismatch(self):
+        # Finding 16: a stopped slice's prior-slice-context digest must be
+        # re-verified at reconcile time, not trusted from the original attempt
+        # — otherwise a run stopped for an integrity breach could be flipped
+        # to pass with no re-verification.
+        run_dir, artifact, prior_context = self._reconcile_fixture_with_real_prior_context()
+        (self.repo / prior_context["path"]).write_text("tampered after stop\n", encoding="utf-8")
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pm.reconcile(args), 2)
+
+        stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(stopped["status"], "needs-human")
+        self.assertIn("SHA-256 mismatch", stopped["stop_reason"])
+        self.assertEqual(stopped["slices"][0]["status"], "needs-human")
+        self.assertEqual(stopped["slices"][0]["gate_reason"], stopped["stop_reason"])
+
+    def test_reconcile_refuses_fail_closed_when_prior_context_artifact_is_gone(self):
+        # A stopped slice whose protected context artifact no longer resolves
+        # to real evidence — the practical form of "no metadata" — must also
+        # fail closed rather than being reconciled on the strength of a
+        # dangling pointer.
+        run_dir, artifact, prior_context = self._reconcile_fixture_with_real_prior_context()
+        (self.repo / prior_context["path"]).unlink()
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pm.reconcile(args), 2)
+
+        stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(stopped["status"], "needs-human")
+        self.assertIn("prior-slice context is missing", stopped["stop_reason"])
+
+    def test_reconcile_refuses_blocked_when_result_would_exceed_next_slice_context_budget(self):
+        # Finding 16: an oversized reconciled result must not skip the budget
+        # projection that keeps the next slice's launch from wedging.
+        # Reconcile cannot steer a repair, so the outcome is a terminal
+        # `blocked` the operator resolves by condensing and re-running.
+        run_dir, artifact, prior_context = self._reconcile_fixture_with_real_prior_context()
+
+        args = argparse.Namespace(repo=str(self.repo), run="current")
+        with mock.patch.object(
+            pm_commands,
+            "projected_prior_slice_context_budget_failure",
+            return_value="accepted reporting would exceed the next context budget",
+        ):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pm.reconcile(args), 2)
+
+        stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(stopped["status"], "blocked")
+        self.assertIn("exceed the next context budget", stopped["stop_reason"])
+        self.assertEqual(stopped["slices"][0]["status"], "blocked")
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_next_executes_toy_harness_and_records_pass(self):
@@ -104,9 +270,10 @@ class RuntimeBatchTests(PmTestCase):
                 "before_head", "changed_files", "summary", "validation", "drift_audit", "code_review",
                 "audit_provenance",
                 "commit", "next_action", "blockers", "gate_reason", "reviewer_tools", "reviewer_policy",
-                "repair", "residual_findings", "continuation_notes", "slice_summary",
+                "repair", "residual_findings", "continuation_notes", "slice_summary", "prior_slice_context",
             },
         )
+        self.assertIn("sha256", state["slices"][0]["prior_slice_context"])
         self.assertEqual(state["slices"][0]["audit_provenance"]["drift-audit"]["performed_by"], "developer-self-audit")
         self.assertEqual(state["slices"][0]["audit_provenance"]["code-review"]["performed_by"], "developer-self-audit")
 
@@ -561,6 +728,7 @@ class RuntimeBatchTests(PmTestCase):
                 artifact_dir=str(artifact.relative_to(self.repo.resolve())),
                 before_head="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
                 commit={"requested": True, "created": True, "hash": "0" * 40},
+                prior_slice_context=self.prior_context_metadata(artifact),
             )
         )
         state["status"] = "failed"

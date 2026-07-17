@@ -163,12 +163,16 @@ class ReviewerContractTests(unittest.TestCase):
             "codex": "-C",
             "copilot": "--add-dir",
             "opencode": "--dir",
+            "qwen": None,
         }
         for tool, repo_flag in repo_flags.items():
             with self.subTest(tool=tool):
                 contract = self.validate(tool=tool)
                 command = reviewer_contract.compose_reviewer_command(contract, "prompt")
-                self.assertEqual(Path(command[command.index(repo_flag) + 1]), self.repo.resolve())
+                if repo_flag is None:
+                    self.assertEqual(command[:2], ["qwen", "--prompt"])
+                else:
+                    self.assertEqual(Path(command[command.index(repo_flag) + 1]), self.repo.resolve())
 
         self.assertEqual(set(reviewer_contract.REVIEWER_PROFILES), set(repo_flags))
         self.assertEqual(
@@ -181,11 +185,16 @@ class ReviewerContractTests(unittest.TestCase):
             "claude": ("--permission-mode", "plan"),
             "codex": ("--sandbox", "read-only"),
             "opencode": ("--agent", "plan"),
+            "qwen": ("--sandbox", "--output-format"),
         }
         for tool, (flag, expected) in cases.items():
             with self.subTest(tool=tool):
                 command = reviewer_contract.compose_reviewer_command(self.validate(tool=tool), "prompt")
-                self.assertEqual(command[command.index(flag) + 1], expected)
+                if tool == "qwen":
+                    self.assertIn(flag, command)
+                    self.assertEqual(command[command.index(expected) + 1], "text")
+                else:
+                    self.assertEqual(command[command.index(flag) + 1], expected)
                 self.assertNotIn("acceptEdits", command)
                 self.assertNotIn("workspace-write", command)
                 self.assertNotIn("build", command)
@@ -196,6 +205,15 @@ class ReviewerContractTests(unittest.TestCase):
     def test_opencode_nondefault_effort_fails_closed(self):
         policy = dict(self.policy, required_effort="high")
         request = dict(self.request, effort="high")
+        contract = reviewer_contract.validate_contract(policy, request, self.run_dir)
+        with self.assertRaises(reviewer_contract.ReviewerContractError) as raised:
+            reviewer_contract.compose_reviewer_command(contract, "prompt")
+        self.assertEqual(raised.exception.issues[0].code, "unsupported-effort")
+        self.assertEqual(raised.exception.issues[0].field, "effort")
+
+    def test_qwen_nondefault_effort_fails_closed(self):
+        policy = dict(self.policy, required_tools=["qwen"], required_effort="high")
+        request = dict(self.request, tool="qwen", effort="high")
         contract = reviewer_contract.validate_contract(policy, request, self.run_dir)
         with self.assertRaises(reviewer_contract.ReviewerContractError) as raised:
             reviewer_contract.compose_reviewer_command(contract, "prompt")

@@ -22,6 +22,10 @@ REVIEWER_PROFILES: dict[str, dict[str, Any]] = {
         "read_only_enforcement": "partial-edit-tools-denied",
         "effort_override": "unsupported",
     },
+    "qwen": {
+        "read_only_enforcement": "prompt-enforced-sandbox-requested",
+        "effort_override": "unsupported",
+    },
 }
 POLICY_FIELDS = {
     "schema_version",
@@ -206,7 +210,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                 "empty-field",
                 "required_tools",
                 "required_tools must select at least one Reviewer harness",
-                "Add at least one of claude, codex, copilot, or opencode, or do not create a Reviewer launch policy.",
+                "Add at least one of claude, codex, copilot, opencode, or qwen, or do not create a Reviewer launch policy.",
             )
         )
     for index, required_tool in enumerate(required_tools):
@@ -216,7 +220,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                     "unsupported-tool",
                     f"required_tools[{index}]",
                     f"no deterministic Reviewer profile exists for {required_tool!r}",
-                    "Choose claude, codex, copilot, or opencode.",
+                    "Choose claude, codex, copilot, opencode, or qwen.",
                 )
             )
     if len(set(required_tools)) != len(required_tools):
@@ -514,6 +518,24 @@ def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]
         if model != "default":
             command.extend(["-m", model])
         command.extend(["--agent", "plan", "--auto", "--dir", repo])
+        return command
+
+    if tool == "qwen":
+        if effort != "default":
+            raise ReviewerContractError(
+                [
+                    ContractIssue(
+                        "unsupported-effort",
+                        "effort",
+                        "the tested Qwen Code command has no effort/variant flag",
+                        "Set effort to 'default'; choose the configured model explicitly if a different capability level is required.",
+                    )
+                ]
+            )
+        command = ["qwen", "--prompt", prompt]
+        if model != "default":
+            command.extend(["--model", model])
+        command.extend(["--sandbox", "--output-format", "text"])
         return command
 
     if tool == "claude":

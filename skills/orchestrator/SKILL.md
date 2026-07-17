@@ -1,6 +1,6 @@
 ---
 name: orchestrator
-description: Routes read-only investigation, drift-audit, and code-review tasks to external AI CLI tools (Claude Code, Codex CLI, GitHub Copilot CLI, and OpenCode) while the current Developer retains implementation, verification, and final responsibility. Use when the user asks to delegate to another model, names one of these CLIs, or wants independent review evidence.
+description: Routes read-only investigation, drift-audit, and code-review tasks to external AI CLI tools (Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, and Qwen Code) while the current Developer retains implementation, verification, and final responsibility. Use when the user asks to delegate to another model, names one of these CLIs, or wants independent review evidence.
 ---
 
 # Orchestrator
@@ -37,7 +37,7 @@ There are no senior/junior tiers. Task scope, model, and effort are explicit req
 
 ## Tool Selection
 
-Claude, Codex, Copilot, and OpenCode are equally eligible to act as Developer or Reviewer. The user, plan, or launcher chooses the tool, model, and effort. Do not rank tools, infer a capability tier from a vendor name, or reject a Reviewer because its harness has weaker mechanical isolation.
+Claude, Codex, Copilot, OpenCode, and Qwen Code are equally eligible to act as Developer or Reviewer. The user, plan, or launcher chooses the tool, model, and effort. Do not rank tools, infer a capability tier from a vendor name, or reject a Reviewer because its harness has weaker mechanical isolation.
 
 Equal eligibility does not imply identical enforcement. Read the selected tool reference and report the actual boundary:
 
@@ -47,6 +47,7 @@ Equal eligibility does not imply identical enforcement. Read the selected tool r
 | Codex CLI | Read-only sandbox | [references/codex.md](references/codex.md) |
 | GitHub Copilot CLI | Prompt-enforced read-only behavior | [references/copilot.md](references/copilot.md) |
 | OpenCode CLI | Plan agent denies edit tools; shell discipline remains prompt-enforced | [references/opencode.md](references/opencode.md) |
+| Qwen Code | Prompt-enforced repository read-only behavior; launcher requests sandboxing | [references/qwen.md](references/qwen.md) |
 
 Harness enforcement is evidence, not model-ranking policy. The Developer and, under Project Manager, repository mutation gates remain the backstop.
 

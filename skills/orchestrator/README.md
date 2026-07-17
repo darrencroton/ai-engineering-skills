@@ -1,6 +1,6 @@
 # Orchestrator
 
-A vendor-neutral Codex skill for delegating bounded read-only review work to Claude Code, Codex CLI, GitHub Copilot CLI, or OpenCode while the current Developer retains implementation and final responsibility.
+A vendor-neutral Codex skill for delegating bounded read-only review work to Claude Code, Codex CLI, GitHub Copilot CLI, OpenCode, or Qwen Code while the current Developer retains implementation and final responsibility.
 
 ## Operating model
 
@@ -19,7 +19,7 @@ Reviewer self-audit fallback is allowed on default slices and must be reported a
 - `references/reviewer-contract.md` — schema-v2 policy/request contract
 - `references/templates.md` — semantic request examples
 - `references/pm-slice-contract.md` — Project Manager integration
-- `references/{claude,codex,copilot,opencode}.md` — harness mechanics and enforcement notes
+- `references/{claude,codex,copilot,opencode,qwen}.md` — harness mechanics and enforcement notes
 - `scripts/reviewer_contract.py` — validation, prompt rendering, and command composition
 - `scripts/reviewer_jobs.py` — tracked Reviewer lifecycle
 - `scripts/reviewer_sessions.py` — session discovery and transcript extraction

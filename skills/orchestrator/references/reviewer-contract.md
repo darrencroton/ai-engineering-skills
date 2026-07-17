@@ -70,12 +70,13 @@ Schema v1, `role`, `access`, `workspace-write`, old Worker keys, and unknown fie
 
 ## Harness profiles
 
-`python3 scripts/reviewer_jobs.py profiles` reports each supported tool's factual read-only enforcement. All four tools are eligible:
+`python3 scripts/reviewer_jobs.py profiles` reports each supported tool's factual read-only enforcement. All five tools are eligible:
 
 - Claude: partial plan-mode enforcement
 - Codex: mechanical read-only sandbox
 - Copilot: prompt-enforced
 - OpenCode: edit tools denied by the plan agent; shell discipline prompt-enforced
+- Qwen Code: prompt-enforced repository read-only behavior; launcher requests sandboxing
 
 These descriptions are evidence, not suitability gates.
 

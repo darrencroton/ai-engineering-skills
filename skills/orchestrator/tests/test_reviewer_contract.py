@@ -325,6 +325,51 @@ class ReviewerContractTests(unittest.TestCase):
             {"drift-audit": None},
         )
 
+    def test_reviewer_status_dead_wrapper_without_status_payload_is_failed(self):
+        reviewer_jobs = load_reviewer_jobs()
+        entry = {
+            "label": "01-opencode-check",
+            "pid": 999999,
+            "tool": "opencode",
+            "status_file": str(self.run_dir / "01-opencode-check-status.json"),
+            "outfile": str(self.run_dir / "01-opencode-check.out"),
+            "errfile": str(self.run_dir / "01-opencode-check.err"),
+            "started_at": "2026-01-01T00:00:00Z",
+            "command": ["opencode"],
+        }
+
+        with mock.patch.object(reviewer_jobs, "process_running", return_value=False):
+            status = reviewer_jobs.reviewer_status(entry)
+
+        self.assertFalse(status["running"])
+        self.assertEqual(status["state"], "failed")
+
+    def test_command_wait_exits_nonzero_for_dead_wrapper_without_status_payload(self):
+        reviewer_jobs = load_reviewer_jobs()
+        entry = {
+            "label": "01-opencode-check",
+            "pid": 999999,
+            "tool": "opencode",
+            "status_file": str(self.run_dir / "01-opencode-check-status.json"),
+            "outfile": str(self.run_dir / "01-opencode-check.out"),
+            "errfile": str(self.run_dir / "01-opencode-check.err"),
+            "started_at": "2026-01-01T00:00:00Z",
+            "command": ["opencode"],
+        }
+        manifest = reviewer_jobs.ensure_manifest(self.run_dir)
+        manifest["reviewers"][entry["label"]] = entry
+        reviewer_jobs.save_manifest(self.run_dir, manifest)
+        args = mock.Mock(run_dir=str(self.run_dir), label=None, timeout=None, interval=0, json=False)
+
+        with mock.patch.object(reviewer_jobs, "process_running", return_value=False), contextlib.redirect_stdout(
+            io.StringIO()
+        ):
+            # A wrapper that died before writing *-status.json must not report
+            # exit 0 ("success") from wait: PM's evidence gate still rejects
+            # such a slice, so a 0 here would mislead any caller trusting the
+            # helper's exit code instead of the gate.
+            self.assertEqual(reviewer_jobs.command_wait(args), 1)
+
     def test_force_cancel_does_not_signal_reused_child_pid(self):
         reviewer_jobs = load_reviewer_jobs()
         status_file = self.run_dir / "01-opencode-check-status.json"

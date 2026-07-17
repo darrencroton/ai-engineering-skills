@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .constants import KNOWN_UNATTENDED_HARNESS_COMMANDS
+from .constants import EXTERNAL_SIDE_EFFECT_PROMPT_RE, KNOWN_UNATTENDED_HARNESS_COMMANDS
 from .models import PmError, PlanSlice
 from .process import run_command
 from .runtime import slice_environment
@@ -56,17 +56,6 @@ HARD_PROMPT_MARKERS: dict[str, tuple[str, ...]] = {
         "license change",
     ),
 }
-
-EXTERNAL_SIDE_EFFECT_PROMPT_RE = re.compile(
-    r"\b(?:do you want to|approve|confirm|allow|permission to|shall i|should i|ready to)\b"
-    r"[^.\n?]{0,120}\b(?:push(?: to remote)?|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|"
-    r"deploy|release|publish|install (?:a )?dependenc(?:y|ies)|change (?:the )?license|license change)\b"
-    r"|"
-    r"\b(?:push to remote|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|deploy|release|publish|"
-    r"install (?:a )?dependenc(?:y|ies)|license change)\b[^.\n]{0,60}(?:\?|yes/no|\[y/n\]|approve|confirm)",
-    re.IGNORECASE,
-)
-
 
 class TmuxHarnessAdapter:
     """Single tmux-backed harness adapter for the configured command."""

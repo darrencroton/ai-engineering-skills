@@ -385,10 +385,10 @@ def status(args: argparse.Namespace) -> int:
         if state.get("status") in {"running", "resuming"} and session_name and shutil.which("tmux"):
             session_alive = run_command(["tmux", "has-session", "-t", session_name], allow_failure=True).returncode == 0
             if not session_alive:
-                artifact_value = current.get("artifact_dir")
-                artifact_dir = Path(str(artifact_value)) if artifact_value else None
-                if artifact_dir is not None and not artifact_dir.is_absolute():
-                    artifact_dir = repo / artifact_dir
+                # _slice_artifact_dir raises on a missing/empty artifact_dir, so
+                # only call it when one is present; keep artifact_dir None
+                # otherwise, same as the inline check this replaces.
+                artifact_dir = _slice_artifact_dir(repo, current) if current.get("artifact_dir") else None
                 result_path = artifact_dir / "developer-result.json" if artifact_dir else None
                 if result_path is not None and result_path.exists():
                     print(

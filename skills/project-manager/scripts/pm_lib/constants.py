@@ -207,3 +207,20 @@ REVIEWER_CREDENTIAL_HOMES: dict[str, tuple[str, str, str]] = {
 # finalize-time enforcement and reviewer_contract.py's reserved_skill_sets
 # pre-launch check). Single source of truth so the two layers cannot drift.
 REQUIRED_AUDIT_SKILLS = ("drift-audit", "code-review")
+
+# Detects "push / create PR / deploy / install dependency / license change"
+# prompts — the external-side-effect stop condition enforced at two layers:
+# tmux_adapter.detect_hard_prompt (send-time guard, whitespace-normalized
+# original-case pane text) and runtime.extract_operational_hints (offline
+# hint extraction over already-lowercased text). One definition so a pattern
+# fix can't leave either layer silently stale; IGNORECASE makes it correct
+# against both a lowercased string and original-case text.
+EXTERNAL_SIDE_EFFECT_PROMPT_RE = re.compile(
+    r"\b(?:do you want to|approve|confirm|allow|permission to|shall i|should i|ready to)\b"
+    r"[^.\n?]{0,120}\b(?:push(?: to remote)?|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|"
+    r"deploy|release|publish|install (?:a )?dependenc(?:y|ies)|change (?:the )?license|license change)\b"
+    r"|"
+    r"\b(?:push to remote|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|deploy|release|publish|"
+    r"install (?:a )?dependenc(?:y|ies)|license change)\b[^.\n]{0,60}(?:\?|yes/no|\[y/n\]|approve|confirm)",
+    re.IGNORECASE,
+)

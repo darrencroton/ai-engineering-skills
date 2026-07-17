@@ -285,6 +285,23 @@ class ObservationHintTests(PmTestCase):
         external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
         self.assertTrue(external["hard_stop"])
 
+    def test_shared_external_side_effect_regex_flags_same_novel_phrase_in_both_layers(self):
+        # detect_hard_prompt (send-time guard) and extract_operational_hints
+        # (offline hint extraction) are two independent enforcement layers for
+        # the same external-side-effect stop condition; both must draw on the
+        # one compiled pattern in constants.py so a fix to one can't leave the
+        # other silently stale.
+        self.assertIs(pm_tmux_adapter.EXTERNAL_SIDE_EFFECT_PROMPT_RE, pm_runtime.EXTERNAL_SIDE_EFFECT_PROMPT_RE)
+
+        novel_prompt = "Ready to install a dependency for this build, shall I proceed?"
+
+        hard_prompt = pm.TmuxHarnessAdapter.detect_hard_prompt(novel_prompt)
+        self.assertIn("external_side_effect_request", hard_prompt["kinds"])
+
+        hints = pm.extract_operational_hints(novel_prompt, process_running=True, result_exists=False)
+        external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
+        self.assertTrue(external["hard_stop"])
+
     def test_operational_hints_ignore_instructional_timeout_flags(self):
         text = 'Use reviewer_jobs.py wait --run-dir "$run_dir" --label check --timeout 300.'
         hints = pm.extract_operational_hints(text, process_running=True, result_exists=False)

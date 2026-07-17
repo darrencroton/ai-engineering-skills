@@ -30,7 +30,7 @@ if str(SCRIPT_DIR) not in sys.path:
 from reviewer_contract import (
     ReviewerContractError,
     REVIEWER_PROFILES,
-    LABEL_RE as CONTRACT_LABEL_RE,
+    LABEL_RE,
     compose_reviewer_command,
     compile_skill_bundle,
     load_json_object,
@@ -57,7 +57,6 @@ MANIFEST_NAME = "manifest.json"
 MANIFEST_LOCK_NAME = ".manifest.lock"
 INDEX_NAME = "index.json"
 INDEX_LOCK_NAME = ".index.lock"
-LABEL_RE = re.compile(r"^\d{2}-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r\d+)?$")
 # Match line-based SECTION headers even when a model prefixes them with Markdown.
 SECTION_RE = re.compile(r"^\s*(?:#+\s*)?SECTION:\s*([A-Za-z0-9_ -]+)\s*$", re.MULTILINE)
 AUDIT_VERDICT_RE = re.compile(
@@ -408,6 +407,11 @@ def reviewer_status(entry: dict[str, Any]) -> dict[str, Any]:
         state = status_state or "completed"
     elif status_state == "running":
         state = "stalled"
+    elif not status_payload:
+        # Process is dead and the wrapper never wrote a status file (or wrote
+        # nothing readable): it died before recording anything, which is a
+        # failure to report, not a "finished" completion.
+        state = "failed"
     else:
         state = status_state or "finished"
     return {
@@ -765,7 +769,7 @@ def command_launch(args: argparse.Namespace) -> int:
     try:
         policy = load_json_object(policy_path, "policy")
         request = load_json_object(request_path, "request")
-        if isinstance(request.get("label"), str) and CONTRACT_LABEL_RE.fullmatch(request["label"].strip()):
+        if isinstance(request.get("label"), str) and LABEL_RE.fullmatch(request["label"].strip()):
             label = request["label"].strip()
         contract = validate_contract(policy, request, run_dir)
         label = contract["label"]
@@ -962,7 +966,15 @@ def command_wait(args: argparse.Namespace) -> int:
         manifest = load_manifest(run_dir)
         statuses = [reviewer_status(entry) for entry in iter_selected_reviewers(manifest, args.label)]
         if not any(status["running"] for status in statuses):
-            failed = [status for status in statuses if status["returncode"] not in (None, 0)]
+            # A nonzero returncode is the usual failure signature, but a
+            # wrapper that died before writing any status file has
+            # returncode=None too (see reviewer_status) - catch that via the
+            # "failed" state so wait doesn't exit 0 for a dead-on-arrival job.
+            failed = [
+                status
+                for status in statuses
+                if status["returncode"] not in (None, 0) or status["state"] == "failed"
+            ]
             if args.json:
                 print(json.dumps(statuses, indent=2, sort_keys=True))
             else:

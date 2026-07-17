@@ -15,6 +15,7 @@ from typing import Any
 
 from .constants import (
     COMPLETED_SLICE_STATUSES,
+    EXTERNAL_SIDE_EFFECT_PROMPT_RE,
     MAX_PRIOR_SLICE_CONTEXT_BYTES,
     REQUIRED_AUDIT_SKILLS,
     REVIEWER_CREDENTIAL_HOMES,
@@ -334,19 +335,13 @@ def extract_operational_hints(
                 )
             )
 
-        external_side_effect_pattern = (
-            r"\b(?:do you want to|approve|confirm|allow|permission to|shall i|should i|ready to)\b"
-            r"[^.\n?]{0,120}\b(?:push(?: to remote)?|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|"
-            r"deploy|release|publish|install (?:a )?dependenc(?:y|ies)|change (?:the )?license|license change)\b"
-            r"|"
-            r"\b(?:push to remote|create (?:a )?(?:pull request|pr)|open (?:a )?(?:pull request|pr)|deploy|release|publish|"
-            r"install (?:a )?dependenc(?:y|ies)|license change)\b[^.\n]{0,60}(?:\?|yes/no|\[y/n\]|approve|confirm)"
-        )
         for kind, pattern in (
             ("auth_required", r"\b(?:login required|please log in|sign in|enter api key|enter password|mfa|two-factor)\b"),
             ("trust_prompt", r"\b(?:do you trust the (?:contents|files)|trust this (?:directory|folder|repo))\b"),
             ("permission_prompt", r"\b(?:permission denied|grant permission|requires permission|allow access)\b"),
-            ("external_side_effect_request", external_side_effect_pattern),
+            # Shared with tmux_adapter.detect_hard_prompt (see constants.py):
+            # one source of truth for the external-side-effect stop condition.
+            ("external_side_effect_request", EXTERNAL_SIDE_EFFECT_PROMPT_RE),
         ):
             match = re.search(pattern, lowered)
             if match:

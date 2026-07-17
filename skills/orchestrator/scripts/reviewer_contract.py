@@ -34,7 +34,7 @@ POLICY_FIELDS = {
     "required_model",
     "required_effort",
     "reserved_skill_sets",
-    # Optional PM-binding fields (Finding 15): PM always writes these to bind
+    # Optional PM-binding fields: PM always writes these to bind
     # the policy digest to one slice attempt and repair round; a standalone
     # hand-written orchestrator policy may omit them.
     "before_head",

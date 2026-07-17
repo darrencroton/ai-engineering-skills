@@ -209,10 +209,10 @@ def write_reviewer_policy(
         # unrelated to either audit), so this cannot catch every misdraft —
         # only a request that already names a reserved skill incorrectly.
         "reserved_skill_sets": [[skill] for skill in REQUIRED_AUDIT_SKILLS] if plan_slice.independent_audit_required else [],
-        # Attempt/round binding (Finding 15): constant across repair rounds of
-        # one slice attempt lineage, so `before_head` verifies cumulatively,
-        # while `session_generation`/`repair_round` change every round and so
-        # change the digest every round.
+        # Attempt/round binding: `before_head` stays constant across repair
+        # rounds of one slice attempt lineage, so verification stays
+        # cumulative, while `session_generation`/`repair_round` change every
+        # round and so change the digest every round.
         "before_head": before_head,
         "session_generation": int(session_generation),
         "repair_round": int(repair_round),

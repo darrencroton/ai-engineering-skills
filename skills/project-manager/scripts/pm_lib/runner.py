@@ -528,7 +528,7 @@ def _refresh_reviewer_policy_for_repair(
 ) -> None:
     """Rewrite reviewer-policy.json and current_slice.reviewer_policy for one repair round.
 
-    Finding 15: gates.py matches a Reviewer's launch contract against the
+    gates.py matches a Reviewer's launch contract against the
     policy's exact SHA-256, and without a per-round refresh that digest is
     identical across every repair round of a slice, so a Reviewer PASS
     obtained before a tree-changing repair still satisfies an opt-in
@@ -584,7 +584,7 @@ def _relaunch_fresh_session(
     and handle_idle_stall's relaunch tail: both force-stop the dead/escalated
     session, bump session_generation, mint an optional fresh developer session
     id, build a relaunch adapter, write the fresh-session prompt, refresh the
-    Finding-15 reviewer policy for the new round, persist state BEFORE
+    attempt-bound reviewer policy for the new round, persist state BEFORE
     launching, and launch with failure-evidence capture.
 
     Persisting before launching is a safety-ordering invariant: a crash after

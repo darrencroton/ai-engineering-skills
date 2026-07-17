@@ -4,15 +4,32 @@ Notable changes to this repository. Format follows [Keep a Changelog](https://ke
 
 ## [Unreleased]
 
+### Added
+
+- Mechanical repair-round ledger-retention gate (`ledger-retention`): a passing repair result that silently drops a previously archived residual finding or continuation note now fails the gate, except for the round immediately following a `context-budget` repair, which is exempt because that repair requires condensing and rewording ledger items.
+- Slice-entry evidence fields previously left unchecked by run-state validation (`summary`, `changed_files`, `validation`, `drift_audit`/`code_review`, `commit`, `blockers`, `next_action`, `residual_findings`, timestamps) are now shape-validated on load, with persist-time normalization of malformed Developer-reported values to their documented defaults so a garbage result can never wedge a terminal state write.
+
 ### Changed
 
-- **Breaking:** Project Manager state/results now use schema version 4. Passing slice results require a structured `continuation_notes` ledger for decisions, implementation and interface lessons, failed approaches, validation/tooling knowledge, risks, and later-slice guidance; older runs must be reinitialized.
+- **Breaking:** Project Manager run state and Developer results now use schema version 5. Every slice entry persists and validates `prior_slice_context` (the protected prior-slice-context digest carried forward from the attempt that produced it) so a later `reconcile` can re-verify it out-of-process, and `current_slice` and every terminal entry require an explicit `repair` state object; runs on an earlier schema must be reinitialized. This and the following two entries close gaps identified in `docs/report-code-review-and-simplification-20260716.md`.
+- `reviewer-policy.json` now binds `before_head`, `session_generation`, and `repair_round`, and is rewritten — together with the persisted `current_slice.reviewer_policy` snapshot — at the start of every repair round, so a Reviewer `PASS` obtained before a tree-changing repair can no longer satisfy an opt-in independent-audit gate for work the Reviewer never saw.
+- `reconcile` now re-runs the prior-slice-context integrity check and the next-slice context-budget projection before accepting a stopped slice — both refusals are terminal and never steered, matching the runner's own gate — and cancels any leftover tracked reviewers. Slice finalization builds the persisted slice entry once from the same `reviewer-runs-summary.json` snapshot the gate verified, then cancels reviewers afterwards, so an adversely-completing reviewer run can no longer diverge the durable record from the evidence the gate actually checked.
+- The failure-signature taxonomy in `gates.py` (`REPAIRABLE_SIGNATURES`/`TERMINAL_SIGNATURES`) is now genuinely complete and authoritative: every gate failure, including `transient-service-unavailable`, `idle-no-progress`, and `prior-context-integrity`, is constructed through it instead of bypassing it. The duplicated continuation-note and residual-finding ledger validators in `gates.py` and `state.py` are unified into one shared validator.
+- The external-side-effect prompt regex — enforced at two layers, the send-time hard-prompt guard and operational-hint extraction — is now defined once in `constants.py` and imported by both, so a pattern fix can no longer leave one layer stale.
+- **Breaking:** Project Manager state/results were bumped to schema version 4 (superseded by schema version 5 above within this unreleased cycle). Passing slice results require a structured `continuation_notes` ledger for decisions, implementation and interface lessons, failed approaches, validation/tooling knowledge, risks, and later-slice guidance; older runs must be reinitialized.
 - Mode B now generates a hash-addressed, provenance-labelled `prior-slice-context.md` for every slice from the authoritative accepted outcomes of earlier slices. Fresh Developers must read this bounded history alongside the plan and current frozen contract, while controller state, raw transcripts, superseded outcomes, and authorization remain isolated.
 - Slice completion now follows the latest authoritative outcome consistently across selection, reports, and cross-slice context; a superseded earlier pass no longer keeps a slice marked complete after a later terminal outcome.
 - **Breaking:** renamed the `master-controller` skill and MC identity to `project-manager` and PM. Active CLI/package paths, runtime state, environment variables, session prefixes, cross-skill contracts, tests, CI, and documentation now use PM terminology without compatibility aliases; existing `.ai-mc/` runs remain historical evidence and new runs initialize under `.ai-pm/`.
 - **Breaking:** renamed the `ai-orchestrator` skill to `orchestrator`, renamed the executing agent role to Developer, and replaced the Senior/Junior worker roles with one read-only Reviewer role. All supported harnesses are equally eligible for either role; harness-specific read-only enforcement differences are reported as facts rather than used as eligibility policy.
 - **Breaking:** the Reviewer contract uses schema version 2. The CLI uses `--reviewer-*`, runtime state lives under `.orchestrator/`, and Developer/Reviewer fields and artifacts replace their former role-shaped names without compatibility aliases.
 - Audit provenance now records Reviewer execution or explicit Developer self-audit in slice summaries, run reports, and summaries. Default slices may self-audit when no Reviewer is configured or available; independent-audit slices still require separate validated Reviewer runs.
+- `pm_lib`'s re-export facade (`__init__.py`) is retired in favor of direct submodule imports; `pm.py` now imports only the CLI entry point.
+- `runtime.py` is split into `hints.py` (operational-hint extraction), `prompts.py` (prompt/repair-template rendering), and `context.py` (prior-slice-context generation, budget projection, and integrity), keeping `runtime.py` as the residual (environment/paths, reviewer policy/credentials, transcript and reviewer-run capture/cancel). A pure verbatim move with no behavior change.
+- The untested, ungated `ai-reminder` utility is archived out of the orchestrator skill (recoverable from git history); it duplicated domain knowledge maintained and tested elsewhere.
+
+### Fixed
+
+- `reviewer_jobs.py wait` now exits nonzero for a reviewer wrapper that died before writing its status file, instead of misleadingly reporting success. PM's evidence gate already rejected such runs, so this fixes only the helper's exit code.
 
 ## [0.5.0] — 2026-07-13
 

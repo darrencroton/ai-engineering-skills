@@ -189,7 +189,7 @@ Pause budget fields:
 - `pause_counters.consecutive_pauses_current_slice`: count for the active slice
 - `pause_counters.cumulative_pause_seconds_run`: total paused seconds for the run
 
-`supervision` and `operational_events_path` are required schema-v5 fields. PM does not synthesize them when state is incomplete. Schema-v5 objects reject unknown fields at every defined level; retired Worker fields cannot coexist with their Reviewer replacements and are never ignored as extensions.
+`supervision` and `operational_events_path` are required schema-v5 fields. PM does not synthesize them when state is incomplete. Schema-v5 objects reject unknown fields at every defined level; retired Worker fields cannot coexist with their Reviewer replacements and are never ignored as extensions. This extends to a slice entry's Developer-reported evidence fields (`summary`, `changed_files`, `validation`, `drift_audit`, `code_review`, `commit`, `next_action`, `blockers`, `residual_findings`): their shape is validated on every entry regardless of status, but PM validates shape only, never Developer-narration semantics, and `slice_entry_from_gate` normalizes a malformed reported value to its documented default before persisting so that recording a Developer's own malformed failure can never itself wedge the run.
 
 ## Operational Events
 

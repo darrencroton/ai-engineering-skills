@@ -542,6 +542,52 @@ class PlanStateTests(PmTestCase):
         ):
             pm.load_run(run_json)
 
+    def test_run_state_rejects_malformed_slice_evidence_fields(self):
+        # Finding 20: summary, changed_files, validation, drift_audit/code_review,
+        # commit, and residual_findings were previously unchecked on a slice
+        # entry despite the schema's otherwise strict reject-unknown-fields
+        # posture. Pin the shape check for one representative malformed case
+        # per new validator.
+        base = self.init_run()
+        run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
+        cases = (
+            ("summary", lambda entry: entry.__setitem__("summary", 12345), r"slices\[0\]\.summary must be a string"),
+            (
+                "changed_files",
+                lambda entry: entry.__setitem__("changed_files", [{"path": "x.py"}]),
+                r"slices\[0\]\.changed_files must be a list of strings",
+            ),
+            (
+                "validation entry",
+                lambda entry: entry.__setitem__("validation", [{"command": 5, "result": "pass", "notes": ""}]),
+                r"slices\[0\]\.validation\[0\]\.command must be a string when present",
+            ),
+            (
+                "drift_audit",
+                lambda entry: entry.__setitem__("drift_audit", "not-an-object"),
+                r"slices\[0\]\.drift_audit must be an object",
+            ),
+            (
+                "commit",
+                lambda entry: entry.__setitem__("commit", "not-an-object"),
+                r"slices\[0\]\.commit must be an object",
+            ),
+            (
+                "residual_findings",
+                lambda entry: entry.__setitem__("residual_findings", [{"source": "bogus"}]),
+                r"slices\[0\]\.residual_findings\[0\]\.severity must be a non-empty string",
+            ),
+        )
+        for label, mutate, expected in cases:
+            with self.subTest(label=label):
+                state = json.loads(json.dumps(base))
+                entry = self.terminal_slice_entry(state)
+                mutate(entry)
+                state["slices"] = [entry]
+                run_json.write_text(json.dumps(state), encoding="utf-8")
+                with self.assertRaisesRegex(pm.PmError, expected):
+                    pm.load_run(run_json)
+
     def test_run_state_rejects_retired_extra_fields_at_every_schema_level(self):
         base = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
@@ -856,6 +902,59 @@ Continue later.
         gate = pm.GateDecision("pass", "ok", {"changed_files": []}, ())
         entry = pm.slice_entry_from_gate(self.repo, pm.parse_plan(self.plan)[0], self.repo / "art", "2026-01-01T00:00:00Z", gate, "abc123")
         self.assertEqual(entry["before_head"], "abc123")
+
+    def test_slice_entry_from_gate_sanitizes_malformed_developer_evidence_fields(self):
+        # Finding 20: slice_entry_from_gate copies developer-result.json fields
+        # straight through, including on a FAILURE result. If the now-strict
+        # validate_run_state rejected what PM itself persists, the terminal
+        # write recording that very failure would raise inside write_run and
+        # wedge the run. Pin that malformed evidence fields are normalized to
+        # their documented defaults at persist time — for both a pass-shaped
+        # and a failure-shaped gate — and that the normalized entry still
+        # passes the extended validation end to end.
+        base = self.init_run()
+        run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
+        plan_slice = pm.parse_plan(self.plan)[0]
+        malformed_result = {
+            "summary": 12345,
+            "changed_files": [{"path": "x.py"}],
+            "validation": [{"command": 5, "result": "pass", "notes": ""}],
+            "drift_audit": "not-an-object",
+            "code_review": {"verdict": 5, "path": ""},
+            "commit": "not-an-object",
+            "next_action": 999,
+            "blockers": [1, 2, 3],
+            "residual_findings": [{"source": "bogus"}],
+            "continuation_notes": [],
+        }
+        for status in ("pass", "fail"):
+            with self.subTest(status=status):
+                artifact_dir = self.repo / ".ai-pm" / "runs" / base["run_id"] / "slices" / f"slice-{status}"
+                gate = pm.GateDecision(status, "test fixture", dict(malformed_result), ())
+                entry = pm.slice_entry_from_gate(
+                    self.repo,
+                    plan_slice,
+                    artifact_dir,
+                    "2026-01-01T00:00:00Z",
+                    gate,
+                    before_head="a" * 40,
+                    reviewer_policy={"sha256": "a" * 64, "policy": {}},
+                    prior_slice_context=self.prior_context_metadata(artifact_dir),
+                )
+                self.assertEqual(entry["summary"], "")
+                self.assertEqual(entry["changed_files"], [])
+                self.assertEqual(entry["validation"], [])
+                self.assertEqual(entry["drift_audit"], {"verdict": None, "path": ""})
+                self.assertEqual(entry["code_review"], {"verdict": None, "path": ""})
+                self.assertEqual(entry["commit"], {"requested": False, "created": False, "hash": None})
+                self.assertEqual(entry["next_action"], "")
+                self.assertEqual(entry["blockers"], [])
+                self.assertEqual(entry["residual_findings"], [])
+
+                state = json.loads(json.dumps(base))
+                state["slices"] = [entry]
+                run_json.write_text(json.dumps(state), encoding="utf-8")
+                pm.load_run(run_json)  # must not raise: the normalized entry validates
 
     def test_approve_command_clears_explicit_yes_gate(self):
         write_plan(self.plan, approval="yes")

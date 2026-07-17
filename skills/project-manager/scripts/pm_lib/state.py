@@ -499,6 +499,97 @@ def _validate_continuation_notes(value: Any, label: str, path: Path) -> None:
     raise PmError(f"{_ERR} at {path}: {label}{reason.removeprefix('continuation_notes')}")
 
 
+def _validate_residual_findings(value: Any, label: str, path: Path) -> None:
+    """Delegate to gates.residual_findings_status so the rules live in one place.
+
+    Mirrors _validate_continuation_notes immediately above: gates.residual_findings_status
+    messages are always prefixed with the literal field name "residual_findings"
+    (e.g. "residual_findings[0].source is invalid: ..."); swapping that prefix
+    for this call site's structural label adapts the message without
+    re-deriving any rule a second time.
+    """
+    reason = residual_findings_status(value)
+    if reason is None:
+        return
+    raise PmError(f"{_ERR} at {path}: {label}{reason.removeprefix('residual_findings')}")
+
+
+def _validation_list_status(value: Any) -> str | None:
+    """Shape-only check for the validation ledger: a list of objects whose
+    command/result/notes are strings when present.
+
+    Deliberately shape-only, not gates.py's stricter acceptance semantics
+    (non-empty, every result == "pass"): PM's own defaults include an empty
+    validation list on paths that never ran a validation command, such as
+    stop_with_evidence's objective_result.
+    """
+    if not isinstance(value, list):
+        return "validation must be a list of objects"
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            return f"validation[{index}] must be an object"
+        for field in ("command", "result", "notes"):
+            if field in item and not isinstance(item[field], str):
+                return f"validation[{index}].{field} must be a string when present"
+    return None
+
+
+def _validate_validation_list(value: Any, label: str, path: Path) -> None:
+    reason = _validation_list_status(value)
+    if reason is None:
+        return
+    raise PmError(f"{_ERR} at {path}: {label}{reason.removeprefix('validation')}")
+
+
+def _audit_record_status(value: Any) -> str | None:
+    """Shape-only check for drift_audit/code_review: an object with an
+    optional string-or-null verdict and an optional string path.
+
+    PM's own default for both is {"verdict": None, "path": ""}; this check
+    must accept that shape on every path that never ran the audit.
+    """
+    if not isinstance(value, dict):
+        return "must be an object"
+    if "verdict" in value and value["verdict"] is not None and not isinstance(value["verdict"], str):
+        return "verdict must be a string or null"
+    if "path" in value and not isinstance(value["path"], str):
+        return "path must be a string when present"
+    return None
+
+
+def _validate_audit_record(value: Any, label: str, path: Path) -> None:
+    reason = _audit_record_status(value)
+    if reason is not None:
+        raise PmError(f"{_ERR} at {path}: {label} {reason}")
+
+
+def _commit_object_status(value: Any) -> str | None:
+    """Shape-only check for the commit block: booleans requested/created and a
+    string-or-null hash, each optional.
+
+    Deliberately does not require `hash` to look like a full commit hash: for
+    a `pass` entry, verify_slice_gates already proves the reported hash
+    matches the actual HEAD before this object is persisted, and
+    before_head's own full-hash check (below, for every non-assumed-complete
+    entry) already enforces that format at the slice-boundary layer.
+    Re-deriving it here would just duplicate the same rule.
+    """
+    if not isinstance(value, dict):
+        return "must be an object"
+    for field in ("requested", "created"):
+        if field in value and not isinstance(value[field], bool):
+            return f"{field} must be a boolean when present"
+    if "hash" in value and value["hash"] is not None and not isinstance(value["hash"], str):
+        return "hash must be a string or null when present"
+    return None
+
+
+def _validate_commit_object(value: Any, label: str, path: Path) -> None:
+    reason = _commit_object_status(value)
+    if reason is not None:
+        raise PmError(f"{_ERR} at {path}: {label} {reason}")
+
+
 def _validate_reviewer_policy(value: Any, label: str, path: Path) -> None:
     if not isinstance(value, dict):
         raise PmError(f"{_ERR} at {path}: {label} must be an object")
@@ -694,6 +785,26 @@ def validate_run_state(state: dict[str, Any], path: Path) -> dict[str, Any]:
             raise PmError(f"{_ERR} at {path}: slices[{index}].repair.round exceeds policy budget")
         _require_string_list(entry["reviewer_tools"], f"slices[{index}].reviewer_tools", path)
         _validate_continuation_notes(entry["continuation_notes"], f"slices[{index}].continuation_notes", path)
+        # Evidence fields below are Developer-reported (copied from
+        # developer-result.json by slice_entry_from_gate) rather than
+        # PM-derived, so — like continuation_notes/residual_findings above —
+        # their shape is validated on every entry regardless of status.
+        # slice_entry_from_gate normalizes malformed values to these same
+        # documented defaults before persisting, so a well-behaved write never
+        # trips these checks; they exist to reject a hand-edited or
+        # externally-tampered run.json.
+        _require_string(entry["summary"], f"slices[{index}].summary", path, allow_empty=True)
+        _require_string(entry["next_action"], f"slices[{index}].next_action", path, allow_empty=True)
+        _require_string(entry["gate_reason"], f"slices[{index}].gate_reason", path, allow_empty=True)
+        _require_string(entry["started_at"], f"slices[{index}].started_at", path)
+        _require_string(entry["completed_at"], f"slices[{index}].completed_at", path)
+        _require_string_list(entry["changed_files"], f"slices[{index}].changed_files", path)
+        _require_string_list(entry["blockers"], f"slices[{index}].blockers", path)
+        _validate_validation_list(entry["validation"], f"slices[{index}].validation", path)
+        _validate_audit_record(entry["drift_audit"], f"slices[{index}].drift_audit", path)
+        _validate_audit_record(entry["code_review"], f"slices[{index}].code_review", path)
+        _validate_commit_object(entry["commit"], f"slices[{index}].commit", path)
+        _validate_residual_findings(entry["residual_findings"], f"slices[{index}].residual_findings", path)
         if entry["status"] == "assumed-complete":
             if entry["before_head"] is not None or entry["artifact_dir"] is not None:
                 raise PmError(f"{_ERR} at {path}: assumed-complete slice boundaries must be null")
@@ -926,12 +1037,50 @@ def slice_entry_from_gate(
     write_summary: bool = True,
 ) -> dict[str, Any]:
     result = gate.result or {}
+    # Every field read from `result` below is Developer-reported and therefore
+    # untrusted, even on a FAILURE result: write_run validates shape before
+    # writing, so if a malformed developer-result.json were copied straight
+    # through, the terminal write meant to record that very failure would
+    # itself raise and wedge the run. Each field is normalized here to its
+    # documented validated-schema default (empty string / empty list / the
+    # default object) instead of raised, mirroring residual_findings and
+    # continuation_notes immediately below. `gate_reason` comes from the gate
+    # (PM-derived, trusted) and `started_at`/`completed_at` are PM's own
+    # timestamps, so neither needs sanitizing here.
     residual_findings = result.get("residual_findings", [])
     if residual_findings_status(residual_findings) is not None:
         residual_findings = []
     continuation_notes = result.get("continuation_notes", [])
     if continuation_notes_status(continuation_notes) is not None:
         continuation_notes = []
+    summary = result.get("summary", "")
+    if not isinstance(summary, str):
+        summary = ""
+    next_action = result.get("next_action", "")
+    if not isinstance(next_action, str):
+        next_action = ""
+    reported_changed_files = result.get("changed_files")
+    if gate.actual_changed_files:
+        changed_files = list(gate.actual_changed_files)
+    elif isinstance(reported_changed_files, list) and all(isinstance(item, str) for item in reported_changed_files):
+        changed_files = list(reported_changed_files)
+    else:
+        changed_files = []
+    blockers = result.get("blockers", [])
+    if not isinstance(blockers, list) or not all(isinstance(item, str) for item in blockers):
+        blockers = []
+    validation = result.get("validation", [])
+    if _validation_list_status(validation) is not None:
+        validation = []
+    drift_audit = result.get("drift_audit", {"verdict": None, "path": ""})
+    if _audit_record_status(drift_audit) is not None:
+        drift_audit = {"verdict": None, "path": ""}
+    code_review = result.get("code_review", {"verdict": None, "path": ""})
+    if _audit_record_status(code_review) is not None:
+        code_review = {"verdict": None, "path": ""}
+    commit = result.get("commit", {"requested": False, "created": False, "hash": None})
+    if _commit_object_status(commit) is not None:
+        commit = {"requested": False, "created": False, "hash": None}
     entry = {
         "slice_id": plan_slice.slice_id,
         "title": plan_slice.title,
@@ -943,14 +1092,14 @@ def slice_entry_from_gate(
         # uses it to recompute changed files against the exact slice boundary
         # instead of guessing HEAD^ (which misses a slice's earlier commits).
         "before_head": before_head,
-        "changed_files": list(gate.actual_changed_files or tuple(result.get("changed_files") or ())),
-        "summary": result.get("summary", ""),
-        "validation": result.get("validation", []),
-        "drift_audit": result.get("drift_audit", {"verdict": None, "path": ""}),
-        "code_review": result.get("code_review", {"verdict": None, "path": ""}),
-        "commit": result.get("commit", {"requested": False, "created": False, "hash": None}),
-        "next_action": result.get("next_action", ""),
-        "blockers": result.get("blockers", []),
+        "changed_files": changed_files,
+        "summary": summary,
+        "validation": validation,
+        "drift_audit": drift_audit,
+        "code_review": code_review,
+        "commit": commit,
+        "next_action": next_action,
+        "blockers": blockers,
         "residual_findings": copy.deepcopy(residual_findings),
         "continuation_notes": copy.deepcopy(continuation_notes),
         "gate_reason": gate.reason,

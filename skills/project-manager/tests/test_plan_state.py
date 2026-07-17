@@ -8,14 +8,14 @@ class PlanStateTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
-        pm.activate_controller_state(run_json, state)
+        pm_state.activate_controller_state(run_json, state)
         tampered = json.loads(run_json.read_text(encoding="utf-8"))
         tampered["status"] = "complete"
         run_json.write_text(json.dumps(tampered), encoding="utf-8")
 
-        with self.assertRaisesRegex(pm.PmError, "mirror differs from controller-owned state"):
-            pm.load_run(run_json)
-        recovered = pm.load_controller_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "mirror differs from controller-owned state"):
+            pm_state.load_run(run_json)
+        recovered = pm_state.load_controller_run(run_json)
         self.assertEqual(recovered["status"], "initialized")
 
     def test_active_run_fails_closed_when_controller_state_is_deleted(self):
@@ -32,16 +32,16 @@ class PlanStateTests(PmTestCase):
             allow_profile_command=False,
             allow_unattended_default=False,
         )
-        pm.freeze_run_launch_config(args, state)
-        pm.activate_controller_state(run_json, state)
-        controller_path = pm.controller_state_path(run_json)
+        pm_profiles.freeze_run_launch_config(args, state)
+        pm_state.activate_controller_state(run_json, state)
+        controller_path = pm_state.controller_state_path(run_json)
         self.assertIsNotNone(controller_path)
         controller_path.unlink()
 
-        with self.assertRaisesRegex(pm.PmError, "controller-owned run state is missing"):
-            pm.load_run(run_json)
-        with self.assertRaisesRegex(pm.PmError, "controller-owned run state is missing"):
-            pm.write_run(run_json, state)
+        with self.assertRaisesRegex(pm_models.PmError, "controller-owned run state is missing"):
+            pm_state.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "controller-owned run state is missing"):
+            pm_state.write_run(run_json, state)
 
     def test_load_run_rejects_incomplete_schema_v3_supervision(self):
         self.prepare_committed_repo()
@@ -50,8 +50,8 @@ class PlanStateTests(PmTestCase):
         state["supervision"].pop("max_observe_staleness_seconds")
         state["supervision"].pop("min_idle_observation_windows")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "supervision missing required field"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "supervision missing required field"):
+            pm_state.load_run(run_json)
 
     def test_cli_rejects_unsupported_python_before_parsing(self):
         with mock.patch.object(sys, "version_info", (3, 12)), contextlib.redirect_stderr(io.StringIO()) as err:
@@ -59,19 +59,19 @@ class PlanStateTests(PmTestCase):
         self.assertIn("Python 3.13 or newer is required", err.getvalue())
 
     def test_cli_rejects_retired_worker_flags(self):
-        parser = pm.build_parser()
+        parser = pm_cli.build_parser()
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             parser.parse_args(["preflight", "--repo", str(self.repo), "--worker-tools", "codex"])
 
     def test_check_plan_passes_clean_plan(self):
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
         self.assertEqual(report["errors"], [])
         self.assertEqual(report["warnings"], [])
         self.assertEqual(report["approval_gated"], [])
         self.assertEqual(report["slice_count"], 2)
         args = argparse.Namespace(plan=str(self.plan))
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(pm.check_plan(args), 0)
+            self.assertEqual(pm_commands.check_plan(args), 0)
         self.assertIn("Result: PASS", out.getvalue())
 
     def test_check_plan_reports_every_slice_defect_at_once(self):
@@ -83,7 +83,7 @@ class PlanStateTests(PmTestCase):
                      "Approval needed before implementation: not yet decided.\n\n### Validation Plan\n- Commands to run:\n  - git diff --check\n\n### Rollback Path"),
             encoding="utf-8",
         )
-        report = pm.plan_check_report(bad)
+        report = pm_plan.plan_check_report(bad)
         joined = "\n".join(report["errors"])
         self.assertIn("Slice 1", joined)
         self.assertIn("missing required sections: Rollback Path", joined)
@@ -91,12 +91,12 @@ class PlanStateTests(PmTestCase):
         self.assertIn("must be exactly 'yes' or 'no'", joined)
         args = argparse.Namespace(plan=str(bad))
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(pm.check_plan(args), 1)
+            self.assertEqual(pm_commands.check_plan(args), 1)
         self.assertIn("Result: FAIL", out.getvalue())
 
     def test_check_plan_reports_approval_gated_without_error(self):
         write_plan(self.plan, approval="yes")
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
         self.assertEqual(report["errors"], [])
         self.assertEqual(report["approval_gated"], ["Slice 1"])
 
@@ -118,7 +118,7 @@ class PlanStateTests(PmTestCase):
                     encoding="utf-8",
                 )
 
-                report = pm.plan_check_report(self.plan)
+                report = pm_plan.plan_check_report(self.plan)
 
                 self.assertEqual(report["slice_count"], 1)
                 self.assertTrue(report["errors"])
@@ -129,7 +129,7 @@ class PlanStateTests(PmTestCase):
             self.plan.read_text(encoding="utf-8") + "\n## Slice Batches\n\n## Slice-Level Design\n",
             encoding="utf-8",
         )
-        self.assertEqual(pm.plan_check_report(self.plan)["errors"], [])
+        self.assertEqual(pm_plan.plan_check_report(self.plan)["errors"], [])
 
     def test_check_plan_rejects_authorized_entries_that_match_no_git_path(self):
         for entry in [".", "./", "/", "``", "../outside.md", "docs//file.md", "docs\\file.md"]:
@@ -140,8 +140,8 @@ class PlanStateTests(PmTestCase):
                     encoding="utf-8",
                 )
 
-                report = pm.plan_check_report(self.plan)
-                runnable, reasons = pm.eligibility(pm.parse_plan(self.plan)[0])
+                report = pm_plan.plan_check_report(self.plan)
+                runnable, reasons = pm_plan.eligibility(pm_plan.parse_plan(self.plan)[0])
 
                 self.assertIn("invalid authorized surface", "\n".join(report["errors"]))
                 self.assertFalse(runnable)
@@ -153,7 +153,7 @@ class PlanStateTests(PmTestCase):
             "- Files allowed to change:\n  - package.json\n  - LICENSE\n  - poetry.lock",
         )
         self.plan.write_text(text, encoding="utf-8")
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
         self.assertEqual(report["errors"], [])
         joined = "\n".join(report["warnings"])
         self.assertIn("'package.json' looks dependency-shaped", joined)
@@ -166,12 +166,12 @@ class PlanStateTests(PmTestCase):
             "- Files allowed to change:\n  - `**`",
         ) + "\n## Slice Batches\n\n- Batch A: Slices 1-2 — related docs.\n"
         self.plan.write_text(text, encoding="utf-8")
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
         self.assertEqual(report["errors"], [])
         joined = "\n".join(report["warnings"])
         self.assertIn("authorizes the entire repository", joined)
         self.assertIn("batches bind in Mode A sessions only", joined)
-        self.assertIn("matches top-level paths only", pm.surface_lint("*"))
+        self.assertIn("matches top-level paths only", pm_plan.surface_lint("*"))
 
     def test_check_plan_does_not_lint_an_invalid_authorized_entry(self):
         self.plan.write_text(
@@ -179,7 +179,7 @@ class PlanStateTests(PmTestCase):
             encoding="utf-8",
         )
 
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
 
         self.assertIn("invalid authorized surface", "\n".join(report["errors"]))
         self.assertNotIn("package.json", "\n".join(report["warnings"]))
@@ -193,8 +193,8 @@ class PlanStateTests(PmTestCase):
                     encoding="utf-8",
                 )
 
-                report = pm.plan_check_report(self.plan)
-                runnable, reasons = pm.eligibility(pm.parse_plan(self.plan)[0])
+                report = pm_plan.plan_check_report(self.plan)
+                runnable, reasons = pm_plan.eligibility(pm_plan.parse_plan(self.plan)[0])
 
                 self.assertIn("unwrapped whitespace", "\n".join(report["errors"]))
                 self.assertFalse(runnable)
@@ -209,7 +209,7 @@ class PlanStateTests(PmTestCase):
                     self.plan.read_text(encoding="utf-8").replace("  - README.md", f"  - {entry}"),
                     encoding="utf-8",
                 )
-                self.assertEqual(pm.plan_check_report(self.plan)["errors"], [])
+                self.assertEqual(pm_plan.plan_check_report(self.plan)["errors"], [])
 
     def test_check_plan_warns_when_plain_entry_names_existing_directory(self):
         (self.repo / "docs").mkdir()
@@ -221,7 +221,7 @@ class PlanStateTests(PmTestCase):
                     encoding="utf-8",
                 )
 
-                report = pm.plan_check_report(self.plan, repo=self.repo)
+                report = pm_plan.plan_check_report(self.plan, repo=self.repo)
 
                 self.assertEqual(report["errors"], [])
                 self.assertEqual(
@@ -235,7 +235,7 @@ class PlanStateTests(PmTestCase):
             self.plan.read_text(encoding="utf-8").replace("  - README.md", "  - docs"),
             encoding="utf-8",
         )
-        self.assertNotIn("names an existing directory", "\n".join(pm.plan_check_report(self.plan)["warnings"]))
+        self.assertNotIn("names an existing directory", "\n".join(pm_plan.plan_check_report(self.plan)["warnings"]))
 
     def test_init_surfaces_directory_entry_warning(self):
         (self.repo / "docs").mkdir()
@@ -246,7 +246,7 @@ class PlanStateTests(PmTestCase):
         self.prepare_committed_repo()
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         self.assertIn("names an existing directory", out.getvalue())
 
     def test_check_plan_warns_on_batch_heading_at_any_level(self):
@@ -255,7 +255,7 @@ class PlanStateTests(PmTestCase):
             encoding="utf-8",
         )
 
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
 
         self.assertEqual(report["errors"], [])
         self.assertIn("batches bind in Mode A sessions only", "\n".join(report["warnings"]))
@@ -266,7 +266,7 @@ class PlanStateTests(PmTestCase):
             encoding="utf-8",
         )
 
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
 
         self.assertIn("sits inside a fenced code block", "\n".join(report["errors"]))
 
@@ -277,7 +277,7 @@ class PlanStateTests(PmTestCase):
             self.plan.read_text(encoding="utf-8") + "\n```md\n## Slice Batches\n```\n",
             encoding="utf-8",
         )
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
         self.assertEqual(report["errors"], [])
         self.assertNotIn("batches bind in Mode A sessions only", "\n".join(report["warnings"]))
 
@@ -287,7 +287,7 @@ class PlanStateTests(PmTestCase):
             encoding="utf-8",
         )
 
-        report = pm.plan_check_report(self.plan)
+        report = pm_plan.plan_check_report(self.plan)
 
         self.assertIn("unclosed code fence", "\n".join(report["errors"]))
 
@@ -301,8 +301,8 @@ class PlanStateTests(PmTestCase):
                   "- Approval needed before implementation: none.\n\n### Validation Plan\n- Commands to run:\n  - git diff --check\n\n### Rollback Path\n- Revert CHANGELOG.md.")
         self.plan.write_text(text, encoding="utf-8")
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
-        with self.assertRaisesRegex(pm.PmError, "pre-run sanity check"):
-            pm.init_run(args)
+        with self.assertRaisesRegex(pm_models.PmError, "pre-run sanity check"):
+            pm_commands.init_run(args)
         self.assertFalse((self.repo / ".ai-pm").exists())
 
     def test_init_prints_plan_warnings_but_proceeds(self):
@@ -313,13 +313,13 @@ class PlanStateTests(PmTestCase):
         self.plan.write_text(text, encoding="utf-8")
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         self.assertIn("Plan warning:", out.getvalue())
         self.assertIn("requirements.txt", out.getvalue())
 
     def test_run_state_creation(self):
         state = self.init_run()
-        self.assertEqual(state["schema_version"], pm.SCHEMA_VERSION)
+        self.assertEqual(state["schema_version"], pm_constants.SCHEMA_VERSION)
         self.assertEqual(state["repo_path"], str(self.repo.resolve()))
         self.assertEqual(state["plan_path"], str(self.plan.resolve()))
         self.assertEqual(state["harness"]["name"], "codex")
@@ -334,12 +334,12 @@ class PlanStateTests(PmTestCase):
         passed = self.terminal_slice_entry(state, status="pass")
         blocked = self.terminal_slice_entry(state, status="blocked")
         state["slices"] = [passed, blocked]
-        self.assertNotIn("Slice 1", pm.completed_slice_ids(state))
-        self.assertEqual(pm.next_slice(pm.parse_plan(self.plan), state).slice_id, "Slice 1")
+        self.assertNotIn("Slice 1", pm_plan.completed_slice_ids(state))
+        self.assertEqual(pm_plan.next_slice(pm_plan.parse_plan(self.plan), state).slice_id, "Slice 1")
 
         state["slices"].append(passed)
-        self.assertIn("Slice 1", pm.completed_slice_ids(state))
-        self.assertEqual(pm.next_slice(pm.parse_plan(self.plan), state).slice_id, "Slice 2")
+        self.assertIn("Slice 1", pm_plan.completed_slice_ids(state))
+        self.assertEqual(pm_plan.next_slice(pm_plan.parse_plan(self.plan), state).slice_id, "Slice 2")
 
     def test_init_can_create_and_switch_to_authorized_branch(self):
         self.prepare_committed_repo()
@@ -353,7 +353,7 @@ class PlanStateTests(PmTestCase):
         )
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
 
         self.assertEqual(git(self.repo, "branch", "--show-current"), "pm-trial/pi-calculator")
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
@@ -370,8 +370,8 @@ class PlanStateTests(PmTestCase):
             create_branch=False,
         )
 
-        with self.assertRaisesRegex(pm.PmError, "does not exist"):
-            pm.init_run(args)
+        with self.assertRaisesRegex(pm_models.PmError, "does not exist"):
+            pm_commands.init_run(args)
 
     def test_init_refuses_branch_switch_from_dirty_worktree(self):
         self.prepare_committed_repo()
@@ -385,28 +385,28 @@ class PlanStateTests(PmTestCase):
             create_branch=True,
         )
 
-        with self.assertRaisesRegex(pm.PmError, "dirty worktree"):
-            pm.init_run(args)
+        with self.assertRaisesRegex(pm_models.PmError, "dirty worktree"):
+            pm_commands.init_run(args)
 
     def test_run_state_rejects_unsupported_schema_and_missing_required_fields(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
-        state["schema_version"] = pm.SCHEMA_VERSION - 1
+        state["schema_version"] = pm_constants.SCHEMA_VERSION - 1
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "unsupported run-state schema"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "unsupported run-state schema"):
+            pm_state.load_run(run_json)
 
-        state["schema_version"] = pm.SCHEMA_VERSION
+        state["schema_version"] = pm_constants.SCHEMA_VERSION
         state.pop("supervision")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "missing required field.*supervision"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "missing required field.*supervision"):
+            pm_state.load_run(run_json)
 
         state = self.init_run()
         state["supervision"]["pause_counters"].pop("cumulative_pause_seconds_run")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "supervision.pause_counters missing required field"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "supervision.pause_counters missing required field"):
+            pm_state.load_run(run_json)
 
     def test_run_state_carrying_prior_schema_version_is_rejected_with_fresh_init_message(self):
         # A run initialized under the retired schema-v4 shape (before
@@ -416,8 +416,8 @@ class PlanStateTests(PmTestCase):
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
         state["schema_version"] = 4
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "unsupported run-state schema.*initialize a new PM run"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "unsupported run-state schema.*initialize a new PM run"):
+            pm_state.load_run(run_json)
 
     def test_terminal_slice_entry_requires_prior_slice_context_shape(self):
         # Finding 16: reconcile can only re-verify a stopped slice's protected
@@ -430,8 +430,8 @@ class PlanStateTests(PmTestCase):
         entry = self.terminal_slice_entry(state)
         self.assertIn("prior_slice_context", entry)
         state["slices"] = [entry]
-        pm.write_run(run_json, state)
-        reloaded = pm.load_run(run_json)
+        pm_state.write_run(run_json, state)
+        reloaded = pm_state.load_run(run_json)
         self.assertEqual(
             reloaded["slices"][0]["prior_slice_context"], entry["prior_slice_context"]
         )
@@ -439,8 +439,8 @@ class PlanStateTests(PmTestCase):
         missing = self.terminal_slice_entry(state, prior_slice_context=None)
         state["slices"] = [missing]
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].prior_slice_context must be an object"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, r"slices\[0\].prior_slice_context must be an object"):
+            pm_state.load_run(run_json)
 
         malformed = self.terminal_slice_entry(
             state, prior_slice_context={"path": "prior-slice-context.md", "sha256": "not-a-digest"}
@@ -448,9 +448,9 @@ class PlanStateTests(PmTestCase):
         state["slices"] = [malformed]
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(
-            pm.PmError, r"slices\[0\].prior_slice_context.sha256 must be a 64-character lowercase hex digest"
+            pm_models.PmError, r"slices\[0\].prior_slice_context.sha256 must be a 64-character lowercase hex digest"
         ):
-            pm.load_run(run_json)
+            pm_state.load_run(run_json)
 
         assumed = self.terminal_slice_entry(state, status="assumed-complete")
         assumed["before_head"] = None
@@ -458,8 +458,8 @@ class PlanStateTests(PmTestCase):
         assumed["prior_slice_context"] = {"path": "prior-slice-context.md", "sha256": "b" * 64}
         state["slices"] = [assumed]
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "assumed-complete slice prior_slice_context must be absent or null"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, "assumed-complete slice prior_slice_context must be absent or null"):
+            pm_state.load_run(run_json)
 
     def test_run_state_rejects_incomplete_or_unsafe_nested_schema_v3_state(self):
         base = self.init_run()
@@ -490,36 +490,36 @@ class PlanStateTests(PmTestCase):
                 state = json.loads(json.dumps(base))
                 mutate(state)
                 run_json.write_text(json.dumps(state), encoding="utf-8")
-                with self.assertRaisesRegex(pm.PmError, expected):
-                    pm.load_run(run_json)
+                with self.assertRaisesRegex(pm_models.PmError, expected):
+                    pm_state.load_run(run_json)
 
         state = json.loads(json.dumps(base))
         state["slices"].append(self.terminal_slice_entry(state))
         state["slices"][0]["repair"]["round"] = -100
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].repair.round must be an integer >= 0"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, r"slices\[0\].repair.round must be an integer >= 0"):
+            pm_state.load_run(run_json)
 
         state = json.loads(json.dumps(base))
         state["slices"].append(self.terminal_slice_entry(state))
         state["slices"][0]["repair"]["signature_streak"] = 3
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].repair.signature_streak must be an integer between 0 and 2"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, r"slices\[0\].repair.signature_streak must be an integer between 0 and 2"):
+            pm_state.load_run(run_json)
 
         state = json.loads(json.dumps(base))
         state["slices"].append(self.terminal_slice_entry(state))
         state["slices"][0]["repair"]["round"] = state["policy"]["max_repair_attempts"] + 1
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].repair.round exceeds policy budget"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, r"slices\[0\].repair.round exceeds policy budget"):
+            pm_state.load_run(run_json)
 
         state = json.loads(json.dumps(base))
         state["slices"].append(self.terminal_slice_entry(state))
         state["slices"][0].pop("reviewer_policy")
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, r"slices\[0\].reviewer_policy must be an object"):
-            pm.load_run(run_json)
+        with self.assertRaisesRegex(pm_models.PmError, r"slices\[0\].reviewer_policy must be an object"):
+            pm_state.load_run(run_json)
 
     def test_run_state_rejects_malformed_continuation_note_with_derived_label_prefix(self):
         # state._validate_continuation_notes now delegates to
@@ -538,9 +538,9 @@ class PlanStateTests(PmTestCase):
         state["slices"].append(entry)
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with self.assertRaisesRegex(
-            pm.PmError, r"slices\[0\]\.continuation_notes\[0\]\.category is invalid"
+            pm_models.PmError, r"slices\[0\]\.continuation_notes\[0\]\.category is invalid"
         ):
-            pm.load_run(run_json)
+            pm_state.load_run(run_json)
 
     def test_run_state_rejects_malformed_slice_evidence_fields(self):
         # Finding 20: summary, changed_files, validation, drift_audit/code_review,
@@ -585,8 +585,8 @@ class PlanStateTests(PmTestCase):
                 mutate(entry)
                 state["slices"] = [entry]
                 run_json.write_text(json.dumps(state), encoding="utf-8")
-                with self.assertRaisesRegex(pm.PmError, expected):
-                    pm.load_run(run_json)
+                with self.assertRaisesRegex(pm_models.PmError, expected):
+                    pm_state.load_run(run_json)
 
     def test_run_state_rejects_retired_extra_fields_at_every_schema_level(self):
         base = self.init_run()
@@ -601,9 +601,9 @@ class PlanStateTests(PmTestCase):
             "allow_profile_command": False,
             "allow_unattended_default": False,
         }
-        current_slice = pm.current_slice_state(
+        current_slice = pm_state.current_slice_state(
             self.repo,
-            pm.parse_plan(self.plan)[0],
+            pm_plan.parse_plan(self.plan)[0],
             self.repo / ".ai-pm" / "runs" / base["run_id"] / "slices" / "slice-001",
             "pm_test_slice-001_a1",
             1,
@@ -671,16 +671,16 @@ class PlanStateTests(PmTestCase):
                 state = json.loads(json.dumps(base))
                 mutate(state)
                 run_json.write_text(json.dumps(state), encoding="utf-8")
-                with self.assertRaisesRegex(pm.PmError, expected):
-                    pm.load_run(run_json)
+                with self.assertRaisesRegex(pm_models.PmError, expected):
+                    pm_state.load_run(run_json)
 
     def test_append_operational_event_does_not_rewrite_run_json(self):
         state = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
         before = run_json.read_text(encoding="utf-8")
 
-        event = pm.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
-        second = pm.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+        event = pm_state.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+        second = pm_state.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
 
         self.assertEqual(run_json.read_text(encoding="utf-8"), before)
         self.assertEqual(event["event_id"], "op-0001")
@@ -692,8 +692,8 @@ class PlanStateTests(PmTestCase):
         self.assertEqual(records[0]["kind"], "manual_note")
 
     def test_current_slice_state_records_before_head_and_pause_slot(self):
-        plan_slice = pm.parse_plan(self.plan)[0]
-        state = pm.current_slice_state(
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
+        state = pm_state.current_slice_state(
             self.repo,
             plan_slice,
             self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001",
@@ -740,7 +740,7 @@ class PlanStateTests(PmTestCase):
         output = io.StringIO()
 
         with contextlib.redirect_stdout(output):
-            self.assertEqual(pm.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+            self.assertEqual(pm_commands.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
 
         rendered = output.getvalue()
         self.assertIn("Supervision mode: deterministic-batch", rendered)
@@ -748,23 +748,23 @@ class PlanStateTests(PmTestCase):
         self.assertIn("Paused until: 2026-01-01T01:00:00Z (rolling usage limit reset)", rendered)
 
     def test_runnable_slice(self):
-        slices = pm.parse_plan(self.plan)
-        runnable, reasons = pm.eligibility(slices[0])
+        slices = pm_plan.parse_plan(self.plan)
+        runnable, reasons = pm_plan.eligibility(slices[0])
         self.assertTrue(runnable)
         self.assertEqual(reasons, [])
         self.assertEqual(slices[0].authorized_files, ["README.md"])
 
     def test_approval_needed_slice_blocks(self):
         write_plan(self.plan, approval="yes")
-        slices = pm.parse_plan(self.plan)
-        runnable, reasons = pm.eligibility(slices[0])
+        slices = pm_plan.parse_plan(self.plan)
+        runnable, reasons = pm_plan.eligibility(slices[0])
         self.assertFalse(runnable)
         self.assertTrue(any(reason.startswith("slice is approval-needed") for reason in reasons), reasons)
 
     def test_missing_authorized_surface_blocks(self):
         write_plan(self.plan, include_authorized=False)
-        slices = pm.parse_plan(self.plan)
-        runnable, reasons = pm.eligibility(slices[0])
+        slices = pm_plan.parse_plan(self.plan)
+        runnable, reasons = pm_plan.eligibility(slices[0])
         self.assertFalse(runnable)
         self.assertIn("authorized surface has no files allowed to change", reasons)
 
@@ -774,8 +774,8 @@ class PlanStateTests(PmTestCase):
         state = json.loads(run_json.read_text(encoding="utf-8"))
         state["slices"].append({"slice_id": "Slice 1", "status": "pass"})
         run_json.write_text(json.dumps(state), encoding="utf-8")
-        slices = pm.parse_plan(self.plan)
-        self.assertEqual(pm.next_slice(slices, state).slice_id, "Slice 2")
+        slices = pm_plan.parse_plan(self.plan)
+        self.assertEqual(pm_plan.next_slice(slices, state).slice_id, "Slice 2")
 
     def test_final_slice_stops_before_future_work(self):
         self.plan.write_text(
@@ -791,25 +791,25 @@ Continue later.
 """,
             encoding="utf-8",
         )
-        slices = pm.parse_plan(self.plan)
+        slices = pm_plan.parse_plan(self.plan)
         self.assertNotIn("Future Work", slices[-1].sections["Rollback Path"])
         self.assertNotIn("Next Chat Prompt", slices[-1].sections["Rollback Path"])
 
     def test_approval_free_text_blocks(self):
         for value in ["not yet decided", "none", "maybe later"]:
             write_plan(self.plan, approval=value)
-            plan_slice = pm.parse_plan(self.plan)[0]
+            plan_slice = pm_plan.parse_plan(self.plan)[0]
             self.assertIsNone(plan_slice.approval_needed, value)
-            runnable, reasons = pm.eligibility(plan_slice)
+            runnable, reasons = pm_plan.eligibility(plan_slice)
             self.assertFalse(runnable, value)
             self.assertIn("approval-needed risk flag is missing or unclear", reasons)
 
     def test_approval_exact_no_runs(self):
         write_plan(self.plan, approval="no")
-        self.assertFalse(pm.parse_plan(self.plan)[0].approval_needed)
+        self.assertFalse(pm_plan.parse_plan(self.plan)[0].approval_needed)
 
-    def _slice_with_risk_flags(self, risk_flags: str) -> "pm.PlanSlice":
-        return pm.PlanSlice(1, "t", "", {"Risk Flags": risk_flags})
+    def _slice_with_risk_flags(self, risk_flags: str) -> "pm_models.PlanSlice":
+        return pm_models.PlanSlice(1, "t", "", {"Risk Flags": risk_flags})
 
     def test_independent_audit_required_exact_yes_arms_gate(self):
         plan_slice = self._slice_with_risk_flags(
@@ -835,7 +835,7 @@ Continue later.
             self.assertFalse(plan_slice.independent_audit_required, value)
 
     def test_authorized_files_ignores_stray_bullet(self):
-        plan_slice = pm.PlanSlice(
+        plan_slice = pm_models.PlanSlice(
             1,
             "t",
             "",
@@ -851,27 +851,27 @@ Continue later.
         self.assertEqual(plan_slice.authorized_files, ["README.md"])
 
     def test_is_authorized_path_glob_is_segment_aware(self):
-        self.assertTrue(pm.is_authorized_path("a.md", ["*.md"]))
-        self.assertFalse(pm.is_authorized_path("deep/a.md", ["*.md"]))
-        self.assertTrue(pm.is_authorized_path("deep/a.md", ["**/*.md"]))
-        self.assertTrue(pm.is_authorized_path("src/a.py", ["src/*.py"]))
-        self.assertFalse(pm.is_authorized_path("src/deep/a.py", ["src/*.py"]))
+        self.assertTrue(pm_git_ops.is_authorized_path("a.md", ["*.md"]))
+        self.assertFalse(pm_git_ops.is_authorized_path("deep/a.md", ["*.md"]))
+        self.assertTrue(pm_git_ops.is_authorized_path("deep/a.md", ["**/*.md"]))
+        self.assertTrue(pm_git_ops.is_authorized_path("src/a.py", ["src/*.py"]))
+        self.assertFalse(pm_git_ops.is_authorized_path("src/deep/a.py", ["src/*.py"]))
 
     def test_normalize_authorized_entry_strips_backtick_with_trailing_annotation(self):
         # Regression: entries like "`file.py` (new file)" were previously
         # normalized to "file.py` (new file)" because str.strip("`") only
         # trims from the very ends of the string, so a closing backtick
         # followed by an annotation was never removed.
-        self.assertEqual(pm.normalize_authorized_entry("`nilakantha.py` (new file)"), "nilakantha.py")
+        self.assertEqual(pm_git_ops.normalize_authorized_entry("`nilakantha.py` (new file)"), "nilakantha.py")
         self.assertEqual(
-            pm.normalize_authorized_entry(
+            pm_git_ops.normalize_authorized_entry(
                 "`tests/__init__.py` (new file, only if required for test discovery; must stay empty)"
             ),
             "tests/__init__.py",
         )
-        self.assertEqual(pm.normalize_authorized_entry("`*.md`"), "*.md")
-        self.assertEqual(pm.normalize_authorized_entry("pi_calculator.py"), "pi_calculator.py")
-        self.assertTrue(pm.is_authorized_path("nilakantha.py", ["`nilakantha.py` (new file)"]))
+        self.assertEqual(pm_git_ops.normalize_authorized_entry("`*.md`"), "*.md")
+        self.assertEqual(pm_git_ops.normalize_authorized_entry("pi_calculator.py"), "pi_calculator.py")
+        self.assertTrue(pm_git_ops.is_authorized_path("nilakantha.py", ["`nilakantha.py` (new file)"]))
 
     # --- Review fixes: fail-closed gate ----------------------------------
 
@@ -883,24 +883,24 @@ Continue later.
 
     def test_init_records_plan_digest(self):
         state = self.init_run()
-        self.assertEqual(state["plan"]["sha256"], pm.plan_digest(self.plan))
+        self.assertEqual(state["plan"]["sha256"], pm_plan.plan_digest(self.plan))
 
     def test_verify_plan_unchanged_stops_on_edit(self):
         state = self.init_run()
         self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
-        with self.assertRaisesRegex(pm.PmError, "plan file changed"):
-            pm.verify_plan_unchanged(state, self.plan)
+        with self.assertRaisesRegex(pm_models.PmError, "plan file changed"):
+            pm_plan.verify_plan_unchanged(state, self.plan)
 
     def test_init_rejects_duplicate_slice_numbers(self):
         dup = self.repo / "dup.md"
         dup.write_text("# Plan\n\n## Slice 1: A\n\n## Slice 1: B\n", encoding="utf-8")
         args = argparse.Namespace(repo=str(self.repo), plan=str(dup), harness="codex", worktree_root=None)
-        with self.assertRaisesRegex(pm.PmError, "duplicate slice numbers"):
-            pm.init_run(args)
+        with self.assertRaisesRegex(pm_models.PmError, "duplicate slice numbers"):
+            pm_commands.init_run(args)
 
     def test_slice_entry_records_before_head(self):
-        gate = pm.GateDecision("pass", "ok", {"changed_files": []}, ())
-        entry = pm.slice_entry_from_gate(self.repo, pm.parse_plan(self.plan)[0], self.repo / "art", "2026-01-01T00:00:00Z", gate, "abc123")
+        gate = pm_models.GateDecision("pass", "ok", {"changed_files": []}, ())
+        entry = pm_state.slice_entry_from_gate(self.repo, pm_plan.parse_plan(self.plan)[0], self.repo / "art", "2026-01-01T00:00:00Z", gate, "abc123")
         self.assertEqual(entry["before_head"], "abc123")
 
     def test_slice_entry_from_gate_sanitizes_malformed_developer_evidence_fields(self):
@@ -914,7 +914,7 @@ Continue later.
         # passes the extended validation end to end.
         base = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         malformed_result = {
             "summary": 12345,
             "changed_files": [{"path": "x.py"}],
@@ -930,8 +930,8 @@ Continue later.
         for status in ("pass", "fail"):
             with self.subTest(status=status):
                 artifact_dir = self.repo / ".ai-pm" / "runs" / base["run_id"] / "slices" / f"slice-{status}"
-                gate = pm.GateDecision(status, "test fixture", dict(malformed_result), ())
-                entry = pm.slice_entry_from_gate(
+                gate = pm_models.GateDecision(status, "test fixture", dict(malformed_result), ())
+                entry = pm_state.slice_entry_from_gate(
                     self.repo,
                     plan_slice,
                     artifact_dir,
@@ -954,25 +954,25 @@ Continue later.
                 state = json.loads(json.dumps(base))
                 state["slices"] = [entry]
                 run_json.write_text(json.dumps(state), encoding="utf-8")
-                pm.load_run(run_json)  # must not raise: the normalized entry validates
+                pm_state.load_run(run_json)  # must not raise: the normalized entry validates
 
     def test_approve_command_clears_explicit_yes_gate(self):
         write_plan(self.plan, approval="yes")
         self.prepare_committed_repo()
         state = self.init_run()
-        plan_slice = pm.parse_plan(self.plan)[0]
-        runnable, reasons = pm.eligibility(plan_slice, pm.approved_slice_ids(state))
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
+        runnable, reasons = pm_plan.eligibility(plan_slice, pm_state.approved_slice_ids(state))
         self.assertFalse(runnable)
         self.assertTrue(any("approve command" in reason for reason in reasons))
 
         approve_args = argparse.Namespace(repo=str(self.repo), run="current", slice="Slice 1", reason="risk reviewed")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.approve_slice(approve_args), 0)
+            self.assertEqual(pm_commands.approve_slice(approve_args), 0)
 
         updated = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertIn("Slice 1", updated["approvals"])
         self.assertEqual(updated["approvals"]["Slice 1"]["reason"], "risk reviewed")
-        runnable, reasons = pm.eligibility(plan_slice, pm.approved_slice_ids(updated))
+        runnable, reasons = pm_plan.eligibility(plan_slice, pm_state.approved_slice_ids(updated))
         self.assertTrue(runnable, reasons)
         events_path = self.repo / updated["operational_events_path"]
         records = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines()]
@@ -980,19 +980,19 @@ Continue later.
 
         dry_args = argparse.Namespace(repo=str(self.repo), run="current", dry_run=True)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(dry_args), 0)
+            self.assertEqual(pm_commands.run_next(dry_args), 0)
 
     def test_approve_rejects_non_gated_slice(self):
         self.prepare_committed_repo()
         self.init_run()
         approve_args = argparse.Namespace(repo=str(self.repo), run="current", slice="Slice 1", reason="")
-        with self.assertRaisesRegex(pm.PmError, "not approval-gated"):
-            pm.approve_slice(approve_args)
+        with self.assertRaisesRegex(pm_models.PmError, "not approval-gated"):
+            pm_commands.approve_slice(approve_args)
 
     def test_approval_does_not_clear_unclear_flag(self):
         write_plan(self.plan, approval="not yet decided")
-        plan_slice = pm.parse_plan(self.plan)[0]
-        runnable, reasons = pm.eligibility(plan_slice, {"Slice 1"})
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
+        runnable, reasons = pm_plan.eligibility(plan_slice, {"Slice 1"})
         self.assertFalse(runnable)
         self.assertTrue(any("missing or unclear" in reason for reason in reasons))
 
@@ -1005,14 +1005,14 @@ Continue later.
             assume_complete="Slice 1",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(len(state["slices"]), 1)
         entry = state["slices"][0]
         self.assertEqual(entry["slice_id"], "Slice 1")
         self.assertEqual(entry["status"], "assumed-complete")
         self.assertIn("operator attested", entry["gate_reason"])
-        candidate = pm.next_slice(pm.parse_plan(self.plan), state)
+        candidate = pm_plan.next_slice(pm_plan.parse_plan(self.plan), state)
         self.assertIsNotNone(candidate)
         self.assertEqual(candidate.slice_id, "Slice 2")
 
@@ -1024,8 +1024,8 @@ Continue later.
             worktree_root=None,
             assume_complete="Slice 99",
         )
-        with self.assertRaisesRegex(pm.PmError, "not in the plan"):
-            pm.init_run(args)
+        with self.assertRaisesRegex(pm_models.PmError, "not in the plan"):
+            pm_commands.init_run(args)
 
     def test_init_policy_flags_are_recorded(self):
         args = argparse.Namespace(
@@ -1037,7 +1037,7 @@ Continue later.
             no_commit_required=True,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["policy"]["max_repair_attempts"], 1)
         self.assertFalse(state["policy"]["commit_required"])
@@ -1053,7 +1053,7 @@ Continue later.
             "\n".join(json.dumps({"event_id": f"op-{n:04d}", "kind": "observation"}) for n in (1, 2, 3)) + "\n",
             encoding="utf-8",
         )
-        record = pm.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
+        record = pm_state.append_operational_event(self.repo, state, {"kind": "manual_note", "status": "recorded"})
         self.assertEqual(record["event_id"], "op-0004")
         counter_path = event_path.with_name(event_path.name + ".counter")
         self.assertEqual(counter_path.read_text(encoding="utf-8").strip(), "4")

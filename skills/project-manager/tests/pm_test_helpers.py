@@ -36,6 +36,13 @@ from pm_lib import gates as pm_gates  # noqa: E402
 from pm_lib import observation as pm_observation  # noqa: E402
 from pm_lib import runner as pm_runner  # noqa: E402
 from pm_lib import state as pm_state  # noqa: E402
+from pm_lib import plan as pm_plan  # noqa: E402
+from pm_lib import git_ops as pm_git_ops  # noqa: E402
+from pm_lib import profiles as pm_profiles  # noqa: E402
+from pm_lib import constants as pm_constants  # noqa: E402
+from pm_lib import models as pm_models  # noqa: E402
+from pm_lib import cli as pm_cli  # noqa: E402
+from pm_lib import utils as pm_utils  # noqa: E402
 
 
 def git(repo, *args):
@@ -578,7 +585,7 @@ class PmTestCase(unittest.TestCase):
     def init_run(self):
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         current = self.repo / ".ai-pm" / "current"
         self.assertTrue(current.is_symlink())
         return json.loads((current.resolve() / "run.json").read_text(encoding="utf-8"))
@@ -726,12 +733,12 @@ class PmTestCase(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
 
     def attach_reviewer_policy_snapshot(self, state, artifact):
         state["current_slice"] = {
             "slice_id": "Slice 1",
-            "reviewer_policy": pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
+            "reviewer_policy": pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
         }
 
     def write_gate_result(
@@ -751,7 +758,7 @@ class PmTestCase(unittest.TestCase):
         (artifact / "drift-audit.md").write_text("drift\n", encoding="utf-8")
         (artifact / "code-review.md").write_text("review\n", encoding="utf-8")
         result = {
-            "schema_version": pm.SCHEMA_VERSION,
+            "schema_version": pm_constants.SCHEMA_VERSION,
             "slice_id": "Slice 1",
             "status": "pass",
             "summary": "",
@@ -785,7 +792,7 @@ class PmTestCase(unittest.TestCase):
         (artifact / "developer-result.json").write_text(
             json.dumps(
                 {
-                    "schema_version": pm.SCHEMA_VERSION,
+                    "schema_version": pm_constants.SCHEMA_VERSION,
                     "slice_id": slice_id,
                     "status": "pass",
                     "summary": "",
@@ -812,7 +819,7 @@ class PmTestCase(unittest.TestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
             "reviewer_tools": [],
             "pause": None,

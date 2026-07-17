@@ -14,7 +14,6 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 if str(_SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_DIR))
 
-from pm_lib import *  # noqa: F401,F403
 from pm_lib.cli import main
 
 

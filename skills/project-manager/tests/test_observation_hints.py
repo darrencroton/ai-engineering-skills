@@ -11,7 +11,7 @@ class ObservationHintTests(PmTestCase):
         snapshot = {"current_slice": {"slice_id": "Slice 1", "attempt": 1}}
         base = datetime(2026, 7, 13, tzinfo=timezone.utc)
         for offset in (0, 300, 600):
-            pm.append_operational_event(
+            pm_state.append_operational_event(
                 self.repo,
                 state,
                 {
@@ -22,8 +22,8 @@ class ObservationHintTests(PmTestCase):
                     "detected_at": (base + timedelta(seconds=offset)).isoformat(),
                 },
             )
-        self.assertTrue(pm.idle_stall_due(self.repo, state, snapshot))
-        pm.append_operational_event(
+        self.assertTrue(pm_observation.idle_stall_due(self.repo, state, snapshot))
+        pm_state.append_operational_event(
             self.repo,
             state,
             {
@@ -34,7 +34,7 @@ class ObservationHintTests(PmTestCase):
                 "detected_at": (base + timedelta(seconds=601)).isoformat(),
             },
         )
-        self.assertFalse(pm.idle_stall_due(self.repo, state, snapshot))
+        self.assertFalse(pm_observation.idle_stall_due(self.repo, state, snapshot))
 
     def test_idle_stall_window_resets_after_automatic_repair_send(self):
         self.prepare_committed_repo()
@@ -43,7 +43,7 @@ class ObservationHintTests(PmTestCase):
         snapshot = {"current_slice": {"slice_id": "Slice 1", "attempt": 1}}
         base = datetime(2026, 7, 13, tzinfo=timezone.utc)
         for offset in (0, 300, 600):
-            pm.append_operational_event(
+            pm_state.append_operational_event(
                 self.repo,
                 state,
                 {
@@ -54,7 +54,7 @@ class ObservationHintTests(PmTestCase):
                     "detected_at": (base + timedelta(seconds=offset)).isoformat(),
                 },
             )
-        pm.append_operational_event(
+        pm_state.append_operational_event(
             self.repo,
             state,
             {
@@ -64,7 +64,7 @@ class ObservationHintTests(PmTestCase):
                 "detected_at": (base + timedelta(seconds=601)).isoformat(),
             },
         )
-        pm.append_operational_event(
+        pm_state.append_operational_event(
             self.repo,
             state,
             {
@@ -75,7 +75,7 @@ class ObservationHintTests(PmTestCase):
                 "detected_at": (base + timedelta(seconds=602)).isoformat(),
             },
         )
-        self.assertFalse(pm.idle_stall_due(self.repo, state, snapshot))
+        self.assertFalse(pm_observation.idle_stall_due(self.repo, state, snapshot))
     def test_observe_without_current_slice_returns_snapshot_and_event(self):
         state = self.init_run()
         args = argparse.Namespace(
@@ -89,7 +89,7 @@ class ObservationHintTests(PmTestCase):
         )
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(pm.observe(args), 0)
+            self.assertEqual(pm_commands.observe(args), 0)
 
         snapshot = json.loads(output.getvalue())
         self.assertIsNone(snapshot["current_slice"])
@@ -112,7 +112,7 @@ class ObservationHintTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -137,7 +137,7 @@ class ObservationHintTests(PmTestCase):
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.observe(args), 0)
+                self.assertEqual(pm_commands.observe(args), 0)
 
         snapshot = json.loads(output.getvalue())
         self.assertEqual(snapshot["process"]["running"], True)
@@ -157,7 +157,7 @@ class ObservationHintTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -182,7 +182,7 @@ class ObservationHintTests(PmTestCase):
         )
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.send(args), 0)
+                self.assertEqual(pm_commands.send(args), 0)
         fake_adapter.send_literal.assert_called_once_with("pm_test_slice-001_a1", "You were interrupted. Continue.")
         records = [
             json.loads(line)
@@ -203,7 +203,7 @@ class ObservationHintTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -227,8 +227,8 @@ class ObservationHintTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
-            with self.assertRaisesRegex(pm.PmError, "hard prompt"):
-                pm.send(args)
+            with self.assertRaisesRegex(pm_models.PmError, "hard prompt"):
+                pm_commands.send(args)
         fake_adapter.send_literal.assert_not_called()
 
     def test_hard_prompt_detection_ignores_pm_safety_text(self):
@@ -238,10 +238,10 @@ class ObservationHintTests(PmTestCase):
             "request secrets, or perform destructive actions unless explicitly authorized."
         )
 
-        hard_prompt = pm.TmuxHarnessAdapter.detect_hard_prompt(safety_text)
+        hard_prompt = pm_tmux_adapter.TmuxHarnessAdapter.detect_hard_prompt(safety_text)
         self.assertFalse(hard_prompt["present"])
 
-        hints = pm.extract_operational_hints(safety_text, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(safety_text, process_running=True, result_exists=False)
         self.assertFalse(any(hint["kind"] == "external_side_effect_request" for hint in hints))
 
     def test_full_rendered_developer_prompt_triggers_no_hard_prompt_or_hard_stop_hint(self):
@@ -254,9 +254,9 @@ class ObservationHintTests(PmTestCase):
         # prompt collision found in review.
         state = self.init_run()
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         slice_artifact_dir = run_json.parent / "slices" / "slice-001"
-        prompt = pm.render_developer_prompt(
+        prompt = pm_runtime.render_developer_prompt(
             state,
             plan_slice,
             slice_artifact_dir,
@@ -267,21 +267,21 @@ class ObservationHintTests(PmTestCase):
         )
         self.assertIn("Project Manager Slice Reviewer Contract", prompt)
 
-        hard_prompt = pm.TmuxHarnessAdapter.detect_hard_prompt(prompt)
+        hard_prompt = pm_tmux_adapter.TmuxHarnessAdapter.detect_hard_prompt(prompt)
         self.assertFalse(hard_prompt["present"], hard_prompt.get("kinds"))
 
-        hints = pm.extract_operational_hints(prompt, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(prompt, process_running=True, result_exists=False)
         hard_stop_hints = [hint["kind"] for hint in hints if hint.get("hard_stop")]
         self.assertEqual(hard_stop_hints, [])
 
     def test_hard_prompt_detection_keeps_external_side_effect_prompts(self):
         prompt = "Approve deploy to production? [y/n]"
 
-        hard_prompt = pm.TmuxHarnessAdapter.detect_hard_prompt(prompt)
+        hard_prompt = pm_tmux_adapter.TmuxHarnessAdapter.detect_hard_prompt(prompt)
         self.assertTrue(hard_prompt["present"])
         self.assertIn("external_side_effect_request", hard_prompt["kinds"])
 
-        hints = pm.extract_operational_hints(prompt, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(prompt, process_running=True, result_exists=False)
         external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
         self.assertTrue(external["hard_stop"])
 
@@ -295,19 +295,19 @@ class ObservationHintTests(PmTestCase):
 
         novel_prompt = "Ready to install a dependency for this build, shall I proceed?"
 
-        hard_prompt = pm.TmuxHarnessAdapter.detect_hard_prompt(novel_prompt)
+        hard_prompt = pm_tmux_adapter.TmuxHarnessAdapter.detect_hard_prompt(novel_prompt)
         self.assertIn("external_side_effect_request", hard_prompt["kinds"])
 
-        hints = pm.extract_operational_hints(novel_prompt, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(novel_prompt, process_running=True, result_exists=False)
         external = next(hint for hint in hints if hint["kind"] == "external_side_effect_request")
         self.assertTrue(external["hard_stop"])
 
     def test_operational_hints_ignore_instructional_timeout_flags(self):
         text = 'Use reviewer_jobs.py wait --run-dir "$run_dir" --label check --timeout 300.'
-        hints = pm.extract_operational_hints(text, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(text, process_running=True, result_exists=False)
         self.assertFalse(any(hint["kind"] == "network_transient" for hint in hints))
 
-        real_error = pm.extract_operational_hints(
+        real_error = pm_runtime.extract_operational_hints(
             "Network error: request timed out while contacting the provider.", process_running=True, result_exists=False
         )
         self.assertTrue(any(hint["kind"] == "network_transient" for hint in real_error))
@@ -315,7 +315,7 @@ class ObservationHintTests(PmTestCase):
     def test_operational_hints_parse_rolling_limit_duration(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
 
-        hints = pm.extract_operational_hints(
+        hints = pm_runtime.extract_operational_hints(
             "Usage limit reached. Try again in 2 hours 30 minutes.",
             process_running=True,
             result_exists=False,
@@ -332,7 +332,7 @@ class ObservationHintTests(PmTestCase):
     def test_operational_hints_parse_rolling_limit_absolute_time_around_midnight(self):
         now = datetime(2026, 7, 5, 23, 55, tzinfo=timezone(timedelta(hours=10)))
 
-        hints = pm.extract_operational_hints(
+        hints = pm_runtime.extract_operational_hints(
             "Session limit reached and will reset at 12:10AM.",
             process_running=True,
             result_exists=False,
@@ -344,7 +344,7 @@ class ObservationHintTests(PmTestCase):
         self.assertFalse(usage["hard_stop"])
         self.assertEqual(usage["reset_at"], "2026-07-06T00:10:00+10:00")
 
-        utc_hints = pm.extract_operational_hints(
+        utc_hints = pm_runtime.extract_operational_hints(
             "Usage limit reached and will reset at 14:30 UTC.",
             process_running=True,
             result_exists=False,
@@ -356,7 +356,7 @@ class ObservationHintTests(PmTestCase):
     def test_operational_hints_prefer_relative_duration_over_absolute_time(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone(timedelta(hours=10)))
 
-        hints = pm.extract_operational_hints(
+        hints = pm_runtime.extract_operational_hints(
             "Usage limit reached. It resets at 6:00pm, but try again in 45 minutes.",
             process_running=True,
             result_exists=False,
@@ -376,7 +376,7 @@ class ObservationHintTests(PmTestCase):
         ]
         for text, subtype in cases:
             with self.subTest(subtype=subtype):
-                hints = pm.extract_operational_hints(text, process_running=True, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
+                hints = pm_runtime.extract_operational_hints(text, process_running=True, now=datetime(2026, 7, 5, tzinfo=timezone.utc))
                 usage = next(hint for hint in hints if hint["kind"] == "usage_limit" and hint["subtype"] == subtype)
                 self.assertTrue(usage["hard_stop"])
                 self.assertEqual(usage["recovery_guidance"], "stop-for-user")
@@ -388,7 +388,7 @@ class ObservationHintTests(PmTestCase):
             "If you hit your limit, you can continue on Fable 5 with usage credits."
         )
 
-        hints = pm.extract_operational_hints(text, process_running=True, result_exists=False)
+        hints = pm_runtime.extract_operational_hints(text, process_running=True, result_exists=False)
 
         usage = next(hint for hint in hints if hint["kind"] == "usage_limit")
         self.assertEqual(usage["subtype"], "warning")
@@ -398,7 +398,7 @@ class ObservationHintTests(PmTestCase):
     def test_operational_hints_classify_service_unavailable_and_ambiguous_absolute_reset(self):
         now = datetime(2026, 7, 5, 0, 10, tzinfo=timezone(timedelta(hours=10)))
 
-        service = pm.extract_operational_hints(
+        service = pm_runtime.extract_operational_hints(
             "Service unavailable. Please try again later in 10 minutes.",
             process_running=True,
             now=now,
@@ -408,11 +408,11 @@ class ObservationHintTests(PmTestCase):
         self.assertEqual(service_hint["confidence"], "high")
         self.assertEqual(service_hint["retry_after_seconds"], 600)
 
-        generic = pm.extract_operational_hints("Unexpected server error", process_running=True, now=now)
+        generic = pm_runtime.extract_operational_hints("Unexpected server error", process_running=True, now=now)
         generic_hint = next(hint for hint in generic if hint["kind"] == "service_unavailable")
         self.assertEqual(generic_hint["confidence"], "medium")
 
-        ambiguous = pm.extract_operational_hints(
+        ambiguous = pm_runtime.extract_operational_hints(
             "Session limit reached and will reset at 11:55pm.",
             process_running=True,
             now=now,
@@ -423,7 +423,7 @@ class ObservationHintTests(PmTestCase):
         self.assertTrue(usage["hard_stop"])
 
     def test_only_high_confidence_service_unavailable_reclassifies_terminal_report(self):
-        terminal = pm.GateDecision("blocked", "developer reported blocked", {"status": "blocked"})
+        terminal = pm_models.GateDecision("blocked", "developer reported blocked", {"status": "blocked"})
         high = {
             "kind": "service_unavailable",
             "subtype": "transient",
@@ -431,7 +431,7 @@ class ObservationHintTests(PmTestCase):
             "hard_stop": False,
             "recovery_guidance": "bounded-retry",
         }
-        repaired = pm.reclassify_high_confidence_transient_stop(terminal, [high])
+        repaired = pm_runner.reclassify_high_confidence_transient_stop(terminal, [high])
         self.assertEqual(repaired.status, "repairable")
         self.assertEqual(repaired.signature, "transient-service-unavailable")
         for changed in (
@@ -440,15 +440,15 @@ class ObservationHintTests(PmTestCase):
             {**high, "hard_stop": True},
         ):
             with self.subTest(changed=changed):
-                self.assertIs(pm.reclassify_high_confidence_transient_stop(terminal, [changed]), terminal)
+                self.assertIs(pm_runner.reclassify_high_confidence_transient_stop(terminal, [changed]), terminal)
 
     def test_operational_hints_distinguish_live_and_exited_rolling_limit_guidance(self):
         now = datetime(2026, 7, 5, 14, 0, tzinfo=timezone.utc)
         text = "Usage limit reached. Try again in 1 hour."
 
-        live = pm.extract_operational_hints(text, process_running=True, result_exists=False, now=now)
-        exited = pm.extract_operational_hints(text, process_running=False, result_exists=False, now=now)
-        ready = pm.extract_operational_hints(text, process_running=False, result_exists=True, now=now)
+        live = pm_runtime.extract_operational_hints(text, process_running=True, result_exists=False, now=now)
+        exited = pm_runtime.extract_operational_hints(text, process_running=False, result_exists=False, now=now)
+        ready = pm_runtime.extract_operational_hints(text, process_running=False, result_exists=True, now=now)
 
         self.assertEqual(
             next(h for h in live if h["kind"] == "usage_limit")["recovery_guidance"],
@@ -472,7 +472,7 @@ class ObservationHintTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -499,24 +499,24 @@ class ObservationHintTests(PmTestCase):
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.observe(args), 0)
+                self.assertEqual(pm_commands.observe(args), 0)
             snapshot = json.loads(output.getvalue())
             self.assertEqual(snapshot["operational_hints"][0]["kind"], "usage_limit")
             self.assertTrue(snapshot["operational_hints"][0]["hard_stop"])
-            with self.assertRaisesRegex(pm.PmError, "hard-stop operational hint"):
-                pm.send(args)
+            with self.assertRaisesRegex(pm_models.PmError, "hard-stop operational hint"):
+                pm_commands.send(args)
         fake_adapter.send_literal.assert_not_called()
 
     def test_send_rejects_multiline_text(self):
         self.prepare_committed_repo()
         self.init_run()
         args = argparse.Namespace(repo=str(self.repo), run="current", text="line one\nline two", reason="test")
-        with self.assertRaisesRegex(pm.PmError, "single line"):
-            pm.send(args)
+        with self.assertRaisesRegex(pm_models.PmError, "single line"):
+            pm_commands.send(args)
 
     def test_send_literal_rejects_multiline_text(self):
-        adapter = pm.TmuxHarnessAdapter("codex", "python fake.py")
-        with self.assertRaisesRegex(pm.PmError, "single line"):
+        adapter = pm_tmux_adapter.TmuxHarnessAdapter("codex", "python fake.py")
+        with self.assertRaisesRegex(pm_models.PmError, "single line"):
             adapter.send_literal("some-session", "line one\nline two")
 
 

@@ -16,7 +16,7 @@ class SupervisionRepairTests(PmTestCase):
         with mock.patch.object(pm_runtime, "cancel_reviewer_runs", side_effect=[[{"slice": 1}], [{"slice": 2}]]) as cancel, mock.patch.object(
             pm_runtime, "capture_reviewer_runs_summary"
         ) as capture:
-            results = pm.cancel_run_reviewers(run_dir)
+            results = pm_runtime.cancel_run_reviewers(run_dir)
 
         self.assertEqual(results, [{"slice": 1}, {"slice": 2}])
         self.assertEqual(cancel.call_args_list, [mock.call(first), mock.call(second)])
@@ -26,7 +26,7 @@ class SupervisionRepairTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         run_dir = artifact / "reviewer-runs" / "reviewers-test"
         run_dir.mkdir(parents=True)
-        reviewer_jobs = pm.reviewer_jobs_module()
+        reviewer_jobs = pm_runtime.reviewer_jobs_module()
         reviewer_jobs.ensure_manifest(run_dir)
         launched = reviewer_jobs.start_tracked_reviewer(
             run_dir,
@@ -39,7 +39,7 @@ class SupervisionRepairTests(PmTestCase):
         while not status_path.exists() and time.time() < deadline:
             time.sleep(0.05)
 
-        results = pm.cancel_reviewer_runs(artifact)
+        results = pm_runtime.cancel_reviewer_runs(artifact)
 
         self.assertEqual(results[0]["returncode"], 0, results)
         status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -49,12 +49,12 @@ class SupervisionRepairTests(PmTestCase):
 
     def test_idle_stall_signature_uses_shared_repair_escalation(self):
         repair = pm_state.default_repair_state()
-        gate = pm.GateDecision("repairable", "idle", signature="idle-no-progress")
-        first, terminal = pm.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        gate = pm_models.GateDecision("repairable", "idle", signature="idle-no-progress")
+        first, terminal = pm_runner.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
         self.assertEqual((first, terminal), ("in-session", None))
-        second, terminal = pm.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        second, terminal = pm_runner.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
         self.assertEqual((second, terminal), ("fresh-session", None))
-        third, terminal = pm.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
+        third, terminal = pm_runner.resolve_repair_action(repair, gate.signature, True, 3, gate, "Slice 1")
         self.assertEqual(third, "terminal")
         self.assertEqual(terminal.status, "needs-human")
         self.assertIn("circuit breaker", terminal.reason)
@@ -66,14 +66,14 @@ class SupervisionRepairTests(PmTestCase):
         write_fake_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         command_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
             seconds=10,
             poll_seconds=0.1,
             reason="test",
-            until=pm.utc_now(),
+            until=pm_utils.utc_now(),
             buffer_seconds=0,
             status="needs-human",
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
@@ -84,7 +84,7 @@ class SupervisionRepairTests(PmTestCase):
         )
         before_start = git(self.repo, "rev-parse", "HEAD")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.start_slice(command_args), 0)
+            self.assertEqual(pm_commands.start_slice(command_args), 0)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         running = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(running["status"], "running")
@@ -92,10 +92,10 @@ class SupervisionRepairTests(PmTestCase):
         self.assertEqual(running["current_slice"]["before_head"], before_start)
         self.assertEqual(running["current_slice"]["launch_config"]["harness_command"], command_args.harness_command)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         final_output = io.StringIO()
         with contextlib.redirect_stdout(final_output):
-            final_code = pm.finalize_slice(command_args)
+            final_code = pm_commands.finalize_slice(command_args)
         self.assertEqual(final_code, 0, final_output.getvalue())
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
@@ -111,14 +111,14 @@ class SupervisionRepairTests(PmTestCase):
         write_usage_limit_resume_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         command_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
             seconds=3,
             poll_seconds=0.1,
             reason="rolling usage reset",
-            until=pm.utc_now(),
+            until=pm_utils.utc_now(),
             buffer_seconds=0,
             text="You were interrupted. Review what you were doing then continue.",
             status="needs-human",
@@ -129,10 +129,10 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.start_slice(command_args), 0)
+            self.assertEqual(pm_commands.start_slice(command_args), 0)
         wait_output = io.StringIO()
         with contextlib.redirect_stdout(wait_output):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         first_wait = json.loads(wait_output.getvalue())
         self.assertEqual(first_wait["wait_status"], "timeout")
         usage_hint = next(hint for hint in first_wait["observation"]["operational_hints"] if hint["kind"] == "usage_limit")
@@ -141,14 +141,14 @@ class SupervisionRepairTests(PmTestCase):
         self.assertEqual(usage_hint["recovery_guidance"], "pause-until-reset-plus-buffer-then-send-continuation")
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.pause_until(command_args), 0)
+            self.assertEqual(pm_commands.pause_until(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.send(command_args), 0)
+            self.assertEqual(pm_commands.send(command_args), 0)
         command_args.seconds = 10
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.finalize_slice(command_args), 0)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 0)
 
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -176,7 +176,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
             "pause": None,
             "reviewer_tools": [],
@@ -204,7 +204,7 @@ class SupervisionRepairTests(PmTestCase):
             seconds=10,
             poll_seconds=0.1,
             reason="rolling usage reset",
-            until=pm.utc_now(),
+            until=pm_utils.utc_now(),
             buffer_seconds=0,
             status="needs-human",
             harness_command=None,
@@ -216,13 +216,13 @@ class SupervisionRepairTests(PmTestCase):
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             wait_output = io.StringIO()
             with contextlib.redirect_stdout(wait_output):
-                self.assertEqual(pm.wait(command_args), 0)
+                self.assertEqual(pm_commands.wait(command_args), 0)
             wait_result = json.loads(wait_output.getvalue())
             self.assertEqual(wait_result["wait_status"], "process-exited")
             usage_hint = next(hint for hint in wait_result["observation"]["operational_hints"] if hint["kind"] == "usage_limit")
             self.assertEqual(usage_hint["recovery_guidance"], "restart-from-clean-authorized-state-or-stop-for-user")
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(command_args), 2)
+                self.assertEqual(pm_commands.finalize_slice(command_args), 2)
         state = json.loads((((self.repo / ".ai-pm" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("developer result missing", state["stop_reason"])
@@ -234,7 +234,7 @@ class SupervisionRepairTests(PmTestCase):
         write_no_result_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         command_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -247,11 +247,11 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.start_slice(command_args), 0)
+            self.assertEqual(pm_commands.start_slice(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.finalize_slice(command_args), 2)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 2)
         state = json.loads((((self.repo / ".ai-pm" / "current").resolve()) / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("developer result missing", state["stop_reason"])
@@ -273,7 +273,7 @@ class SupervisionRepairTests(PmTestCase):
             "active": True,
             "capture": "Do you trust the files in this folder?\n",
         }
-        fake_adapter.detect_hard_prompt.side_effect = pm.TmuxHarnessAdapter.detect_hard_prompt
+        fake_adapter.detect_hard_prompt.side_effect = pm_tmux_adapter.TmuxHarnessAdapter.detect_hard_prompt
         wait_args = self._finalize_args()
         wait_args.poll_seconds = 0.05
         activity_log = artifact / "activity-attempt-1.jsonl"
@@ -306,12 +306,12 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         state["slices"].append(
-            pm.slice_entry_from_gate(
+            pm_state.slice_entry_from_gate(
                 self.repo,
-                pm.parse_plan(self.plan)[0],
+                pm_plan.parse_plan(self.plan)[0],
                 (self.repo / ".ai-pm" / "current").resolve() / "slices" / "slice-001",
-                pm.utc_now(),
-                pm.GateDecision("failed", "prior attempt", {"changed_files": []}, ()),
+                pm_utils.utc_now(),
+                pm_models.GateDecision("failed", "prior attempt", {"changed_files": []}, ()),
                 git(self.repo, "rev-parse", "HEAD"),
                 repair=pm_state.default_repair_state(),
                 reviewer_policy={"sha256": "a" * 64, "policy": {}},
@@ -319,7 +319,7 @@ class SupervisionRepairTests(PmTestCase):
             )
         )
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         fake_adapter = mock.Mock()
         fake_adapter.sessions_with_prefix.return_value = []
         fake_adapter.harness_name = "codex"
@@ -334,7 +334,7 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
-            result = pm.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+            result = pm_runner.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
         self.assertTrue(result["started"])
         self.assertEqual(result["attempt"], 2)
         self.assertTrue(result["tmux_session"].endswith("_a2"))
@@ -363,7 +363,7 @@ class SupervisionRepairTests(PmTestCase):
         output = io.StringIO()
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         result = json.loads(output.getvalue())
         self.assertFalse(result["finalized"])
         self.assertEqual(result["status"], "repairable")
@@ -422,12 +422,12 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": before,
             "reviewer_tools": ["opencode"],
             "pause": None,
             "repair": pm_state.default_repair_state(),
-            "reviewer_policy": pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
+            "reviewer_policy": pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json"),
             "prior_slice_context": self.prior_context_metadata(artifact),
         }
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
@@ -442,7 +442,7 @@ class SupervisionRepairTests(PmTestCase):
         output = io.StringIO()
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         result = json.loads(output.getvalue())
         self.assertEqual(result["mode"], "in-session")
 
@@ -461,7 +461,7 @@ class SupervisionRepairTests(PmTestCase):
         self.assertIsNotNone(failure)
         self.assertIn("opencode", failure)
 
-        provenance = pm.reviewer_audit_provenance(artifact, ("opencode",), new_snapshot)
+        provenance = pm_gates.reviewer_audit_provenance(artifact, ("opencode",), new_snapshot)
         for audit in ("drift-audit", "code-review"):
             self.assertNotEqual(provenance[audit]["performed_by"], "reviewer")
 
@@ -506,7 +506,7 @@ class SupervisionRepairTests(PmTestCase):
         output = io.StringIO()
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
 
         finalized = json.loads(output.getvalue())
         self.assertEqual(finalized["mode"], "fresh-session")
@@ -524,7 +524,7 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         fake_adapter = mock.Mock()
         fake_adapter.sessions_with_prefix.return_value = []
         fake_adapter.harness_name = "codex"
@@ -539,7 +539,7 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
-            result = pm.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+            result = pm_runner.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
         self.assertTrue(result["started"])
         persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(persisted["current_slice"]["reviewer_tools"], ["opencode"])
@@ -554,13 +554,13 @@ class SupervisionRepairTests(PmTestCase):
     def test_reviewer_policy_makes_role_and_access_intrinsic(self):
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         sections = dict(plan_slice.sections)
         sections["Validation Plan"] += "\n- Reviewer evidence: run one bounded read-only support check."
-        read_only_slice = pm.PlanSlice(plan_slice.number, plan_slice.title, plan_slice.body, sections)
+        read_only_slice = pm_models.PlanSlice(plan_slice.number, plan_slice.title, plan_slice.body, sections)
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        policy_path = pm.write_reviewer_policy(
+        policy_path = pm_runtime.write_reviewer_policy(
             state, read_only_slice, artifact, ("opencode",), "model", None,
             before_head="a" * 40, session_generation=1, repair_round=0,
         )
@@ -573,10 +573,10 @@ class SupervisionRepairTests(PmTestCase):
         state = self.init_run()
         (self.repo / "README.md").write_text("review context\n", encoding="utf-8")
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        policy_path = pm.write_reviewer_policy(
+        policy_path = pm_runtime.write_reviewer_policy(
             state, plan_slice, artifact, ("opencode",), "model", None,
             before_head="a" * 40, session_generation=1, repair_round=0,
         )
@@ -619,11 +619,11 @@ class SupervisionRepairTests(PmTestCase):
         # something to enforce against.
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        base = pm.parse_plan(self.plan)[0]
+        base = pm_plan.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
 
-        default_policy_path = pm.write_reviewer_policy(
+        default_policy_path = pm_runtime.write_reviewer_policy(
             state, base, artifact, ("opencode",), "model", None,
             before_head="a" * 40, session_generation=1, repair_round=0,
         )
@@ -632,9 +632,9 @@ class SupervisionRepairTests(PmTestCase):
 
         sections = dict(base.sections)
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
-        opt_in_slice = pm.PlanSlice(base.number, base.title, base.body, sections)
+        opt_in_slice = pm_models.PlanSlice(base.number, base.title, base.body, sections)
         self.assertTrue(opt_in_slice.independent_audit_required)
-        opt_in_policy_path = pm.write_reviewer_policy(
+        opt_in_policy_path = pm_runtime.write_reviewer_policy(
             state, opt_in_slice, artifact, ("opencode",), "model", None,
             before_head="a" * 40, session_generation=1, repair_round=0,
         )
@@ -645,19 +645,19 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
         before = git(self.repo, "rev-parse", "HEAD")
         (self.repo / "README.md").write_text("unaccepted work\n", encoding="utf-8")
         state["status"] = "running"
-        state["current_slice"] = pm.current_slice_state(
+        state["current_slice"] = pm_state.current_slice_state(
             self.repo.resolve(),
             plan_slice,
             artifact,
             "pm_test_slice-001_a1",
             1,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             before,
             reviewer_tools=("opencode",),
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
@@ -685,7 +685,7 @@ class SupervisionRepairTests(PmTestCase):
             ) as capture_git_evidence,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(pm.stop_with_evidence(args), 0)
+            self.assertEqual(pm_commands.stop_with_evidence(args), 0)
         capture_git_evidence.assert_called_once_with(self.repo.resolve(), artifact, 1, before)
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertIsNone(stopped["current_slice"])
@@ -699,22 +699,22 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
         state["status"] = "running"
-        state["current_slice"] = pm.current_slice_state(
+        state["current_slice"] = pm_state.current_slice_state(
             self.repo.resolve(),
             plan_slice,
             artifact,
             "pm_test_slice-001_a1",
             1,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             git(self.repo, "rev-parse", "HEAD"),
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
             prior_slice_context=self.prior_context_metadata(artifact),
         )
-        pm.activate_controller_state(run_dir / "run.json", state)
+        pm_state.activate_controller_state(run_dir / "run.json", state)
         (run_dir / "run.json").write_text("{corrupted", encoding="utf-8")
         fake_adapter = mock.Mock()
         args = argparse.Namespace(
@@ -734,12 +734,12 @@ class SupervisionRepairTests(PmTestCase):
         output = io.StringIO()
 
         with mock.patch.object(pm_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(output):
-            self.assertEqual(pm.stop_with_evidence(args), 0)
+            self.assertEqual(pm_commands.stop_with_evidence(args), 0)
 
         result = json.loads(output.getvalue())
         self.assertTrue(result["controller_state_recovered"])
         self.assertTrue(Path(result["tamper_evidence_path"]).is_file())
-        stopped = pm.load_run(run_dir)
+        stopped = pm_state.load_run(run_dir)
         self.assertEqual(stopped["status"], "needs-human")
         self.assertIsNone(stopped["current_slice"])
         fake_adapter.force_stop.assert_called_once_with("pm_test_slice-001_a1")
@@ -750,9 +750,9 @@ class SupervisionRepairTests(PmTestCase):
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
-        pm.activate_controller_state(run_dir / "run.json", state)
+        pm_state.activate_controller_state(run_dir / "run.json", state)
         (run_dir / "run.json").write_text("{broken mirror", encoding="utf-8")
-        controller_path = pm.controller_state_path(run_dir)
+        controller_path = pm_state.controller_state_path(run_dir)
         self.assertIsNotNone(controller_path)
         controller_path.write_text("{broken controller", encoding="utf-8")
         fake_adapter = mock.Mock()
@@ -781,7 +781,7 @@ class SupervisionRepairTests(PmTestCase):
         with mock.patch.object(pm_commands, "TmuxHarnessAdapter", return_value=fake_adapter), mock.patch.object(
             pm_commands, "cancel_run_reviewers", return_value=[]
         ) as cancel_reviewers, contextlib.redirect_stdout(output):
-            self.assertEqual(pm.stop_with_evidence(args), 0)
+            self.assertEqual(pm_commands.stop_with_evidence(args), 0)
 
         result = json.loads(output.getvalue())
         self.assertFalse(result["state_updated"])
@@ -793,18 +793,18 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         artifact = run_dir / "slices" / "slice-001"
         artifact.mkdir(parents=True)
         before = git(self.repo, "rev-parse", "HEAD")
         state["status"] = "running"
-        state["current_slice"] = pm.current_slice_state(
+        state["current_slice"] = pm_state.current_slice_state(
             self.repo.resolve(),
             plan_slice,
             artifact,
             "pm_test_slice-001_a1",
             1,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             before,
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
             prior_slice_context=self.prior_context_metadata(artifact),
@@ -825,7 +825,7 @@ class SupervisionRepairTests(PmTestCase):
 
         fake_adapter = mock.Mock()
         with mock.patch.object(pm_commands, "_current_adapter", return_value=fake_adapter), contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.stop_with_evidence(args), 0)
+            self.assertEqual(pm_commands.stop_with_evidence(args), 0)
         fake_adapter.force_stop.assert_called_once_with("pm_test_slice-001_a1")
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "needs-human")
@@ -865,7 +865,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": before,
             "reviewer_tools": ["opencode"],
             "pause": None,
@@ -887,7 +887,7 @@ class SupervisionRepairTests(PmTestCase):
             with contextlib.redirect_stdout(output):
                 # _finalize_args passes reviewer_tools="" — the gate must come
                 # from persisted state, not this invocation's flags.
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         result = json.loads(output.getvalue())
         self.assertEqual(result["status"], "repairable")
         self.assertEqual(result["repair"]["last_signature"], "reviewer-evidence")
@@ -912,7 +912,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": before,
             "reviewer_tools": [],
             "pause": None,
@@ -931,7 +931,7 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.capture.side_effect = fake_capture
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         fake_adapter.force_stop.assert_called_once_with("pm_test_slice-001_a1")
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
@@ -963,7 +963,7 @@ class SupervisionRepairTests(PmTestCase):
         (artifact / "developer-result-repair-1.json").write_text(
             json.dumps(
                 {
-                    "schema_version": pm.SCHEMA_VERSION,
+                    "schema_version": pm_constants.SCHEMA_VERSION,
                     "slice_id": "Slice 1",
                     "status": "repairable",
                     "residual_findings": [archived_finding],
@@ -983,7 +983,7 @@ class SupervisionRepairTests(PmTestCase):
         output = io.StringIO()
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         result = json.loads(output.getvalue())
         self.assertFalse(result["finalized"])
         self.assertEqual(result["status"], "repairable")
@@ -1022,7 +1022,7 @@ class SupervisionRepairTests(PmTestCase):
         (artifact / "developer-result-repair-1.json").write_text(
             json.dumps(
                 {
-                    "schema_version": pm.SCHEMA_VERSION,
+                    "schema_version": pm_constants.SCHEMA_VERSION,
                     "slice_id": "Slice 1",
                     "status": "repairable",
                     "residual_findings": [archived_finding],
@@ -1041,7 +1041,7 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.capture.side_effect = fake_capture
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
         fake_adapter.force_stop.assert_called_once()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertIsNone(state["current_slice"])
@@ -1065,7 +1065,7 @@ class SupervisionRepairTests(PmTestCase):
         artifact = run_dir / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         self.write_validated_reviewer_run(artifact)
-        reviewer_policy = pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+        reviewer_policy = pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
         state["status"] = "running"
         state["supervision"]["mode"] = "model-supervised"
         state["current_slice"] = {
@@ -1074,7 +1074,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": before,
             "reviewer_tools": ["opencode"],
             "pause": None,
@@ -1099,14 +1099,14 @@ class SupervisionRepairTests(PmTestCase):
             status["skill_verdicts"]["code-review"] = "FAIL"
             status["finished_at"] = "2026-01-01T00:05:00Z"
             status_path.write_text(json.dumps(status), encoding="utf-8")
-            pm.capture_reviewer_runs_summary(artifact)
+            pm_runtime.capture_reviewer_runs_summary(artifact)
             return []
 
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with mock.patch.object(pm_runner, "cancel_run_reviewers", side_effect=adversarial_cancel) as cancel:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
-                    self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                    self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
 
         cancel.assert_called_once()
         result = json.loads(output.getvalue())
@@ -1149,7 +1149,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": before,
             "reviewer_tools": [],
             "pause": None,
@@ -1170,7 +1170,7 @@ class SupervisionRepairTests(PmTestCase):
             with mock.patch.object(pm_runner, "slice_entry_from_gate", wraps=pm_runner.slice_entry_from_gate) as spy:
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
-                    self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                    self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
 
         self.assertEqual(spy.call_count, 1)
         result = json.loads(output.getvalue())
@@ -1204,7 +1204,7 @@ class SupervisionRepairTests(PmTestCase):
             ):
                 output = io.StringIO()
                 with contextlib.redirect_stdout(output):
-                    self.assertEqual(pm.finalize_slice(self._finalize_args()), 0)
+                    self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 0)
 
         result = json.loads(output.getvalue())
         self.assertEqual(result["status"], "repairable")
@@ -1232,7 +1232,7 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.capture.side_effect = fake_capture
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 2)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 2)
         fake_adapter.force_stop.assert_called_once()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "needs-human")
@@ -1259,7 +1259,7 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.capture.side_effect = fake_capture
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 2)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 2)
 
         fake_adapter.force_stop.assert_called_once()
         updated = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
@@ -1289,7 +1289,7 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.capture.side_effect = fake_capture
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.finalize_slice(self._finalize_args()), 2)
+                self.assertEqual(pm_commands.finalize_slice(self._finalize_args()), 2)
         fake_adapter.force_stop.assert_called_once()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
@@ -1299,9 +1299,9 @@ class SupervisionRepairTests(PmTestCase):
         self.assertEqual(state["slices"][0]["repair"]["round"], 3)
 
     def test_repair_state_requires_complete_schema_v3_state(self):
-        with self.assertRaisesRegex(pm.PmError, "missing required repair state"):
+        with self.assertRaisesRegex(pm_models.PmError, "missing required repair state"):
             pm_state.repair_state(None)
-        with self.assertRaisesRegex(pm.PmError, "missing required repair state"):
+        with self.assertRaisesRegex(pm_models.PmError, "missing required repair state"):
             pm_state.repair_state({"slice_id": "Slice 1"})
         self.assertEqual(
             pm_state.repair_state(
@@ -1317,7 +1317,7 @@ class SupervisionRepairTests(PmTestCase):
         write_in_session_repair_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         command_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -1331,12 +1331,12 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.start_slice(command_args), 0)
+            self.assertEqual(pm_commands.start_slice(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         finalize_output = io.StringIO()
         with contextlib.redirect_stdout(finalize_output):
-            self.assertEqual(pm.finalize_slice(command_args), 0)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 0)
         first = json.loads(finalize_output.getvalue())
         self.assertEqual(first["status"], "repairable")
         self.assertEqual(first["mode"], "in-session")
@@ -1346,11 +1346,11 @@ class SupervisionRepairTests(PmTestCase):
         self.assertIsNotNone(state["current_slice"])
         command_args.text = first["send_text"]
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.send(command_args), 0)
+            self.assertEqual(pm_commands.send(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.finalize_slice(command_args), 0)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 0)
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
         self.assertIsNone(state["current_slice"])
@@ -1368,7 +1368,7 @@ class SupervisionRepairTests(PmTestCase):
         write_always_failing_validation_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         command_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -1382,22 +1382,22 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.start_slice(command_args), 0)
+            self.assertEqual(pm_commands.start_slice(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         first_output = io.StringIO()
         with contextlib.redirect_stdout(first_output):
-            self.assertEqual(pm.finalize_slice(command_args), 0)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 0)
         first = json.loads(first_output.getvalue())
         self.assertEqual(first["mode"], "in-session")
         command_args.text = first["send_text"]
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.send(command_args), 0)
+            self.assertEqual(pm_commands.send(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         second_output = io.StringIO()
         with contextlib.redirect_stdout(second_output):
-            self.assertEqual(pm.finalize_slice(command_args), 0)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 0)
         second = json.loads(second_output.getvalue())
         self.assertEqual(second["mode"], "fresh-session")
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
@@ -1407,9 +1407,9 @@ class SupervisionRepairTests(PmTestCase):
         self.assertTrue(state["current_slice"]["tmux_session"].endswith("_a2"))
         self.assertEqual(state["current_slice"]["repair"]["signature_streak"], 2)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.wait(command_args), 0)
+            self.assertEqual(pm_commands.wait(command_args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.finalize_slice(command_args), 2)
+            self.assertEqual(pm_commands.finalize_slice(command_args), 2)
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "needs-human")
         self.assertIn("circuit breaker", state["stop_reason"])
@@ -1420,7 +1420,7 @@ class SupervisionRepairTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         fake_adapter = mock.Mock()
         stale_session = f"pm_{state['run_id']}_slice-099_a1"
         fake_adapter.sessions_with_prefix.return_value = [stale_session]
@@ -1442,7 +1442,7 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
-            result = pm.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+            result = pm_runner.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
 
         fake_adapter.force_stop.assert_called_with(stale_session)
         self.assertEqual(result["reaped_stale_sessions"][0]["tmux_session"], stale_session)
@@ -1462,7 +1462,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -1477,7 +1477,7 @@ class SupervisionRepairTests(PmTestCase):
         args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
-            until=pm.utc_now(),
+            until=pm_utils.utc_now(),
             buffer_seconds=0,
             reason="rolling reset",
             poll_seconds=0.1,
@@ -1489,7 +1489,7 @@ class SupervisionRepairTests(PmTestCase):
         )
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.pause_until(args), 0)
+                self.assertEqual(pm_commands.pause_until(args), 0)
         paused = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(paused["status"], "resuming")
         self.assertIsNone(paused["current_slice"]["pause"])
@@ -1507,7 +1507,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -1534,7 +1534,7 @@ class SupervisionRepairTests(PmTestCase):
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                self.assertEqual(pm.wait(args), 0)
+                self.assertEqual(pm_commands.wait(args), 0)
 
         result = json.loads(output.getvalue())
         self.assertEqual(result["wait_status"], "hard-stop-hint")
@@ -1552,7 +1552,7 @@ class SupervisionRepairTests(PmTestCase):
             "artifact_dir": str(artifact.relative_to(self.repo.resolve())),
             "tmux_session": "pm_test_slice-001_a1",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": "a" * 40,
             "pause": None,
             "reviewer_tools": [],
@@ -1579,19 +1579,19 @@ class SupervisionRepairTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
-            with self.assertRaisesRegex(pm.PmError, "max_single_pause_seconds"):
-                pm.pause_until(args)
+            with self.assertRaisesRegex(pm_models.PmError, "max_single_pause_seconds"):
+                pm_commands.pause_until(args)
 
         state["supervision"]["max_single_pause_seconds"] = 21600
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         fake_adapter.detect_activity.return_value = {"running": True, "active": False, "capture": "Weekly usage limit reached."}
         with mock.patch.object(pm_observation, "TmuxHarnessAdapter", return_value=fake_adapter):
-            with self.assertRaisesRegex(pm.PmError, "hard-stop operational hint"):
-                pm.pause_until(args)
+            with self.assertRaisesRegex(pm_models.PmError, "hard-stop operational hint"):
+                pm_commands.pause_until(args)
 
     def test_reset_slice_pause_counters(self):
         state = {"supervision": {"pause_counters": {"consecutive_pauses_current_slice": 2, "cumulative_pause_seconds_run": 900}}}
-        pm.reset_slice_pause_counters(state)
+        pm_state.reset_slice_pause_counters(state)
         self.assertEqual(state["supervision"]["pause_counters"]["consecutive_pauses_current_slice"], 0)
         # The cumulative per-run budget must survive the per-slice reset.
         self.assertEqual(state["supervision"]["pause_counters"]["cumulative_pause_seconds_run"], 900)
@@ -1599,37 +1599,37 @@ class SupervisionRepairTests(PmTestCase):
     # --- Shared repair-decision core ---------------------------------------
 
     def test_resolve_repair_action_decisions(self):
-        gate = pm.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        gate = pm_models.GateDecision("repairable", "validation did not pass", None, (), "validation")
         repair = pm_state.default_repair_state()
 
-        mode, terminal = pm.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        mode, terminal = pm_runner.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
         self.assertEqual((mode, terminal), ("in-session", None))
         self.assertEqual(repair, {"round": 1, "last_signature": "validation", "signature_streak": 1, "session_generation": 1})
 
-        mode, terminal = pm.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        mode, terminal = pm_runner.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
         self.assertEqual((mode, terminal), ("fresh-session", None))
         self.assertEqual(repair["signature_streak"], 2)
 
-        mode, terminal = pm.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        mode, terminal = pm_runner.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
         self.assertEqual(mode, "terminal")
         self.assertEqual(terminal.status, "needs-human")
         self.assertIn("circuit breaker", terminal.reason)
 
     def test_resolve_repair_action_dead_session_relaunch_keeps_breaker(self):
-        gate = pm.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        gate = pm_models.GateDecision("repairable", "validation did not pass", None, (), "validation")
         repair = pm_state.default_repair_state()
         repair.update(round=1, last_signature="validation", signature_streak=1)
-        mode, terminal = pm.resolve_repair_action(repair, "validation", False, 3, gate, "Slice 1")
+        mode, terminal = pm_runner.resolve_repair_action(repair, "validation", False, 3, gate, "Slice 1")
         self.assertEqual((mode, terminal), ("relaunch", None))
         self.assertEqual(repair["round"], 2)
         # Breaker state untouched: a dead session is a runner condition.
         self.assertEqual(repair["signature_streak"], 1)
 
     def test_resolve_repair_action_budget_exhaustion_is_terminal(self):
-        gate = pm.GateDecision("repairable", "validation did not pass", None, (), "validation")
+        gate = pm_models.GateDecision("repairable", "validation did not pass", None, (), "validation")
         repair = pm_state.default_repair_state()
         repair["round"] = 3
-        mode, terminal = pm.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
+        mode, terminal = pm_runner.resolve_repair_action(repair, "validation", True, 3, gate, "Slice 1")
         self.assertEqual(mode, "terminal")
         self.assertEqual(terminal.status, "blocked")
         self.assertIn("repair budget exhausted", terminal.reason)

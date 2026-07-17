@@ -11,11 +11,11 @@ class RuntimeBatchTests(PmTestCase):
         write_hanging_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
 
-        with mock.patch.object(pm.TmuxHarnessAdapter, "send_prompt", side_effect=pm.PmError("injected send failure")):
+        with mock.patch.object(pm_tmux_adapter.TmuxHarnessAdapter, "send_prompt", side_effect=pm_models.PmError("injected send failure")):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.run_next(self._run_next_args(harness)), 2)
+                self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 2)
 
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "failed")
@@ -54,7 +54,7 @@ class RuntimeBatchTests(PmTestCase):
 
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.reconcile(args), 0)
+            self.assertEqual(pm_commands.reconcile(args), 0)
 
         repaired = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(repaired["slices"][0]["status"], "pass")
@@ -106,7 +106,7 @@ class RuntimeBatchTests(PmTestCase):
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with mock.patch.object(pm_commands, "cancel_reviewer_runs", side_effect=fake_cancel) as cancel:
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.reconcile(args), 0)
+                self.assertEqual(pm_commands.reconcile(args), 0)
 
         cancel.assert_called_once_with(artifact)
         self.assertEqual(persisted_status_at_cancel["status"], "pass")
@@ -129,7 +129,7 @@ class RuntimeBatchTests(PmTestCase):
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with mock.patch.object(pm_commands, "cancel_reviewer_runs", return_value=[]) as cancel:
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.reconcile(args), 2)
+                self.assertEqual(pm_commands.reconcile(args), 2)
 
         cancel.assert_called_once_with(artifact)
 
@@ -181,7 +181,7 @@ class RuntimeBatchTests(PmTestCase):
 
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.reconcile(args), 2)
+            self.assertEqual(pm_commands.reconcile(args), 2)
 
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "needs-human")
@@ -199,7 +199,7 @@ class RuntimeBatchTests(PmTestCase):
 
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.reconcile(args), 2)
+            self.assertEqual(pm_commands.reconcile(args), 2)
 
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "needs-human")
@@ -219,7 +219,7 @@ class RuntimeBatchTests(PmTestCase):
             return_value="accepted reporting would exceed the next context budget",
         ):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.reconcile(args), 2)
+                self.assertEqual(pm_commands.reconcile(args), 2)
 
         stopped = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "blocked")
@@ -233,7 +233,7 @@ class RuntimeBatchTests(PmTestCase):
         write_fake_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -243,7 +243,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 0)
+            self.assertEqual(pm_commands.run_next(run_args), 0)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "partial")
         self.assertEqual(state["supervision"]["mode"], "deterministic-batch")
@@ -294,11 +294,11 @@ class RuntimeBatchTests(PmTestCase):
             poll_seconds=0.1,
             harness_command="python fake.py",
         )
-        with self.assertRaisesRegex(pm.PmError, "active current slice"):
-            pm.run_next(run_args)
+        with self.assertRaisesRegex(pm_models.PmError, "active current slice"):
+            pm_commands.run_next(run_args)
         run_args.scope = "remaining"
-        with self.assertRaisesRegex(pm.PmError, "active current slice"):
-            pm.run_remaining(run_args)
+        with self.assertRaisesRegex(pm_models.PmError, "active current slice"):
+            pm_commands.run_remaining(run_args)
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is required for runtime test")
     def test_run_remaining_regenerates_cumulative_context_for_each_slice(self):
@@ -307,7 +307,7 @@ class RuntimeBatchTests(PmTestCase):
         write_fake_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -318,7 +318,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_remaining(run_args), 0)
+            self.assertEqual(pm_commands.run_remaining(run_args), 0)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "complete")
         self.assertEqual([entry["status"] for entry in state["slices"]], ["pass", "pass"])
@@ -340,7 +340,7 @@ class RuntimeBatchTests(PmTestCase):
             assume_complete="Slice 1",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         run_json = run_dir / "run.json"
         state = json.loads(run_json.read_text(encoding="utf-8"))
@@ -350,10 +350,10 @@ class RuntimeBatchTests(PmTestCase):
         superseded_blocked = self.terminal_slice_entry(state, status="blocked")
         superseded_blocked["summary"] = "SUPERSEDED BLOCKED"
         state["slices"] = [superseded_pass, superseded_blocked, assumed]
-        pm.write_run(run_json, state)
+        pm_state.write_run(run_json, state)
 
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness)), 0)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 0)
 
         context = (run_dir / "slices" / "slice-002" / "prior-slice-context.md").read_text(encoding="utf-8")
         self.assertIn("### Slice 1 — First Slice", context)
@@ -369,7 +369,7 @@ class RuntimeBatchTests(PmTestCase):
         write_no_result_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -379,7 +379,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 2)
+            self.assertEqual(pm_commands.run_next(run_args), 2)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("developer result missing", state["stop_reason"])
@@ -391,7 +391,7 @@ class RuntimeBatchTests(PmTestCase):
         write_hanging_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -401,7 +401,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 2)
+            self.assertEqual(pm_commands.run_next(run_args), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
@@ -420,7 +420,7 @@ class RuntimeBatchTests(PmTestCase):
         write_repairable_then_pass_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -430,7 +430,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=f"{shlex.quote(sys.executable)} {shlex.quote(str(harness))}",
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 0)
+            self.assertEqual(pm_commands.run_next(run_args), 0)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["slices"][0]["status"], "pass")
@@ -448,9 +448,9 @@ class RuntimeBatchTests(PmTestCase):
         write_in_session_repair_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness)), 0)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 0)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
@@ -485,9 +485,9 @@ class RuntimeBatchTests(PmTestCase):
         write_always_failing_validation_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness)), 2)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
@@ -519,7 +519,7 @@ class RuntimeBatchTests(PmTestCase):
         # send_literal types keystrokes into a live TUI, where a newline can
         # submit a partial message: the in-session delivery must stay one line
         # and point at the full rendered prompt on disk.
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         prompt_path = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001" / "repair-prompt-repair-1.md"
         message = pm_runner._repair_delivery_message(plan_slice, prompt_path)
         self.assertNotIn("\n", message)
@@ -536,9 +536,9 @@ class RuntimeBatchTests(PmTestCase):
         write_alternating_failure_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness, timeout_seconds=30)), 2)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness, timeout_seconds=30)), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
@@ -566,11 +566,11 @@ class RuntimeBatchTests(PmTestCase):
         write_hard_prompt_at_repair_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = self._run_next_args(harness)
         run_args.harness_command = shlex.quote(str(harness))
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 2)
+            self.assertEqual(pm_commands.run_next(run_args), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
@@ -586,14 +586,14 @@ class RuntimeBatchTests(PmTestCase):
         write_in_session_repair_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_json = (self.repo / ".ai-pm" / "current").resolve() / "run.json"
         state = json.loads(run_json.read_text(encoding="utf-8"))
         self.assertEqual(state["policy"]["max_repair_attempts"], 3)
         state["policy"]["max_repair_attempts"] = 0
         run_json.write_text(json.dumps(state), encoding="utf-8")
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness)), 2)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 2)
         state = json.loads(run_json.read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "blocked")
         self.assertIn("repair budget exhausted", state["stop_reason"])
@@ -607,9 +607,9 @@ class RuntimeBatchTests(PmTestCase):
         write_wrong_slice_id_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(self._run_next_args(harness)), 2)
+            self.assertEqual(pm_commands.run_next(self._run_next_args(harness)), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         slice_dir = run_dir / "slices" / "slice-001"
@@ -641,7 +641,7 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_remaining(run_args), 2)
+            self.assertEqual(pm_commands.run_remaining(run_args), 2)
         stopped = json.loads(run_json.read_text(encoding="utf-8"))
         self.assertEqual(stopped["status"], "needs-human")
         self.assertIn("approval", stopped["stop_reason"])
@@ -650,7 +650,7 @@ class RuntimeBatchTests(PmTestCase):
         self.init_run()
         args = argparse.Namespace(repo=str(self.repo), run="current", reason="test stop", harness_command=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.stop(args), 0)
+            self.assertEqual(pm_commands.stop(args), 0)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "cancelled")
         self.assertEqual(state["stop_reason"], "test stop")
@@ -670,8 +670,8 @@ class RuntimeBatchTests(PmTestCase):
             poll_seconds=0.1,
             harness_command=None,
         )
-        with self.assertRaisesRegex(pm.PmError, "plan file changed"):
-            pm.run_remaining(args)
+        with self.assertRaisesRegex(pm_models.PmError, "plan file changed"):
+            pm_commands.run_remaining(args)
 
     def test_reconcile_verifies_plan_before_gate_recheck(self):
         state = self.init_run()
@@ -688,8 +688,8 @@ class RuntimeBatchTests(PmTestCase):
         (run_dir / "run.json").write_text(json.dumps(state), encoding="utf-8")
         self.plan.write_text(self.plan.read_text(encoding="utf-8") + "\n<!-- edited -->\n", encoding="utf-8")
         args = argparse.Namespace(repo=str(self.repo), run="current")
-        with self.assertRaisesRegex(pm.PmError, "plan file changed"):
-            pm.reconcile(args)
+        with self.assertRaisesRegex(pm_models.PmError, "plan file changed"):
+            pm_commands.reconcile(args)
 
     def test_run_next_stops_when_branch_changed(self):
         self.prepare_committed_repo()
@@ -704,16 +704,16 @@ class RuntimeBatchTests(PmTestCase):
             harness_command=None,
         )
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.run_next(run_args), 2)
+            self.assertEqual(pm_commands.run_next(run_args), 2)
         state = json.loads(((self.repo / ".ai-pm" / "current").resolve() / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "needs-human")
         self.assertIn("branch changed since init", state["stop_reason"])
 
     def test_normalize_stop_status_maps_fail_and_unknown(self):
-        self.assertEqual(pm.normalize_stop_status("fail"), "failed")
-        self.assertEqual(pm.normalize_stop_status("weird"), "blocked")
-        self.assertEqual(pm.normalize_stop_status("needs-human"), "needs-human")
-        self.assertEqual(pm.normalize_stop_status("blocked"), "blocked")
+        self.assertEqual(pm_state.normalize_stop_status("fail"), "failed")
+        self.assertEqual(pm_state.normalize_stop_status("weird"), "blocked")
+        self.assertEqual(pm_state.normalize_stop_status("needs-human"), "needs-human")
+        self.assertEqual(pm_state.normalize_stop_status("blocked"), "blocked")
 
     def test_reconcile_uses_recorded_before_head(self):
         self.prepare_committed_repo()
@@ -737,12 +737,12 @@ class RuntimeBatchTests(PmTestCase):
 
         def fake_gate(repo, run_state, plan_slice, art, before, after, status, reviewer_tools=(), *, last_repair_signature=None):
             captured["before"] = before
-            return pm.GateDecision("fail", "still bad", {"changed_files": []}, ())
+            return pm_models.GateDecision("fail", "still bad", {"changed_files": []}, ())
 
         args = argparse.Namespace(repo=str(self.repo), run="current")
         with mock.patch.object(pm_commands, "verify_gate", fake_gate):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.reconcile(args), 2)
+                self.assertEqual(pm_commands.reconcile(args), 2)
         self.assertEqual(captured["before"], "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
 
     # --- Review fixes: harness readiness / launch parity -----------------
@@ -754,7 +754,7 @@ class RuntimeBatchTests(PmTestCase):
         write_fake_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -765,7 +765,7 @@ class RuntimeBatchTests(PmTestCase):
         )
         with mock.patch.object(pm_runner, "verify_gate", side_effect=ValueError("boom")):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.run_next(run_args), 2)
+                self.assertEqual(pm_commands.run_next(run_args), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "failed")
@@ -779,7 +779,7 @@ class RuntimeBatchTests(PmTestCase):
         write_fake_harness(harness)
         args = argparse.Namespace(repo=str(self.repo), plan=str(self.plan), harness="codex", worktree_root=None)
         with contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(pm.init_run(args), 0)
+            self.assertEqual(pm_commands.init_run(args), 0)
         run_args = argparse.Namespace(
             repo=str(self.repo),
             run="current",
@@ -790,7 +790,7 @@ class RuntimeBatchTests(PmTestCase):
         )
         with mock.patch.object(pm_runner, "verify_gate", side_effect=KeyboardInterrupt):
             with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(pm.run_next(run_args), 2)
+                self.assertEqual(pm_commands.run_next(run_args), 2)
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "cancelled")
@@ -811,7 +811,7 @@ class RuntimeBatchTests(PmTestCase):
             "artifact_dir": f".ai-pm/runs/{state['run_id']}/slices/slice-001",
             "tmux_session": "pm_no_such_session_xyz",
             "attempt": 1,
-            "started_at": pm.utc_now(),
+            "started_at": pm_utils.utc_now(),
             "before_head": git(self.repo, "rev-parse", "HEAD"),
             "pause": None,
             "reviewer_tools": [],
@@ -824,7 +824,7 @@ class RuntimeBatchTests(PmTestCase):
         (run_dir / "run.json").write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            self.assertEqual(pm.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+            self.assertEqual(pm_commands.status(argparse.Namespace(repo=str(self.repo), run="current")), 0)
         output = buffer.getvalue()
         self.assertIn("WARNING", output)
         self.assertIn("pm_no_such_session_xyz", output)

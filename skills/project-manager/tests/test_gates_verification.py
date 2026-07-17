@@ -9,7 +9,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=[])
         result = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
 
-        provenance = pm.reviewer_audit_provenance(
+        provenance = pm_gates.reviewer_audit_provenance(
             artifact,
             (),
             None,
@@ -25,7 +25,7 @@ class GateVerificationTests(PmTestCase):
     def test_audit_provenance_is_not_observed_without_execution_evidence(self):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
 
-        provenance = pm.reviewer_audit_provenance(artifact, (), None)
+        provenance = pm_gates.reviewer_audit_provenance(artifact, (), None)
 
         for audit in ("drift-audit", "code-review"):
             self.assertEqual(provenance[audit]["performed_by"], "not-observed")
@@ -34,9 +34,9 @@ class GateVerificationTests(PmTestCase):
     def test_audit_provenance_records_validated_reviewer_tool_and_label(self):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         self.write_validated_reviewer_run(artifact)
-        snapshot = pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+        snapshot = pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
 
-        provenance = pm.reviewer_audit_provenance(artifact, ("opencode",), snapshot)
+        provenance = pm_gates.reviewer_audit_provenance(artifact, ("opencode",), snapshot)
 
         for audit in ("drift-audit", "code-review"):
             self.assertEqual(provenance[audit]["performed_by"], "reviewer")
@@ -54,10 +54,10 @@ class GateVerificationTests(PmTestCase):
         status = json.loads(code_status.read_text(encoding="utf-8"))
         status["skill_verdicts"]["code-review"] = "FAIL"
         code_status.write_text(json.dumps(status), encoding="utf-8")
-        pm.capture_reviewer_runs_summary(artifact)
-        snapshot = pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+        pm_runtime.capture_reviewer_runs_summary(artifact)
+        snapshot = pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
 
-        provenance = pm.reviewer_audit_provenance(
+        provenance = pm_gates.reviewer_audit_provenance(
             artifact,
             ("opencode",),
             snapshot,
@@ -80,10 +80,10 @@ class GateVerificationTests(PmTestCase):
         for entry in manifest["reviewers"].values():
             entry["launch_contract"]["access"] = "workspace-write"
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-        pm.capture_reviewer_runs_summary(artifact)
-        snapshot = pm.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
+        pm_runtime.capture_reviewer_runs_summary(artifact)
+        snapshot = pm_runtime.reviewer_policy_snapshot(artifact / "reviewer-policy.json")
 
-        provenance = pm.reviewer_audit_provenance(
+        provenance = pm_gates.reviewer_audit_provenance(
             artifact,
             ("opencode",),
             snapshot,
@@ -103,7 +103,7 @@ class GateVerificationTests(PmTestCase):
             "code_review": {"verdict": "", "path": ""},
         }
 
-        provenance = pm.reviewer_audit_provenance(
+        provenance = pm_gates.reviewer_audit_provenance(
             artifact,
             (),
             None,
@@ -115,13 +115,13 @@ class GateVerificationTests(PmTestCase):
 
     def test_timeout_without_developer_result_records_audits_not_observed(self):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
-        gate = pm.GateDecision("blocked", "Developer session timed out")
+        gate = pm_models.GateDecision("blocked", "Developer session timed out")
 
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
-            pm.parse_plan(self.plan)[0],
+            pm_plan.parse_plan(self.plan)[0],
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             gate,
         )
 
@@ -129,13 +129,13 @@ class GateVerificationTests(PmTestCase):
 
     def test_missing_result_terminal_entry_records_audits_not_observed(self):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
-        gate = pm.GateDecision("blocked", f"developer result missing: {artifact / 'developer-result.json'}")
+        gate = pm_models.GateDecision("blocked", f"developer result missing: {artifact / 'developer-result.json'}")
 
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
-            pm.parse_plan(self.plan)[0],
+            pm_plan.parse_plan(self.plan)[0],
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             gate,
         )
 
@@ -143,11 +143,11 @@ class GateVerificationTests(PmTestCase):
 
     def test_pre_audit_stop_records_audits_not_observed(self):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
-        gate = pm.GateDecision(
+        gate = pm_models.GateDecision(
             "blocked",
             "Developer stopped before audit stage",
             {
-                "schema_version": pm.SCHEMA_VERSION,
+                "schema_version": pm_constants.SCHEMA_VERSION,
                 "slice_id": "Slice 1",
                 "status": "blocked",
                 "summary": "stopped before audit",
@@ -161,11 +161,11 @@ class GateVerificationTests(PmTestCase):
             },
         )
 
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
-            pm.parse_plan(self.plan)[0],
+            pm_plan.parse_plan(self.plan)[0],
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             gate,
         )
 
@@ -181,7 +181,7 @@ class GateVerificationTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["UNAUTHORIZED.md"], commit_hash=after)
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "unauthorized-files")
         self.assertIn("unauthorized changed files", decision.reason)
@@ -196,7 +196,7 @@ class GateVerificationTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], validation_result=None, commit_hash=after)
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "validation")
         self.assertIn("validation evidence is missing", decision.reason)
@@ -211,7 +211,7 @@ class GateVerificationTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], drift="PASS WITH RISKS", commit_hash=after)
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "drift")
         self.assertIn("drift audit verdict is not PASS", decision.reason)
@@ -226,7 +226,7 @@ class GateVerificationTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         self.write_gate_result(artifact, changed_files=["README.md"], review="FAIL", commit_hash=after)
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "review")
         self.assertIn("code review verdict is not PASS", decision.reason)
@@ -242,7 +242,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": pm.SCHEMA_VERSION,
+                "schema_version": pm_constants.SCHEMA_VERSION,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -258,7 +258,7 @@ class GateVerificationTests(PmTestCase):
             },
         )
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "drift")
         self.assertIn("drift audit verdict is not PASS", decision.reason)
@@ -277,7 +277,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": pm.SCHEMA_VERSION,
+                "schema_version": pm_constants.SCHEMA_VERSION,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -293,7 +293,7 @@ class GateVerificationTests(PmTestCase):
             },
         )
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "pass")
         self.assertEqual(decision.signature, "")
 
@@ -311,7 +311,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=fabricated)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "pass")
         self.assertIn("corrected reported commit hash", decision.reason)
@@ -326,7 +326,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=[], commit_hash="0" * 40)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, before, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "needs-human")
         self.assertEqual(decision.signature, "integrity-head")
@@ -352,7 +352,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "needs-human")
         self.assertEqual(decision.signature, "integrity-head")
@@ -369,7 +369,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md", "CHANGELOG.md"], commit_hash=after)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "changed-files-mismatch")
@@ -386,7 +386,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=None)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "commit-missing")
@@ -408,7 +408,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "dirty-worktree")
@@ -422,7 +422,7 @@ class GateVerificationTests(PmTestCase):
         (artifact / "developer-result.json").write_text("{not json", encoding="utf-8")
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, before, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
@@ -433,16 +433,16 @@ class GateVerificationTests(PmTestCase):
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         state = self.init_run()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
 
         self.write_gate_result_data(artifact, {"schema_version": 2, "slice_id": "Slice 1", "status": "pass"})
-        decision = pm.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("schema_version", decision.reason)
 
-        self.write_gate_result_data(artifact, {"schema_version": pm.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "victory"})
-        decision = pm.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm.git_status_text(self.repo))
+        self.write_gate_result_data(artifact, {"schema_version": pm_constants.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "victory"})
+        decision = pm_gates.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("status is invalid", decision.reason)
@@ -457,7 +457,7 @@ class GateVerificationTests(PmTestCase):
         artifact.mkdir(parents=True, exist_ok=True)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, before, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "blocked")
         self.assertEqual(decision.signature, "")
@@ -467,10 +467,10 @@ class GateVerificationTests(PmTestCase):
         self.prepare_committed_repo()
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
-        self.write_gate_result_data(artifact, {"schema_version": pm.SCHEMA_VERSION, "slice_id": "Slice 2", "status": "pass"})
+        self.write_gate_result_data(artifact, {"schema_version": pm_constants.SCHEMA_VERSION, "slice_id": "Slice 2", "status": "pass"})
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, before, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "needs-human")
         self.assertEqual(decision.signature, "slice-id-mismatch")
@@ -481,40 +481,40 @@ class GateVerificationTests(PmTestCase):
         before = git(self.repo, "rev-parse", "HEAD")
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         state = self.init_run()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
 
         self.write_gate_result_data(artifact, {
-            "schema_version": pm.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "repairable",
+            "schema_version": pm_constants.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "repairable",
             "residual_findings": [], "continuation_notes": [],
         })
-        decision = pm.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "developer-repairable")
 
         self.write_gate_result_data(artifact, {
-            "schema_version": pm.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "needs-human",
+            "schema_version": pm_constants.SCHEMA_VERSION, "slice_id": "Slice 1", "status": "needs-human",
             "residual_findings": [], "continuation_notes": [],
         })
-        decision = pm.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "needs-human")
         self.assertEqual(decision.signature, "")
 
         self.write_gate_result_data(artifact, {
-            "schema_version": pm.SCHEMA_VERSION,
+            "schema_version": pm_constants.SCHEMA_VERSION,
             "slice_id": "Slice 1",
             "status": "blocked",
             "residual_findings": [],
             "continuation_notes": [{"category": "broken"}],
         })
-        decision = pm.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, plan_slice, artifact, before, before, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "result-malformed")
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
             plan_slice,
             artifact,
-            pm.utc_now(),
-            pm.GateDecision("needs-human", decision.reason, decision.result),
+            pm_utils.utc_now(),
+            pm_models.GateDecision("needs-human", decision.reason, decision.result),
             before,
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
@@ -525,10 +525,10 @@ class GateVerificationTests(PmTestCase):
         # set, so PM's reviewer-launch verification is armed as a blocking gate.
         # By default (without this flag) reviewer delegation is reporting-only and
         # never blocks acceptance.
-        base = pm.parse_plan(self.plan)[0]
+        base = pm_plan.parse_plan(self.plan)[0]
         sections = dict(base.sections)
         sections["Risk Flags"] = sections.get("Risk Flags", "") + "\n- Independent audit required: yes"
-        return pm.PlanSlice(base.number, base.title, base.body, sections)
+        return pm_models.PlanSlice(base.number, base.title, base.body, sections)
 
     def test_gate_default_slice_accepts_without_reviewer_evidence(self):
         # Default posture: a slice not marked "Independent audit required: yes"
@@ -546,19 +546,19 @@ class GateVerificationTests(PmTestCase):
         self.write_reviewer_policy(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
-        default_slice = pm.parse_plan(self.plan)[0]
+        default_slice = pm_plan.parse_plan(self.plan)[0]
         self.assertFalse(default_slice.independent_audit_required)
 
-        decision = pm.verify_gate(
-            self.repo, state, default_slice, artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, default_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "pass")
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
             default_slice,
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             decision,
             before,
             ("opencode",),
@@ -582,8 +582,8 @@ class GateVerificationTests(PmTestCase):
         result_path.write_text(json.dumps(result), encoding="utf-8")
         state = self.init_run()
 
-        decision = pm.verify_gate(
-            self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -607,13 +607,13 @@ class GateVerificationTests(PmTestCase):
         }
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after, continuation_notes=[note])
         state = self.init_run()
-        plan_slice = pm.parse_plan(self.plan)[0]
-        decision = pm.verify_gate(
-            self.repo, state, plan_slice, artifact, before, after, pm.git_status_text(self.repo)
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
+        decision = pm_gates.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.status, "pass")
-        entry = pm.slice_entry_from_gate(
-            self.repo, plan_slice, artifact, pm.utc_now(), decision, before,
+        entry = pm_state.slice_entry_from_gate(
+            self.repo, plan_slice, artifact, pm_utils.utc_now(), decision, before,
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
         )
         self.assertEqual(entry["continuation_notes"], [note])
@@ -622,25 +622,25 @@ class GateVerificationTests(PmTestCase):
         malformed = json.loads((artifact / "developer-result.json").read_text(encoding="utf-8"))
         malformed["continuation_notes"] = [{"category": "mystery", "summary": "x", "rationale": "y", "applies_to": "z"}]
         (artifact / "developer-result.json").write_text(json.dumps(malformed), encoding="utf-8")
-        decision = pm.verify_gate(
-            self.repo, state, plan_slice, artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("continuation_notes[0].category is invalid", decision.reason)
 
-        too_many = [note] * (pm.MAX_CONTINUATION_NOTES + 1)
+        too_many = [note] * (pm_constants.MAX_CONTINUATION_NOTES + 1)
         malformed["continuation_notes"] = too_many
         (artifact / "developer-result.json").write_text(json.dumps(malformed), encoding="utf-8")
-        decision = pm.verify_gate(
-            self.repo, state, plan_slice, artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("exceeds the maximum", decision.reason)
 
-        malformed["continuation_notes"] = [dict(note, summary="x" * (pm.MAX_CONTINUATION_FIELD_CHARS + 1))]
+        malformed["continuation_notes"] = [dict(note, summary="x" * (pm_constants.MAX_CONTINUATION_FIELD_CHARS + 1))]
         (artifact / "developer-result.json").write_text(json.dumps(malformed), encoding="utf-8")
-        decision = pm.verify_gate(
-            self.repo, state, plan_slice, artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.signature, "result-malformed")
         self.assertIn("exceeds the maximum", decision.reason)
@@ -652,11 +652,11 @@ class GateVerificationTests(PmTestCase):
             ("prior-context-integrity", "needs-human"),
         ):
             with self.subTest(signature=signature):
-                decision = pm.gate_failure(signature, "reason text")
+                decision = pm_gates.gate_failure(signature, "reason text")
                 self.assertEqual(decision.status, expected_status)
                 self.assertEqual(decision.signature, signature)
-        with self.assertRaises(pm.PmError):
-            pm.gate_failure("not-a-real-signature", "reason text")
+        with self.assertRaises(pm_models.PmError):
+            pm_gates.gate_failure("not-a-real-signature", "reason text")
 
     def _archived_residual_finding(self):
         return {
@@ -680,7 +680,7 @@ class GateVerificationTests(PmTestCase):
         (artifact / f"developer-result-repair-{round_number}.json").write_text(
             json.dumps(
                 {
-                    "schema_version": pm.SCHEMA_VERSION,
+                    "schema_version": pm_constants.SCHEMA_VERSION,
                     "slice_id": "Slice 1",
                     "status": "repairable",
                     "residual_findings": list(residual_findings),
@@ -703,8 +703,8 @@ class GateVerificationTests(PmTestCase):
         self._write_archived_repair_result(artifact, 1, residual_findings=[archived_finding])
         state = self.init_run()
 
-        decision = pm.verify_gate(
-            self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -726,8 +726,8 @@ class GateVerificationTests(PmTestCase):
         self._write_archived_repair_result(artifact, 1, continuation_notes=[archived_note])
         state = self.init_run()
 
-        decision = pm.verify_gate(
-            self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -758,8 +758,8 @@ class GateVerificationTests(PmTestCase):
         )
         state = self.init_run()
 
-        decision = pm.verify_gate(
-            self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
 
         self.assertEqual(decision.status, "pass")
@@ -779,14 +779,14 @@ class GateVerificationTests(PmTestCase):
         self._write_archived_repair_result(artifact, 1, residual_findings=[archived_finding])
         state = self.init_run()
 
-        decision = pm.verify_gate(
+        decision = pm_gates.verify_gate(
             self.repo,
             state,
-            pm.parse_plan(self.plan)[0],
+            pm_plan.parse_plan(self.plan)[0],
             artifact,
             before,
             after,
-            pm.git_status_text(self.repo),
+            pm_git_ops.git_status_text(self.repo),
             last_repair_signature="context-budget",
         )
 
@@ -806,8 +806,8 @@ class GateVerificationTests(PmTestCase):
             encoding="utf-8",
         )
         state = self.init_run()
-        decision = pm.verify_gate(
-            self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "residual-ledger-mismatch")
@@ -824,8 +824,8 @@ class GateVerificationTests(PmTestCase):
             self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
             (artifact / "code-review.md").write_text(f"## Findings\n\n{body}\n", encoding="utf-8")
             state = self.init_run()
-            decision = pm.verify_gate(
-                self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo)
+            decision = pm_gates.verify_gate(
+                self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
             )
             self.assertEqual(decision.status, "pass")
 
@@ -853,17 +853,17 @@ class GateVerificationTests(PmTestCase):
             residual_findings=[finding],
         )
         state = self.init_run()
-        plan_slice = pm.parse_plan(self.plan)[0]
-        decision = pm.verify_gate(
-            self.repo, state, plan_slice, artifact, before, after, pm.git_status_text(self.repo)
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
+        decision = pm_gates.verify_gate(
+            self.repo, state, plan_slice, artifact, before, after, pm_git_ops.git_status_text(self.repo)
         )
         self.assertEqual(decision.status, "pass")
 
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
             plan_slice,
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             decision,
             before,
             reviewer_policy={"sha256": "a" * 64, "policy": {}},
@@ -880,7 +880,7 @@ class GateVerificationTests(PmTestCase):
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
         state["slices"] = [entry]
         state["status"] = "complete"
-        pm.write_run(run_dir / "run.json", state)
+        pm_state.write_run(run_dir / "run.json", state)
         report = (run_dir / "run-report.md").read_text(encoding="utf-8")
         self.assertIn("Legacy helper could be clarified later", report)
         self.assertIn("Consider a separate cleanup plan", report)
@@ -888,7 +888,7 @@ class GateVerificationTests(PmTestCase):
         self.assertIn("Code review performed by: developer-self-audit", report)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            self.assertEqual(pm.summarize(argparse.Namespace(repo=str(self.repo), run="current")), 0)
+            self.assertEqual(pm_commands.summarize(argparse.Namespace(repo=str(self.repo), run="current")), 0)
         self.assertIn("drift audit performed by: developer-self-audit", output.getvalue())
         self.assertIn("code review performed by: developer-self-audit", output.getvalue())
 
@@ -932,8 +932,8 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         state = self.init_run()
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ()
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ()
         )
 
         self.assertEqual(decision.status, "needs-human")
@@ -953,8 +953,8 @@ class GateVerificationTests(PmTestCase):
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -980,12 +980,12 @@ class GateVerificationTests(PmTestCase):
         reviewer_run = artifact / "reviewer-runs" / "reviewers-1"
         reviewer_run.mkdir(parents=True)
         (reviewer_run / "manifest.json").write_text(json.dumps({"reviewers": {}}), encoding="utf-8")
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1009,16 +1009,16 @@ class GateVerificationTests(PmTestCase):
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "pass")
-        entry = pm.slice_entry_from_gate(
+        entry = pm_state.slice_entry_from_gate(
             self.repo,
             self._opt_in_slice(),
             artifact,
-            pm.utc_now(),
+            pm_utils.utc_now(),
             decision,
             before,
             ("opencode",),
@@ -1045,12 +1045,12 @@ class GateVerificationTests(PmTestCase):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         status["skill_verdicts"]["code-review"] = "FAIL"
         status_path.write_text(json.dumps(status), encoding="utf-8")
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1073,12 +1073,12 @@ class GateVerificationTests(PmTestCase):
         status = json.loads(status_path.read_text(encoding="utf-8"))
         del status["skill_verdicts"]
         status_path.write_text(json.dumps(status), encoding="utf-8")
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1120,12 +1120,12 @@ class GateVerificationTests(PmTestCase):
             ),
             encoding="utf-8",
         )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1150,12 +1150,12 @@ class GateVerificationTests(PmTestCase):
         del manifest["reviewers"][review_label]
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         (reviewer_run / f"{review_label}-status.json").unlink()
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1213,12 +1213,12 @@ class GateVerificationTests(PmTestCase):
         (reviewer_run / f"{label}-status.json").write_text(
             json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1244,8 +1244,8 @@ class GateVerificationTests(PmTestCase):
         policy["required_model"] = "unapproved-model"
         policy_path.write_text(json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1289,12 +1289,12 @@ class GateVerificationTests(PmTestCase):
         (reviewer_run / f"{label}-status.json").write_text(
             json.dumps({"label": label, "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode", "codex")
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode", "codex")
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1321,11 +1321,11 @@ class GateVerificationTests(PmTestCase):
         (reviewer_run / "01-opencode-raw-status.json").write_text(
             json.dumps({"label": "01-opencode-raw", "state": "completed", "returncode": 0}), encoding="utf-8"
         )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "reviewer-evidence")
@@ -1360,12 +1360,12 @@ class GateVerificationTests(PmTestCase):
             json.dumps({"label": "01-opencode-drift-check", "state": "completed", "returncode": 0}),
             encoding="utf-8",
         )
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
 
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
 
         self.assertEqual(decision.status, "repairable")
@@ -1383,7 +1383,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         state = self.init_run()
 
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
 
         self.assertEqual(decision.status, "pass")
 
@@ -1396,7 +1396,7 @@ class GateVerificationTests(PmTestCase):
             encoding="utf-8",
         )
 
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
 
         summary = json.loads((artifact / "reviewer-runs-summary.json").read_text(encoding="utf-8"))
         self.assertEqual(summary["runs"][0]["reviewers"][0]["label"], "01-codex-check")
@@ -1413,7 +1413,7 @@ class GateVerificationTests(PmTestCase):
         )
         os.symlink(reviewer_run, reviewer_root / "current")
 
-        pm.capture_reviewer_runs_summary(artifact)
+        pm_runtime.capture_reviewer_runs_summary(artifact)
 
         summary = json.loads((artifact / "reviewer-runs-summary.json").read_text(encoding="utf-8"))
         self.assertEqual([Path(entry["run_dir"]).name for entry in summary["runs"]], ["reviewers-1"])
@@ -1451,7 +1451,7 @@ class GateVerificationTests(PmTestCase):
                 encoding="utf-8",
             )
 
-        overview = pm.reviewer_delegation_overview(artifact)
+        overview = pm_runtime.reviewer_delegation_overview(artifact)
 
         self.assertEqual(len(overview), 2)
         by_run = {Path(entry["run_dir"]).name: entry for entry in overview}
@@ -1484,7 +1484,7 @@ class GateVerificationTests(PmTestCase):
             encoding="utf-8",
         )
 
-        overview = pm.reviewer_delegation_overview(artifact)
+        overview = pm_runtime.reviewer_delegation_overview(artifact)
 
         self.assertEqual(overview[0]["contracted_marker"], "n/a")
         self.assertEqual(overview[0]["state"], "unknown")
@@ -1496,7 +1496,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": pm.SCHEMA_VERSION,
+                "schema_version": pm_constants.SCHEMA_VERSION,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -1512,7 +1512,7 @@ class GateVerificationTests(PmTestCase):
             },
         )
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "validation")
         self.assertIn("validation entries are malformed", decision.reason)
@@ -1524,7 +1524,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result_data(
             artifact,
             {
-                "schema_version": pm.SCHEMA_VERSION,
+                "schema_version": pm_constants.SCHEMA_VERSION,
                 "slice_id": "Slice 1",
                 "status": "pass",
                 "summary": "",
@@ -1540,7 +1540,7 @@ class GateVerificationTests(PmTestCase):
             },
         )
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "changed-files-mismatch")
         self.assertIn("changed_files is malformed", decision.reason)
@@ -1549,20 +1549,20 @@ class GateVerificationTests(PmTestCase):
         artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
         artifact.mkdir(parents=True)
         (artifact / "drift-audit.md").write_text("", encoding="utf-8")
-        self.assertFalse(pm.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
+        self.assertFalse(pm_gates.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
         (artifact / "drift-audit.md").write_text("verdict\n", encoding="utf-8")
-        self.assertTrue(pm.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
+        self.assertTrue(pm_gates.artifact_exists(self.repo, artifact, {}, "drift_audit", "drift-audit.md"))
         artifact_relative = artifact.relative_to(self.repo) / "drift-audit.md"
         self.assertTrue(
-            pm.artifact_exists(self.repo, artifact, {"drift_audit": {"path": str(artifact_relative)}}, "drift_audit", "drift-audit.md")
+            pm_gates.artifact_exists(self.repo, artifact, {"drift_audit": {"path": str(artifact_relative)}}, "drift_audit", "drift-audit.md")
         )
         (self.repo / "README.md").write_text("not an audit artifact\n", encoding="utf-8")
         self.assertFalse(
-            pm.artifact_exists(self.repo, artifact, {"drift_audit": {"path": "README.md"}}, "drift_audit", "drift-audit.md")
+            pm_gates.artifact_exists(self.repo, artifact, {"drift_audit": {"path": "README.md"}}, "drift_audit", "drift-audit.md")
         )
         # An existing file outside the run must not satisfy the evidence check.
         self.assertFalse(
-            pm.artifact_exists(self.repo, artifact, {"drift_audit": {"path": sys.executable}}, "drift_audit", "drift-audit.md")
+            pm_gates.artifact_exists(self.repo, artifact, {"drift_audit": {"path": sys.executable}}, "drift_audit", "drift-audit.md")
         )
 
     # --- Review fixes: run integrity -------------------------------------
@@ -1578,7 +1578,7 @@ class GateVerificationTests(PmTestCase):
         self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
         (artifact / "validation-summary.md").write_text("", encoding="utf-8")
         state = self.init_run()
-        decision = pm.verify_gate(self.repo, state, pm.parse_plan(self.plan)[0], artifact, before, after, pm.git_status_text(self.repo))
+        decision = pm_gates.verify_gate(self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo))
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "validation")
         self.assertIn("missing or empty", decision.reason)
@@ -1602,8 +1602,8 @@ class GateVerificationTests(PmTestCase):
         self.write_validated_reviewer_run(artifact, state="failed", returncode=1)
         state = self.init_run()
         self.attach_reviewer_policy_snapshot(state, artifact)
-        decision = pm.verify_gate(
-            self.repo, state, self._opt_in_slice(), artifact, before, after, pm.git_status_text(self.repo), ("opencode",)
+        decision = pm_gates.verify_gate(
+            self.repo, state, self._opt_in_slice(), artifact, before, after, pm_git_ops.git_status_text(self.repo), ("opencode",)
         )
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "reviewer-evidence")
@@ -1619,7 +1619,7 @@ class GateVerificationTests(PmTestCase):
         self.prepare_committed_repo()
         state = self.init_run()
         run_dir = (self.repo / ".ai-pm" / "current").resolve()
-        plan_slice = pm.parse_plan(self.plan)[0]
+        plan_slice = pm_plan.parse_plan(self.plan)[0]
         before_head = git(self.repo, "rev-parse", "HEAD")
         fake_adapter = mock.Mock()
         fake_adapter.sessions_with_prefix.return_value = []
@@ -1635,7 +1635,7 @@ class GateVerificationTests(PmTestCase):
             harness_model=None,
         )
         with mock.patch.object(pm_runner, "TmuxHarnessAdapter", return_value=fake_adapter):
-            result = pm.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
+            result = pm_runner.start_model_supervised_slice(args, self.repo.resolve(), state, plan_slice, run_dir)
         self.assertTrue(result["started"])
         artifact = run_dir / "slices" / "slice-001"
         policy = json.loads((artifact / "reviewer-policy.json").read_text(encoding="utf-8"))

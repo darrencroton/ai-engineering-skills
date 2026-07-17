@@ -991,7 +991,13 @@ class SupervisionRepairTests(PmTestCase):
         fake_adapter.force_stop.assert_not_called()
         state = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(state["status"], "resuming")
-        self.assertIn("Flaky retry needed", (artifact / "repair-prompt-repair-1.md").read_text(encoding="utf-8"))
+        # The rendered in-session repair prompt must carry the full archived
+        # item end-to-end (every field, not just the summary a truncated gate
+        # reason could carry alone) so a Developer can actually copy it
+        # verbatim, matching the exact-dict-equality check the gate enforces.
+        repair_prompt_text = (artifact / "repair-prompt-repair-1.md").read_text(encoding="utf-8")
+        for field_value in archived_finding.values():
+            self.assertIn(field_value, repair_prompt_text, field_value)
 
     def test_finalize_context_budget_repair_round_exempts_ledger_retention(self):
         # A round that follows a context-budget repair is explicitly instructed

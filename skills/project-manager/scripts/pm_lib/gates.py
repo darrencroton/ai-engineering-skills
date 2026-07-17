@@ -86,6 +86,8 @@ def gate_failure(
     reason: str,
     result: dict[str, Any] | None = None,
     actual_changed_files: tuple[str, ...] = (),
+    *,
+    repair_payload: dict[str, Any] | None = None,
 ) -> GateDecision:
     """Build a non-pass GateDecision whose status follows the signature taxonomy."""
     if signature in TERMINAL_SIGNATURES:
@@ -94,7 +96,7 @@ def gate_failure(
         status = "repairable"
     else:
         raise PmError(f"unknown gate failure signature: {signature}")
-    return GateDecision(status, reason, result, actual_changed_files, signature)
+    return GateDecision(status, reason, result, actual_changed_files, signature, repair_payload)
 
 
 def write_reconciliation_artifact(
@@ -807,8 +809,8 @@ def _truncate_for_reason(value: Any, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def _ledger_retention_failure(slice_artifact_dir: Path, result: dict[str, Any]) -> str | None:
-    """Return a gate-failure reason if the fresh pass result drops an archived ledger item.
+def _missing_ledger_items(slice_artifact_dir: Path, result: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Return every archived ledger item, grouped by field, missing from the fresh result.
 
     Archived repair-round ledgers (`developer-result-repair-<n>.json`) are
     re-injected into a relaunched session's prompt as *instructions*
@@ -818,24 +820,52 @@ def _ledger_retention_failure(slice_artifact_dir: Path, result: dict[str, Any]) 
     mechanical: every archived `residual_findings`/`continuation_notes` item
     must still appear, by exact dict equality, in the corresponding fresh
     ledger. Merging in new items is fine; silently losing an old one is not.
+
+    Collects every gap across both fields in one pass — not just the first —
+    so a repair round with multiple omissions gets one complete correction
+    instead of consuming one repair round per item.
     """
+    missing: dict[str, list[dict[str, Any]]] = {}
     for field in _LEDGER_RETENTION_FIELDS:
         archived_items = _archived_ledger_items(slice_artifact_dir, field)
         if not archived_items:
             continue
         fresh_value = result.get(field)
         fresh_list = fresh_value if isinstance(fresh_value, list) else []
-        for archived_path, item in archived_items:
-            if item in fresh_list:
+        field_gaps: list[dict[str, Any]] = []
+        for _archived_path, item in archived_items:
+            if item in fresh_list or item in field_gaps:
                 continue
-            summary = _truncate_for_reason(item.get("summary"))
-            return (
-                f"{field} dropped an item archived in {archived_path.name}: \"{summary}\" no longer appears in the "
-                f"fresh result's {field} ledger; restore it verbatim (merging, not erasing). Retention is checked "
-                "mechanically, not semantically: if the underlying issue was since resolved, keep the item and "
-                "record the resolution alongside it rather than deleting history"
-            )
-    return None
+            field_gaps.append(item)
+        if field_gaps:
+            missing[field] = field_gaps
+    return missing
+
+
+def _ledger_retention_failure(slice_artifact_dir: Path, result: dict[str, Any]) -> tuple[str, dict[str, list[dict[str, Any]]]] | None:
+    """Return (reason, missing-items-by-field) if the fresh result drops an archived ledger item, else None.
+
+    `reason` stays a short, human-readable summary (first gap only, truncated)
+    for logs and the mechanical gate-decision record; the full missing-items
+    payload — every gap, in full, across both fields — is returned separately
+    so the repair-prompt renderer can embed complete JSON objects a Developer
+    can actually copy verbatim, rather than the truncated summary alone.
+    """
+    missing = _missing_ledger_items(slice_artifact_dir, result)
+    if not missing:
+        return None
+    field, items = next(iter(missing.items()))
+    summary = _truncate_for_reason(items[0].get("summary"))
+    total = sum(len(v) for v in missing.values())
+    plural = "" if total == 1 else "s"
+    reason = (
+        f"{field} dropped an item archived in a prior repair round: \"{summary}\" no longer appears in the fresh "
+        f"result's {field} ledger ({total} item{plural} missing across residual_findings/continuation_notes total); "
+        "restore every missing item verbatim (merging, not erasing) — see the repair prompt for the complete list. "
+        "Retention is checked mechanically, not semantically: if the underlying issue was since resolved, keep the "
+        "item and record the resolution alongside it rather than deleting history"
+    )
+    return reason, missing
 
 
 def verify_gate(
@@ -941,7 +971,14 @@ def verify_gate(
     if last_repair_signature != "context-budget":
         retention_failure = _ledger_retention_failure(slice_artifact_dir, result)
         if retention_failure:
-            return gate_failure("ledger-retention", retention_failure, result, changed_evidence)
+            reason, missing_items = retention_failure
+            return gate_failure(
+                "ledger-retention",
+                reason,
+                result,
+                changed_evidence,
+                repair_payload={"missing_ledger_items": missing_items},
+            )
 
     # Independence (delegating drift-audit and code-review to a separate model)
     # is a degradable *preference* by default: a slice audited locally by a

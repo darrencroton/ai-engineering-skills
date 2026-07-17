@@ -113,3 +113,8 @@ class GateDecision:
     # "integrity-head"). Drives the repair circuit breaker and repair-prompt
     # stanza selection; empty for a pass and for statuses with no category.
     signature: str = ""
+    # Optional structured data a repair-prompt stanza needs beyond `reason`'s
+    # human-readable summary — e.g. the full archived ledger items a
+    # ledger-retention repair must reproduce verbatim, which `reason` alone
+    # cannot carry without truncation. Empty for gates with no such need.
+    repair_payload: dict[str, Any] | None = None

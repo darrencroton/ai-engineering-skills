@@ -709,9 +709,15 @@ class GateVerificationTests(PmTestCase):
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "ledger-retention")
-        self.assertIn("developer-result-repair-1.json", decision.reason)
         self.assertIn("Flaky retry needed", decision.reason)
         self.assertIn("residual_findings", decision.reason)
+        # The reason is a short human-readable summary; the full archived item
+        # (every field, not just the truncated summary) must survive in the
+        # structured repair_payload so a repair prompt can embed it verbatim.
+        self.assertEqual(
+            decision.repair_payload,
+            {"missing_ledger_items": {"residual_findings": [archived_finding]}},
+        )
 
     def test_gate_rejects_pass_result_dropping_archived_continuation_note(self):
         self.prepare_committed_repo()
@@ -732,9 +738,66 @@ class GateVerificationTests(PmTestCase):
 
         self.assertEqual(decision.status, "repairable")
         self.assertEqual(decision.signature, "ledger-retention")
-        self.assertIn("developer-result-repair-1.json", decision.reason)
         self.assertIn("thread-safe", decision.reason)
         self.assertIn("continuation_notes", decision.reason)
+        self.assertEqual(
+            decision.repair_payload,
+            {"missing_ledger_items": {"continuation_notes": [archived_note]}},
+        )
+
+    def test_gate_ledger_retention_payload_covers_every_missing_item_in_one_pass(self):
+        """A repair round with multiple omissions gets one complete correction,
+        not one repair round consumed per missing item — the exact failure
+        mode observed in PM test 14 (report-mc-test14-...md), where a weaker
+        Developer model burned its entire repair budget re-wording a single
+        item instead of ever seeing what needed to change."""
+        self.prepare_committed_repo()
+        before = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "README.md").write_text("ok\n", encoding="utf-8")
+        git(self.repo, "add", "README.md")
+        git(self.repo, "commit", "-m", "Good change")
+        after = git(self.repo, "rev-parse", "HEAD")
+        artifact = self.repo / ".ai-pm" / "runs" / "test" / "slices" / "slice-001"
+        archived_finding = self._archived_residual_finding()
+        # A summary longer than the 120-char reason-truncation limit, and
+        # non-summary fields (location) that cannot be reconstructed from the
+        # summary alone — reproducing exactly what the truncated `reason`
+        # string could never carry.
+        long_note = {
+            "category": "interface-contract",
+            "location": "algorithms.py:24",
+            "summary": (
+                "This continuation note's summary is deliberately longer than the one-hundred-and-twenty "
+                "character truncation limit applied to the gate's short human-readable failure reason, so a "
+                "repair prompt relying on that reason alone could never reproduce it verbatim."
+            ),
+            "rationale": "Downstream slices depend on this exact interface description.",
+            "applies_to": "Slices 2-5",
+        }
+        self.write_gate_result(artifact, changed_files=["README.md"], commit_hash=after)
+        self._write_archived_repair_result(
+            artifact, 1, residual_findings=[archived_finding], continuation_notes=[long_note]
+        )
+        state = self.init_run()
+
+        decision = pm_gates.verify_gate(
+            self.repo, state, pm_plan.parse_plan(self.plan)[0], artifact, before, after, pm_git_ops.git_status_text(self.repo)
+        )
+
+        self.assertEqual(decision.status, "repairable")
+        self.assertEqual(decision.signature, "ledger-retention")
+        # Both gaps are reported in the structured payload in a single gate
+        # failure, not just the first one encountered.
+        self.assertEqual(
+            decision.repair_payload,
+            {
+                "missing_ledger_items": {
+                    "residual_findings": [archived_finding],
+                    "continuation_notes": [long_note],
+                }
+            },
+        )
+        self.assertIn("2 items missing", decision.reason)
 
     def test_gate_accepts_pass_result_retaining_every_archived_ledger_item(self):
         self.prepare_committed_repo()

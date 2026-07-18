@@ -31,9 +31,9 @@ Reading rules for the tables:
 |---|---|---|---|---|
 | `pm.py` (21) | thin entrypoint | **Replace completely** | new `pm.py` | Trivial; new file for the new CLI. |
 | `pm_lib/cli.py` (234) | 19-command parser | **Replace completely** | new `cli.py` (~120), 10 commands | Commands dropped per design §12; loss/retention recorded there. |
-| `pm_lib/commands.py` (1,281) | command handlers incl. reconcile, archive-sensitive, emergency paths | **Replace completely** (most behaviour re-housed), with parts **Delete** | `slice_ops.py` (~300) + parts of `state.py` | Deleted outright: `reconcile` (cause designed out), `archive-sensitive` (nothing sensitive written), `_emergency_halt_without_state` + tampered-mirror archaeology (single-copy state), dual-path guards. Retained as respecified behaviour: init, status/report, approve, observe/send, stop-with-capture. |
+| `pm_lib/commands.py` (1,281) | command handlers incl. reconcile, archive-sensitive, emergency paths | **Replace completely** (most behaviour re-housed), with parts **Delete** | `slice_ops.py` (~340) + parts of `state.py` | Deleted outright: `reconcile` (cause designed out), `archive-sensitive` (credential seeding gone; artifact-sensitivity *guidance* stays in README), tampered-mirror archaeology (single authenticated copy), dual-path guards. Retained as respecified behaviour: init, status/report, approve, observe/send, stop-with-capture, **and the state-independent emergency sweep — as `stop --scavenge` (run-prefixed tmux scan + recorded reviewer process groups), the minimal survivor of `_emergency_halt_without_state`**. |
 | `pm_lib/plan.py` (348) | plan parse, check-plan, eligibility | **Replace completely** (behaviour **Retain**) | new `plan.py` (~250) | The one module whose *behaviour* is retained nearly 1:1 (spine S1). Newly written to the same spec: headings, seven sections, surface path rules, segment-aware match semantics, approval-flag exactness, digest freeze, duplicate-id rejection, lint warnings. Loss: none intended. |
-| `pm_lib/state.py` (1,132) | schema-v5 validation, dual-copy control, reports, events | **Replace completely**, majority **Delete** | new `state.py` (~200) | Deleted: closed-field validation lattice (~450 LOC), controller-mirror machinery (C3), slice-entry evidence-shape validation, provenance rendering. Retained (respecified): atomic writes, event log + counter recovery, report rendering, approval records. Loss: tamper-*detection* on in-worktree state — replaced by tamper-*irrelevance* (authoritative state outside worktree). |
+| `pm_lib/state.py` (1,132) | schema-v5 validation, dual-copy control, reports, events | **Replace completely**, majority **Delete** | new `state.py` (~260) | Deleted: closed-field validation lattice (~450 LOC), controller-mirror machinery (C3), slice-entry evidence-shape validation, provenance rendering. Retained (respecified): atomic writes, event log + counter recovery, report rendering, approval records, **advisory locking on state/event writes, worktree-specific state dir resolution, and a `current`-run pointer with `--run` selection**. Tamper-detection is retained, redesigned: **HMAC-authenticated state writes keyed by the run capability token** (held only by the PM agent; hash-stored in state) replace dual-copy equality — a non-PM write fails verification and is an integrity stop. |
 | `pm_lib/gates.py` (1,104) | verify_gate, 19 signatures, reviewer forensics, ledgers, reconciliation | **Split:** floor **Replace completely** (retained behaviour); everything else **Replace with PM judgement** or **Delete** | `floor.py` (~150) + `git_ops.py` share | Retained mechanically (S6/S9): changed-files⊆surface, ancestry/HEAD, clean worktree, digest check, slice-id match, result presence. Replaced with PM judgement: validation/drift/review verdict gates, artifact-shape checks, changed-files bookkeeping, ledger shape/retention/cross-check. Deleted: commit-hash reconciliation (+ its artifacts), reviewer-evidence forensics, provenance derivation. Loss: deterministic semantic verdicts (already shape-only — map §3.3); mechanical retention (net-negative in live runs). |
 | `pm_lib/git_ops.py` (170) | changed-files, ancestry, status, surface matching | **Replace completely** (behaviour **Retain**) | new `git_ops.py` (~150) | Spine. Segment-aware `PurePath.full_match` semantics re-specified exactly (Python ≥3.13 stays a requirement). |
 | `pm_lib/runner.py` (1,445) | dual-path drivers, repair resolver, breaker, relaunch, idle-stall | **Replace with PM judgement** (steer/relaunch/stop under budget) + **Delete** (taxonomy, breaker, dual budgets, batch driver) | judgement + ~80 LOC of `slice_ops.py` (attempt counting, relaunch) | Loss: deterministic repair classification & the unattended batch loop (capability loss accepted by owner decision — design §16.1). Retained: nudge/steer/relaunch/stop *capabilities*, attempt budget, frozen-prompt relaunch. |
@@ -60,7 +60,7 @@ Reading rules for the tables:
 | `test_runtime_batch.py` (843/31) | **Delete** in effect | Pins the batch driver and reconcile; both gone. Timeout/dead-session scenarios re-pinned in slice_ops tests. |
 | `test_prompts.py` (563/28) | **Replace completely** | New templates, ~8 tests. |
 
-**Net test target:** ~120 tests / ~2,500 LOC (from 306 / 8,219). Reduction follows mechanism deletion, not lowered coverage standards: the retained behaviours keep boundary-focused tests.
+**Net test target:** ~140–170 tests / ~2,800–3,400 LOC (from 306 / 8,219; non-binding range). Reduction follows mechanism deletion, not lowered coverage standards: the retained behaviours keep boundary-focused tests.
 
 ---
 
@@ -72,10 +72,10 @@ Reading rules for the tables:
 | `run.json` schema v5 (17 fields, closed) | **Replace completely** | `lite-1` (design §8) | 10→4 run statuses, 7→3 slice statuses, repair/supervision/launch-freeze/reviewer-policy/provenance objects deleted. |
 | controller copy + mirror equality (C3) | **Delete** | single authoritative copy outside worktree | Same protection, no apparatus. |
 | `operational-events.jsonl` + counter sidecar | **Retain but simplify** | `events.jsonl` (5-field lines) | Same instrument, fewer mandatory fields. |
-| `prior-slice-context.md` (+digest, budget, projection) | **Replace with PM judgement** | `notes.md` curated by PM (+512 KiB tripwire) | See §1.2 context.py row. |
+| `prior-slice-context.md` (+digest, budget, projection) | **Replace with PM judgement** | controller-owned `notes.md` curated by PM (+512 KiB tripwire), mirrored into `.pm/` for humans | See §1.2 context.py row; controller ownership (state dir original) removes the Developer-tamper channel the old digest gate guarded, so the accepted residual shrinks to PM curating badly — a PM-seat dependency, not a tamper gap. |
 | `developer-result.json` schema v5 (13 fields, ledgers) | **Replace completely** | 4-field `result.json` | Loss: relayed verdicts/bookkeeping (recomputed or judged instead). |
 | per-round repair artifacts (archived results, repair prompts, fresh-session prompts, per-round panes/statuses) | **Delete** | events + assessment narrative | Consumers (retention check, recombined prompts) are gone. |
-| `slice-summary.md`, `run-report.md` | **Merge** | `assessment.md` per slice + `run-report.md` | Assessment is richer (reasoning, not just fields); report aggregates. |
+| `slice-summary.md`, `run-report.md` | **Merge** | controller-owned `assessment.md` per slice + `run-report.md`, mirrored into `.pm/` | Assessment is richer (reasoning, not just fields); report aggregates and regenerates from controller-owned data alone. Slice entries additionally persist a compact decision record (decision line, review refs with sha256 + reviewed HEAD). |
 | `audit_provenance`, `pm-reconciliation.*`, `observation-latest.json`, `activity-attempt-*.jsonl`, `model-identities.json` (as artifact), `reviewer-policy.json`, `reviewer-evidence.md`, `reviewer-runs-summary.json`, `reviewer-cancel-summary.json`, tool-home/credential trees, `emergency-stop/`, `run.json.tampered-*`, `stale-sessions/*.txt` | **Delete** | assessment text; model identity noted in slice entry; review artifacts as plain `review-*.md`; stale-session reaping logs to events | Each consumer is deleted or judgement-based. Credential seeding disappears entirely (PM-commissioned reviewers use ambient auth). |
 | `pane-capture*` six-family | **Retain but simplify** | `pane.txt` + `pane-live.txt` (+ per-attempt suffix on relaunch) | Debugging value proven (Test 4); variants tracked deleted round structure. |
 | `prompt.md`, `git-status-before/after`, `git-diff.patch`, `validation-summary.md` → `validation.md`, transcripts | **Retain** (names simplified) | same roles | Core evidence set (S5/S12). |
@@ -94,7 +94,7 @@ Full mapping in design §12. Ledger dispositions: **Retain (simplified):** `chec
 | `policy.max_repair_attempts` | **Retain** | `policy.max_attempts` (default 3), mechanical |
 | Repair-prompt stanza table | **Replace with PM judgement** | PM writes the correction |
 | Idle-stall statute (3×600 s) & transient reclassifier | **Replace with PM judgement** | guidance in SKILL.md; hard-stop floor unchanged |
-| Reviewer-policy digest refresh per round (+`operational_round` binding) | **Delete** | moot — PM commissions reviews after implementation, against the final diff |
+| Reviewer-policy digest refresh per round (+`operational_round` binding) | **Delete**, need re-housed | The *freshness need* it served survives as one mechanical fact: every commissioned review records the HEAD/`before_head` range it reviewed; any later tree change invalidates mandatory reviews for acceptance. One comparison, no digests, no rounds. |
 | Fresh-session prompt recombination (ledger re-injection) | **Delete** | relaunch = frozen prompt + current `notes.md` |
 
 ## 5. Reviewer-policy integration & orchestrator surface
@@ -150,10 +150,38 @@ Per the brief, reuse is the exception and each candidate is justified against a 
 1. **Recorded pane fixtures and marker/readiness strings** (test data + constants: readiness banners, hard-prompt marker sets, usage-limit phrasings). *Justification:* these are **observations of external tools**, not architecture — re-deriving them means re-running live CLIs to rediscover identical strings. Carrying data forward inherits no abstraction.
 2. **Segment-aware surface-matching semantics** (the *specification* of plain-path/`/`-suffix/single-segment-glob/`**` behaviour, and its test scenario list). Code rewritten; the semantics and edge-case suite are proven and must not drift, since plans in the wild depend on them.
 3. **The fake-harness test pattern** (`--harness-command` injection, tmux-skip guards). A testing *idea*, reused as a pattern; helper code rewritten against the new CLI.
-4. **`orchestrator` scripts as a standalone skill** — retained unchanged *for their own users*, minus the PM-facing surface (§5). This is retention of an out-of-scope sibling, not reuse inside Lite: Lite's `review.py` shares none of its code, because Lite's reviewer launch is ~120 LOC (compose command from profile, run, capture) and importing a 1,282-LOC job manager to do that would re-import the abstraction being removed.
+4. **The transitive skill-bundle embedding specification** (embed SKILL.md plus every locally-linked Markdown resource, path-escape-guarded — the current launcher's proven behaviour). Reused as a *spec* because `code-review` mandates linked resources (`review-matrix.md`); code rewritten (~40 LOC in `review.py`/`prompts.py`).
+5. **`orchestrator` scripts as a standalone skill** — retained unchanged *for their own users*, minus the PM-facing surface (§5). This is retention of an out-of-scope sibling, not reuse inside Lite: Lite's `review.py` shares none of its code, because Lite's reviewer launch is ~120 LOC (compose command from profile, run, capture) and importing a 1,282-LOC job manager to do that would re-import the abstraction being removed.
 
 Explicitly considered and rejected for reuse: `plan.py` (rewrite to the retained spec — its code is clean, but importing it wholesale drags `models.py`/`constants.py` coupling and the temptation to keep its non-retained lint plumbing), `tmux_adapter.py` (same reasoning; the new `sessions.py` is specified from its observed behaviours), `git_ops.py` (small enough that rewriting to spec is cheaper than auditing for hidden coupling).
 
-## 10. Assurance-loss register (consolidated)
+## 10. Assurance-loss register (consolidated — the complete list an approver signs)
 
-The honest single list of everything Lite stops guaranteeing, gathered from the rows above: deterministic semantic acceptance; mechanical audit-independence proof; mechanical ledger retention; mechanical provenance labels; closed-schema state/result validation; deterministic repair classification; pause/idle statutes; in-worktree state tamper *detection* (superseded by placement); the unattended no-model batch mode (loss accepted by owner decision); machine-parsed reset times. Each is replaced by recorded PM judgement over the same or better evidence, bounded by the unchanged mechanical floor — and each replacement is named in the run's own artifacts (`assessment.md`), not just in this ledger.
+Revised after the independent Codex design review, which found the first version materially incomplete. Three columns of honesty: **relinquished** (gone, replaced by judgement or accepted as residual risk), **redesigned** (the assurance survives through a different, smaller mechanism), and **inherited gaps** (limits the current system also has, now stated instead of implied).
+
+**Relinquished:**
+- Deterministic semantic acceptance (verdict-string gates) → recorded PM judgement over the same evidence.
+- Mechanical audit-independence *process proof* (launch-contract forensics) → PM commissions reviews itself; its own action log is the record.
+- Mechanical ledger retention and provenance labels → PM curation + assessment text (the mechanical versions both over- and under-fired in live runs).
+- Closed-schema state/result validation → minimal tolerant schemas; floor checks facts, not shapes.
+- Deterministic repair classification (19 signatures, breaker, dual budgets) → one intervention budget + PM judgement.
+- Pause/idle statutes and machine-parsed reset times → PM judgement over the hard-stop marker floor; multi-hour autonomous recovery now *depends on the PM harness's scheduling* (declared dependency; `wake_at` is persisted for whoever resumes).
+- The unattended no-model batch mode (owner-accepted).
+- Immutable per-slice context snapshots with digest-terminal gates → controller-owned `notes.md` (tamper channel removed by ownership; bad curation is a PM-seat risk, not a tamper risk).
+
+**Redesigned (assurance survives, mechanism shrinks):**
+- State tamper detection: dual-copy equality → HMAC-authenticated writes keyed by the run capability token.
+- Role-authority enforcement: hidden controller state → capability token required by every mutating command, withheld from Developer sessions.
+- Review freshness: per-round policy-digest binding → reviewed-HEAD recording + invalidate-on-tree-change.
+- Emergency recovery with unreadable state: emergency-stop archaeology → `stop --scavenge` (run-prefixed session scan + recorded reviewer process groups).
+- Branch identity: per-slice re-check → floor fact #2, re-validated at launch and finalize.
+- Reviewer teardown: terminal-path reviewer reaping → reviewer pids/pgroups in state, reaped by `stop`.
+- PM-authored artifact integrity: none today (reports live in-worktree) → controller-owned originals with `.pm/` mirrors.
+
+**Inherited gaps, now explicit (present in the current system too):**
+- No OS boundary against a same-user process that steals the capability token or subverts the PM agent — outside the threat model, stated in the vision.
+- The floor sees final Git-visible worktree state only: ignored files, Git metadata/hooks, and write-then-revert effects escape it; dependency/license/side-effect stops remain heuristic (markers + prompts + plan-level exclusion).
+- `attested` entries remain operator narration.
+- Captured artifacts (panes, transcripts, review reports) can contain code and echoed secrets; retention/cleanup guidance stays in the README even though credential seeding is gone.
+
+Each relinquished or redesigned item is named in the run's own artifacts (`assessment.md`) where it bites, not just in this ledger.

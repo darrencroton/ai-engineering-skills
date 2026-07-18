@@ -13,7 +13,7 @@ The smallest structural core responsible for most of the current system's practi
 
 | # | Outcome | Protection in Lite | Failure it prevents (freq/impact — judgement, informed by the test record) | Mechanical? | Disposition |
 |---|---|---|---|---|---|
-| S1 | Work begins from a sufficiently clear objective | Frozen plan contract; parse + `check-plan` at start; fail closed on missing sections, unusable surfaces, non-exact approval flags | Running on a defective contract (medium/high — Test 4 class) | Mechanical | **Retain** (C1) |
+| S1 | Work begins from a sufficiently clear objective | Frozen plan contract; parse + `check-plan` at start; fail closed on missing sections, unusable surfaces, non-exact approval flags | Running on a defective contract (medium/high) | Mechanical | **Retain** (C1) |
 | S2 | Important constraints are visible | Contract + risk flags rendered into every Developer prompt; non-goals restated | Constraint-blind implementation (high/medium) | Prompt | **Retain, simplified prompt** |
 | S3 | Implementing agent understands its scope | Authorized surface in prompt; segment-aware matching semantics documented once | Innocent scope confusion (high/low-med) | Prompt + mechanical backstop S6 | **Retain** |
 | S4 | Long work survives context limits | Fresh session per slice + PM-curated run notes fed to each new session | Knowledge loss across sessions (high/medium) | Judgement (curation) over mechanical transport | **Redesign** (replaces C8/C9 machinery) |
@@ -69,7 +69,17 @@ Four stages. One drive path (the PM agent), not two.
 
 ### 3.3 Assess (per slice)
 - **Purpose:** decide the slice. **Owner:** PM.
-- **Mechanical floor, in order, non-waivable:** plan digest unchanged; result names the expected slice; changed files (computed `before_head`→HEAD + status) ⊆ frozen surface; commit exists (when required), HEAD advanced and descends from `before_head`; worktree clean outside the artifact dir. Any floor failure → steer a restore/fix or stop; never accept.
+- **Mechanical floor — the authoritative enumeration (checked at slice launch and again, in full, at `finalize`; non-waivable):**
+  1. Plan digest unchanged since `init`.
+  2. Repo/worktree identity and **current branch** match the run state (re-validated at every launch and finalize — a commit on a different branch descending from `before_head` fails here).
+  3. Approval eligibility: an approval-flagged slice has a recorded human approval.
+  4. `result.json` present and names the expected slice.
+  5. Changed files (computed `before_head`→HEAD + status) ⊆ frozen authorized surface.
+  6. Commit exists (when required), HEAD advanced, descends from `before_head`, and is the head of the recorded branch.
+  7. Worktree clean outside the artifact dir.
+  8. A fresh hard-stop scan of the live pane at finalize: no visible credential/trust/permission/billing/side-effect prompt (a hard-stop condition blocks acceptance even when a result and commit exist).
+
+  The floor's guarantee is scoped honestly: it covers the **final Git-visible worktree state**. Ignored files, Git metadata/hooks, transient writes reverted before finalize, and external side effects are outside it — controlled, as today, by prompt prohibitions, hard-stop markers, and plan-level surface exclusion, and registered as such in the assurance-loss register. Any floor failure → steer a restore/fix or stop; never accept.
 - **Judgement, recorded in `assessment.md`:** read the diff against intent and non-goals (the drift question); read `validation.md` and judge whether the contract's validation plan was actually satisfied (rerun spot commands at PM's discretion); on elevated slices, commission independent drift-audit and/or code-review against the final diff and weigh the reports; judge materiality of deviations; extract findings and lessons into `notes.md`; decide **accept / steer (with a written correction) / stop**.
 - **Proceed when:** accepted → next slice. **Stop for:** floor integrity breaches, exhausted attempt budget, plan-flagged approvals, anything outside PM's brief.
 
@@ -83,10 +93,10 @@ Four stages. One drive path (the PM agent), not two.
 Two levels. No taxonomy, no decision engine.
 
 - **Standard** (default): everything in §3 minus independent review. PM's own assessment of the diff *is* the review.
-- **Elevated**, iff any of: the plan says `Approval needed before implementation: yes` (also requires a human), the plan says `Independent audit required: yes`, the plan's Risk Flags name a risky surface for this slice, **or PM escalates on evidence** (diff unexpectedly broad; touches auth/billing/persistence/schema/deps/CI even inside an authorized surface; validation evidence surprising; anything PM finds suspicious).
+- **Elevated.** The plan-declared part is **mechanically derived at parse time** and recorded immutably in the slice's state: `plan_risk = elevated` iff `Approval needed before implementation:` is `yes` (also requires a human), or `Independent audit required:` is `yes`, or the `Risky surfaces touched:` value is anything other than an exact `none` (with or without a trailing period). PM cannot initialize such a slice as standard — the parser decides. Above that floor, **PM escalates on evidence** (diff unexpectedly broad; touches auth/billing/persistence/schema/deps/CI even inside an authorized surface; validation evidence surprising; anything PM finds suspicious).
 - **Elevated effects (automatic):** independent review commissioned by PM (drift-audit, and code-review unless the flag names only one concern); deeper validation (PM reruns the contract's commands rather than reading output); assessment must name what was independently checked. Plan-flagged approval additionally requires a recorded human `approve`.
 - **Ratchet:** PM may raise a slice to elevated and must record why. PM may never lower a plan-declared elevation. The plan is the floor of the risk level; PM judgement is only ever additive. This is how "every task gets classified high" is prevented (the plan sets the baseline, and elevation costs PM real work, so there is no incentive to inflate) and how "casual downgrade" is prevented (downgrade is structurally impossible).
-- **What does not raise risk:** slice length, file count within the surface, wording, model choice. These affect PM attention, not the risk level.
+- **What does not raise the risk level:** slice length, file count within the surface, wording. Model choice also does not change the *level* — but SKILL.md directs PM to commission independent review as a matter of course when the Developer seat holds a weak or unproven model, recorded as a discretionary escalation of review depth, not of risk level.
 - **Recording:** one line in the slice's assessment: level, trigger, effects applied.
 
 ## 5. Gates
@@ -98,6 +108,8 @@ Three gates total, each protecting a distinct outcome:
 | **Floor** | S6/S9/S10/S11/S15: surface, history, cleanliness, frozen plan, approvals, hard-stop conditions | PM's code | continuously + at assess | all of it | none | steer restore/fix within budget, else stop; integrity breaches stop immediately |
 | **Assessment** | S7/S8/S12/S13: authorized-in-substance, actually validated, actually good enough, findings preserved | PM agent | per slice at assess | evidence collection (diff, files, outputs) | all of the decision, recorded with reasoning | steer with written correction, or stop |
 | **Human** | plan-flagged consequential work | Human | before flagged slices; on escalations/stops | approval recording; the stop itself | the human's decision | run waits |
+
+**Review freshness is a floor-adjacent mechanical fact:** every commissioned review is recorded in run state with the HEAD (and `before_head`) range it reviewed. Any tree change after a mandatory (elevated-slice) review mechanically invalidates it for acceptance — the review must be re-commissioned against the final HEAD. This is a single freshness comparison, not a revival of launch-contract forensics, and it closes the stale-audit gap (Test 13) for real rather than rhetorically.
 
 Consolidations from the current nine-plus verdict points (validation, drift verdict, drift artifact, review verdict, review artifact, ledger shape, ledger retention, reviewer evidence, changed-files bookkeeping, commit relay…): all semantic checks fold into **Assessment**; all invariants fold into **Floor**. The drift-audit-before-code-review *ordering* survives inside Assessment as the required order of questions ("authorized before good"), and in the commissioned-review sequence on elevated slices.
 
@@ -129,7 +141,15 @@ Per area: **judgement / evidence normally inspected / hard boundaries / human-es
 
 ## 8. State
 
-Authoritative state: **one copy, outside the worktree**, at `<git-common-dir>/pm/<run-id>/run.json` (the location the current system already proved usable for its controller copy). The worktree holds artifacts and reports under `.pm/` (self-ignoring `.gitignore`, as today) — written for humans and reviewers, never read back for control decisions. No mirror equality checking; no tampered-mirror archaeology. A Developer that vandalises `.pm/` damages a report, not the run.
+Authoritative state: **one copy, outside the worktree**, at `<worktree-git-dir>/pm/<run-id>/run.json` — the worktree-*specific* Git directory (`git rev-parse --git-dir`, resolved as the current controller path does), so linked worktrees get distinct state. A `<worktree-git-dir>/pm/current` pointer names the active run; every command defaults to it and accepts `--run` to select another. State and event writes take an advisory `fcntl` lock; a stale lock is reported, never silently stolen.
+
+**Authority and tamper model — stated honestly.** The Developer session runs as the same OS user, needs Git-metadata access to commit, and can therefore *find* both the state directory and the `pm.py` CLI. There is no OS boundary here, exactly as the current system admits of itself, and building one is a declared non-goal. Within the declared threat model (corner-cutting and sloppy models, not determined adversaries), three cheap mechanisms make forgery a deliberate act rather than a shortcut, and make it detectable:
+
+1. **Run capability token.** `init` mints a random token, prints it once to the operator/PM agent, and stores only its SHA-256 in state. Every mutating command (`finalize`, `approve`, `send`, `stop`, `start-slice`, `review`) requires the token; the Developer prompt and environment never contain it, so a Developer cannot invoke PM authority by simply running the CLI it can see. (Test 7's Developer edited state under gate pressure; this closes the CLI-shaped version of that move.)
+2. **Authenticated state writes.** The toolkit HMACs every state write with the token; every read verifies. A Developer editing `run.json` directly (minting an approval, marking a slice accepted) produces a verification failure, which is an integrity stop — restoring the tamper *detection* the dual-copy design provided, without a second copy.
+3. **Controller-owned originals.** Every PM-authored artifact — `assessment.md`, `notes.md`, `review-*.md`, the run report — is written under the state directory as the authoritative original and *mirrored* into `.pm/` for human reading. Developer-authored evidence (`result.json`, `validation.md`) stays in `.pm/` — it is inherently a Developer claim, judged against floor-computed facts, never trusted as control input.
+
+So the honest sentence is: `.pm/` vandalism damages the human-facing mirror and the Developer's own evidence, never PM's records or decisions; direct state tampering is detected and terminal; and the residual gap — a same-user process that also captures the token in flight or subverts the PM agent itself — is outside the threat model and documented as such.
 
 `run.json` (schema `lite-1`, validated for the fields PM reads, tolerant of extras):
 
@@ -144,14 +164,19 @@ Authoritative state: **one copy, outside the worktree**, at `<git-common-dir>/pm
   "harness": {"name": "codex", "model": "…", "effort": "…"},
   "reviewer": {"tools": ["copilot"], "model": "…", "effort": "…"},
   "policy": {"max_attempts": 3, "commit_required": true},
+  "auth": {"token_sha256": "…"},
   "current_slice": {
     "id": "Slice 3", "artifact_dir": "…", "tmux_session": "…",
-    "before_head": "…", "started_at": "…", "attempts": 1, "risk": "standard | elevated"
+    "before_head": "…", "started_at": "…", "attempts": 0,
+    "risk": "standard | elevated", "plan_risk": "standard | elevated",
+    "wake_at": null, "reviewer_pids": []
   },
   "slices": [
     {"id": "Slice 1", "title": "…", "status": "accepted | attested | stopped",
-     "risk": "standard", "commit": "…", "attempts": 1,
-     "assessment": ".pm/runs/…/slices/slice-001/assessment.md", "summary": "one line"}
+     "risk": "standard", "plan_risk": "standard", "commit": "…", "attempts": 1,
+     "decision": "one-line acceptance reason",
+     "reviews": [{"skill": "code-review", "head": "…", "artifact": "…", "sha256": "…"}],
+     "assessment": "<state-dir>/slices/slice-001/assessment.md", "summary": "one line"}
   ],
   "approvals": {"Slice 4": {"at": "…", "reason": "…"}},
   "stop_reason": null
@@ -159,14 +184,14 @@ Authoritative state: **one copy, outside the worktree**, at `<git-common-dir>/pm
 ```
 
 - **Run statuses: 4** (`active` covers running/paused/resuming/between-slices — the event log carries the texture). **Slice statuses: 3** (`accepted`, `attested` — operator-attested prior completion at init, `stopped` — any non-accepted end, with the reason in the entry and assessment). **Risk levels: 2.**
-- **Interruption recovery needs exactly:** run.json + the artifact dir + git. `pm status` reconstructs the situation; a live tmux session is re-attached or declared dead by liveness check.
+- **Interruption recovery needs exactly:** run.json + the artifact dir + git. `pm status` reconstructs the situation; a live tmux session is re-attached or declared dead by liveness check. `current_slice.wake_at` persists a PM-recorded resume time (e.g., a usage-window reset) so any later controller — the PM agent after its own wait, or a human — can see when continuation is due; multi-hour *autonomous* recovery depends on the PM harness's own scheduling ability, a declared dependency, not a toolkit feature. If state is deleted or unreadable, `stop --scavenge` still works: session names carry the run-id prefix and reviewer process groups are recorded per launch alongside their artifacts, so a state-independent sweep can find and stop everything (the minimal survivor of the current emergency-stop path).
 - **Not persisted:** pause budgets/counters, signature streaks, session generations, launch-config freeze objects (the harness block *is* the run's configuration; per-slice overrides are recorded in the slice entry when used), reviewer policy snapshots, provenance objects, ledger arrays. Superseded attempts live in the event log and artifacts, not as state rows.
 - **Human decisions:** `approvals` (as today, simplified) + stop/approve events.
 - **Events:** `events.jsonl` beside run.json (append-only): observations on change, sends (with reason), pauses, nudges, interventions, escalations, approvals, stops. This is the reviewability substrate for PM behaviour — same instrument as today, fewer mandatory fields (`ts`, `kind`, `slice`, `note`, optional `evidence` path).
 
 ## 9. Artifacts
 
-Per run: `run.json` + `events.jsonl` (control dir); `.pm/runs/<id>/run-report.md`; `.pm/runs/<id>/notes.md` (PM-curated: decisions, lessons, interfaces, failed approaches, open findings — the replacement for prior-slice-context generation, continuation-note ledgers, and residual-finding ledgers as *transport*; the report remains the human-facing sink).
+Per run: `run.json` + `events.jsonl` + the controller-owned originals of `notes.md`, `run-report.md`, and every assessment and review (all in the state dir, per §8); `.pm/runs/<id>/` carries the human-facing mirror of those plus the Developer-authored evidence. `notes.md` (PM-curated: decisions, lessons, interfaces, failed approaches, open findings) replaces prior-slice-context generation, continuation-note ledgers, and residual-finding ledgers as *transport*; the report remains the human-facing sink and regenerates from controller-owned data alone — never from the mirror.
 
 Per slice (`.pm/runs/<id>/slices/slice-NNN/`), each with producer → consumer / lifetime / why irreplaceable:
 
@@ -178,24 +203,26 @@ Per slice (`.pm/runs/<id>/slices/slice-NNN/`), each with producer → consumer /
 | `diff.patch`, `status-before.txt`, `status-after.txt` | toolkit → PM assessment, reviewers, humans | the change itself; review input |
 | `validation.md` | Developer → PM | validation evidence in the Developer's own words + captured output |
 | `result.json` | Developer → PM | completion signal + minimal facts (below) |
-| `review-*.md` (elevated/discretionary) | Reviewer session → PM, humans | the independent opinion, as written |
-| `assessment.md` | PM → humans | **the accountability record**: floor results, what was read, risk level + trigger, decision + reasoning, findings, interventions |
+| `review-*.md` (elevated/discretionary) | Reviewer session → PM, humans | the independent opinion, as written; controller-owned original, sha256 + reviewed-HEAD recorded in state |
+| `assessment.md` | PM → humans | **the accountability record**: floor results, what was read, risk level + trigger, decision + reasoning, findings, interventions; controller-owned original |
+
+Each Developer launch gets its own `attempt-<n>/` subdirectory for its `result.json` and pane capture; the toolkit rotates any prior attempt's completion signal there before launching, so a restarted or steered session can never be mistaken for complete on stale evidence. These are launch-scoped folders, not the old per-round archive families — nothing gates on their contents.
 
 Gone, with their reason recorded in the ledger: reviewer-policy/request/manifest/status/launch families, per-round archived results and repair prompts, per-round pane/status families, reconciliation files, provenance objects, `prior-slice-context.md` (superseded by `notes.md`), observation-latest snapshots, activity JSONL families, tool-home/credential seeding trees (PM-commissioned reviewers run under ambient auth like any other session PM starts).
 
-Lifetimes: everything persists for the run's life; `archive/`-style cleanup is the operator's business (no `archive-sensitive` command — nothing secret is written, because credential seeding is gone).
+Lifetimes: everything persists for the run's life; `archive/`-style cleanup is the operator's business. There is no `archive-sensitive` command because credential seeding is gone — but pane captures, transcripts, validation output, and review reports still contain code and can contain echoed secrets or environment values, so the README's privacy section retains the artifact-sensitivity table and cleanup guidance.
 
 ## 10. Session model
 
 - **One fresh tmux Developer session per slice** — retained deliberately: it is the context-limit strategy and the clean-authorization boundary (`before_head`). Not dogma: PM steers the *live* session for corrections (cheaper than relaunch, preserves context — today's in-session repair, minus the statutes) and relaunches fresh when the session is dead or its context is poisoned (today's fresh-session escalation, minus the streak algebra).
-- **Reviewer sessions:** short-lived, PM-commissioned, read-only-by-instruction, run to completion, captured, torn down. One-shot (`-p`/exec) harness modes preferred where the tool supports them; tmux otherwise — using the same profile table as Developer launches.
+- **Reviewer sessions:** short-lived, PM-commissioned, read-only-by-instruction, run to completion, captured, torn down. One-shot (`-p`/exec) harness modes preferred where the tool supports them; tmux otherwise — using the same profile table as Developer launches. **Review input is pinned, not live:** the toolkit generates the review input from `git diff <before_head>..<HEAD>` plus files at the pinned HEAD, so a still-running or restarted Developer session cannot race the reviewer; PM quiesces (or has already stopped) the Developer session before commissioning a mandatory review. Reviewer child pids/process-groups are recorded in state so `stop` reaps them (the Test 8 orphaned-reviewer lesson).
 - **Lifecycle costs addressed:** stale sessions reaped at slice start (kept); liveness re-checked before any send (kept); local-model cold-start/prefill patience is SKILL.md guidance (kept as words, not windows-and-ceilings).
 - **Context transfer between sessions:** `notes.md` (bounded by PM curation; the 512 KiB hard cap is kept as a tripwire with a warning, since a runaway notes file would silently degrade every later prompt).
 
 ## 11. Failure handling
 
 - **PM resolves directly:** stalls (nudge), transients (wait/retry), imperfect result shapes (tolerate + note), trivial deviations (accept + note), fixable gaps (steer with a written correction), dead sessions (relaunch with the frozen prompt + notes).
-- **Bounded by:** `max_attempts` PM interventions per slice (default 3; steer, relaunch each count; observation/waits don't). Mechanical counter, persisted, non-negotiable. On exhaustion: stop with the full story in the assessment.
+- **Bounded by:** `max_attempts` PM *interventions* per slice — precisely: `attempts` starts at 0 on the initial launch and increments on every steer (a corrective `send` after a floor/assessment failure) and every relaunch; pure observation, waits, and stall nudges do not count. Default budget 3: initial launch, then at most three interventions before a mandatory stop. Mechanical counter, persisted, non-negotiable. On exhaustion: stop with the full story in the assessment.
 - **Always stops, no discretion:** integrity breaches (HEAD not descended / tree rewritten / state tampered / wrong-slice work); plan digest changed; approval-gated slice without approval; hard-stop marker conditions; floor-failing work PM cannot get restored within budget.
 - **New plan needed (stop + report):** contract defective or infeasible in a way interpretation can't honestly bridge; repeated failures that PM judges to be plan-caused (the report says so — PM still never edits the plan).
 - **Distinguishing model-misbehaviour from bad plans:** PM's job, in the assessment: repeated same-shape failures across a relaunch with a clean prompt point at the plan or the task; failures that shift shape point at the model; PM writes which it believes and why. No mechanism pretends to make this call.
@@ -203,7 +230,7 @@ Lifetimes: everything persists for the run's life; `archive/`-style cleanup is t
 
 ## 12. Command surface
 
-Ten commands (from 19). All read/write the single authoritative state; all are safe to re-run.
+Ten commands (from 19). All read/write the single authoritative state; all are safe to re-run. Every mutating command (`init` excepted — it mints the token) requires `--token` (or `PM_RUN_TOKEN` in the *controller's* environment, never the Developer's): `approve`, `start-slice`, `send`, `finalize`, `review`, `stop`. Read-only commands (`check-plan`, `status`, `observe`) do not.
 
 | Command | Purpose / user intention | Reads → Writes | Essential? |
 |---|---|---|---|
@@ -216,7 +243,7 @@ Ten commands (from 19). All read/write the single authoritative state; all are s
 | `send --text --reason` | "Steer the live session" (hard-prompt floor enforced) | → tmux, event | Yes |
 | `finalize` | "Run the floor and collect assessment evidence" — outputs floor results + evidence paths; **accepts only on a passing floor plus PM's explicit `--accept "reasoning"` / records `--stop`/`--steer` otherwise** | git, artifacts → slice entry, state, report | Yes |
 | `review --slice --skill drift-audit\|code-review [--tool/--model]` | "Commission an independent review of the final diff" | diff, contract → review artifact | Yes (elevated path) |
-| `stop --reason [--slice-status stopped]` | "End it, preserving evidence" (evidence capture folded in — one stop, not three) | tmux, files → terminal state, captures | Yes |
+| `stop --reason [--slice-status stopped] [--scavenge]` | "End it, preserving evidence" (evidence capture folded in — one stop, not three); `--scavenge` sweeps run-prefixed tmux sessions and recorded reviewer process groups even when state is unreadable | tmux, files → terminal state, captures | Yes |
 
 Dropped, with their need re-housed: `run-next`/`run --scope remaining` (the PM agent *is* the loop; the unattended no-model mode is dropped by owner decision — §16.1), `wait` (→ `observe --wait`), `pause-until` (PM schedules its own re-observation), `profiles`/`preflight` (→ `init`/`start-slice` checks + `--help`), `reconcile` (its cause — gate-stopped recoverable runs — is designed out; a stopped slice is re-run with `start-slice` after human review), `stop-with-evidence` (→ `stop`), `summarize` (→ `status --report`), `archive-sensitive` (nothing sensitive written).
 
@@ -234,7 +261,7 @@ Dropped, with their need re-housed: `run-next`/`run --scope remaining` (the PM a
 
    Why structured at all: file-appearance is the completion signal and slice identity must be machine-checkable (wrong-slice work is an integrity stop). Why nothing more: every removed field (changed_files, commit hash, verdicts, ledgers, validation array) was either recomputable from git, a relay of another artifact, or a schema trap. Mandatory: `slice`, `status`. Tolerated: extra fields ignored; missing `summary` is a noted imperfection, not a failure. Versioning: additive-only by policy; no version field.
 3. **`run.json` (`lite-1`)** — §8. Producer/consumer: PM toolkit only. Versioning: the `schema` string; the toolkit refuses future-versioned state with a clear message (no migration machinery — a run is days long, not years).
-4. **Prompt contracts** (developer, reviewer, steer-messages) — reference-doc templates rendered by the toolkit, single-sourced, each ≤ ~60 lines. The reviewer prompt embeds the named skill's SKILL.md (the one genuinely load-bearing reuse of the embedding idea, at ~30 LOC of implementation).
+4. **Prompt contracts** (developer, reviewer, steer-messages) — reference-doc templates rendered by the toolkit, single-sourced, each ≤ ~60 lines. The reviewer prompt embeds the named skill's **complete transitive bundle** — SKILL.md plus every locally-linked Markdown resource, path-escape-guarded — because `code-review` mandates `review-matrix.md` and conditionally `scientific-and-language-priorities.md`; SKILL.md-only embedding would silently truncate the review contract. (~40 LOC, behaviour re-specified from the current launcher's proven approach.)
 5. **No reviewer policy/request JSON, no manifests, no verdict sentinels, no provenance records.** Where the old system needed them, the need dissolved with the topology change (map C6).
 
 ## 14. Repository structure (proposed final state)
@@ -280,11 +307,11 @@ ai-agent-coder/
 │       │       ├── slice_ops.py   # ~300  init/start/observe/send/finalize/stop orchestration
 │       │       ├── review.py      # ~120  PM-commissioned reviewer sessions
 │       │       └── prompts.py     # ~100  template rendering
-│       └── tests/                 # ~2,500 LOC, ~120 tests, fake-harness pattern retained
+│       └── tests/                 # ~2,800–3,400 LOC, ~140–170 tests, fake-harness pattern retained
 └── (deleted: every current skills/project-manager file; .ai-pm/ vocabulary; pm-slice-contract)
 ```
 
-Estimated new implementation: **~1,850 LOC** toolkit (vs 8,406 + the 2,540-LOC orchestrator dependency), ~450 lines of PM docs (vs 1,647). State lives in `<git-common-dir>/pm/`; artifacts in `.pm/`; prompts in `references/`; approval rules in the plan + SKILL.md charter; the adopted vision at `docs/VISION.md`.
+Estimated new implementation: **~2,200–2,600 LOC** toolkit (vs 8,406 + the 2,540-LOC orchestrator dependency) — a non-binding range, re-estimated after the Stage 1–2 spike, that includes the run token/HMAC, locking and run discovery, attempt directories, review freshness recording, transitive skill embedding, and the state-independent scavenge path; ~450–550 lines of PM docs (vs 1,647). Per-module figures in the tree above are indicative, not caps — behaviour coverage beats the reduction number wherever they conflict. State lives in `<worktree-git-dir>/pm/`; artifacts in `.pm/`; prompts in `references/`; approval rules in the plan + SKILL.md charter; the adopted vision at `docs/VISION.md`.
 
 ## 15. Conceptual walkthroughs
 
@@ -294,11 +321,11 @@ Estimated new implementation: **~1,850 LOC** toolkit (vs 8,406 + the 2,540-LOC o
 4. **Developer drifts materially.** Diff shows a refactor of an unauthorized module. Floor fails (`changed files ⊄ surface`) before any judgement: PM steers a restore ("revert files X,Y; keep authorized work"), attempt 2 restores, floor passes, assessment proceeds. Had it not restored within budget: stop, human sees exactly what the floor saw.
 5. **Minor deviation accepted by judgement.** Contract says "add validation to `load_config`"; Developer also added a two-line type hint to its caller *inside the authorized file list*. Old system: reviewer-model lottery, possible repair round. Lite: PM notes "in-surface, behaviour-neutral, aids the acceptance criterion — accepted" in the assessment. One line instead of one round.
 6. **Failed validation.** `validation.md` shows a failing test the result glosses over. Assessment gate: PM steers with the actual failure text (attempt 2). Fixed → re-assess from scratch (floor re-run, diff re-read). Not fixed within budget → stop with the failure in the assessment.
-7. **Repeated failed attempts.** Same test fails after a steer and a fresh relaunch (attempts exhausted). PM stops; assessment records the three attempts, PM's judgement that the contract's acceptance criterion conflicts with an existing behaviour, and the recommendation to re-plan. No signature streak needed to reach "three strikes" — the budget is the breaker.
+7. **Repeated failed attempts.** Same test fails after a steer (intervention 1), a fresh relaunch (2), and one more steer (3) — the budget is exhausted. PM stops; assessment records the interventions, PM's judgement that the contract's acceptance criterion conflicts with an existing behaviour, and the recommendation to re-plan. No signature streak needed to reach "three strikes" — the budget is the breaker.
 8. **Stalled/interrupted harness.** Pane byte-identical across two observations, process near-idle. PM nudges (event logged; costs an attempt only if it escalates to steer/relaunch — a pure nudge is an observation-level action). Harness later killed by a usage limit with a clear 5-hour reset: PM waits (its own scheduling; no `pause-until` statute), re-observes, sends the continuation. Weekly-cap wording instead → hard-stop floor refuses continuation; PM stops for the human.
 9. **Consequential change requiring human approval.** Slice 4 is `Approval needed: yes`. `start-slice` refuses; PM reports why and waits. Human runs `approve --slice "Slice 4" --reason …`; slice proceeds as elevated (independent review mandatory).
 10. **Independent review unnecessary.** Standard slice, clean 40-line diff, validation rerun cheap and green, PM finds nothing suspicious: assessment says "review: PM assessment only (standard risk)". That sentence is the honest replacement for today's `developer-self-audit` provenance machinery.
-11. **Independent review required.** Slice flagged `Independent audit required: yes`. After the Developer commits, PM runs `review --skill drift-audit --tool copilot`, then `review --skill code-review`, both against the final diff. The code-review report lists a P1; PM steers the fix, re-runs the floor and a fresh code-review, accepts. The reviewer never talked to the Developer; there is no verdict string to shape.
+11. **Independent review required.** Slice flagged `Independent audit required: yes`. After the Developer commits, PM runs `review --skill drift-audit --tool copilot`, then `review --skill code-review`, both pinned to the committed HEAD. The code-review report lists a P1; PM steers the fix — which changes the tree, so **both** recorded reviews are mechanically stale for acceptance. PM re-runs the floor and re-commissions both reviews against the new final HEAD, then accepts. The freshness rule (§5) makes the Test 13 stale-audit shape impossible by construction, and the reviewer never talked to the Developer, so there is no verdict string to shape.
 12. **PM discretion where the old system was mechanical.** Developer's result.json is missing `summary` (Test 16's class of paperwork failure). Old: `result-malformed`, repair round, possible ledger-retention cascade. Lite: PM notes the imperfection, takes the summary from the pane, accepts on the evidence. Zero rounds.
 13. **Deliberately less protection.** A subtly wrong-but-plausible in-surface change passes validation, PM review, and (standard slice) no independent reviewer sees it. The old system would not have caught it either (its review gate checked a verdict string produced by a model that also missed it) — but the old system *claimed* more. Lite's report says what was and wasn't checked; the residual risk is one revertable commit. This is the honest cost of the trade, stated.
 14. **Low-cost subagent for bounded work.** Docs-only slices run on the cheapest configured harness model; standard-slice reviews use a mid-tier reviewer model. PM records model choices per slice. Nothing in the floor or state cares which model ran — only the assessment's confidence language does.
@@ -306,9 +333,13 @@ Estimated new implementation: **~1,850 LOC** toolkit (vs 8,406 + the 2,540-LOC o
 
 ## 16. Where this design consciously touches its own limits
 
-Surfaced per the brief, not hidden:
+Surfaced per the brief, not hidden. (Items 5–8 were added after the independent Codex design review of the first committed revision; see the review record in the implementation blueprint.)
 
 1. **The unattended-batch capability is not reproduced.** The current fail-closed no-model path (`run --scope remaining`) has no Lite equivalent; Lite always has a PM agent in the loop. The one persona use it served (fully-local, no supervising model, accept first-ambiguity stops) loses a capability. Judgement: its deterministic-acceptance machinery is exactly the mass being removed; rebuilding it would rebuild the old system. Mitigation: a local model can hold the PM seat. **Owner decision (2026-07-18): the loss is accepted — the unattended batch mode is dropped entirely, with no minimal scripted substitute.** Lite always has a PM agent in the loop.
 2. **PM-seat quality is now load-bearing** — stated in the vision, the SKILL.md charter, and walkthrough 15, rather than mitigated by machinery.
 3. **Dependency/license/side-effect stops remain heuristic** (markers + prompts + plan-level exclusion), as today — Lite inherits the current honesty rather than solving the unsolved.
 4. **`attested` slices remain narration** (operator-attested prior work at `init --attest`), as today's `assumed-complete` — kept because re-verifying another run's work is out of scope, and the entry says what it is.
+5. **Role authority is capability-raised, not OS-enforced.** The run token and HMAC (§8) make Developer self-acceptance and state forgery a deliberate, detectable act rather than a shortcut; a same-user process that hunts for the token in the controller's environment or subverts the PM agent itself defeats them. That residual is squarely outside the declared threat model and is stated in the vision's guarantees section.
+6. **The floor covers Git-visible final state only.** Ignored files, Git metadata/hooks, and write-then-revert effects inside the slice's lifetime escape it (§3.3); they are controlled heuristically (markers, prompts, plan-level exclusion), exactly as today, and appear in the assurance-loss register rather than in the mechanical-guarantee list.
+7. **Multi-hour autonomous recovery depends on the PM harness.** The toolkit persists `wake_at` and refuses hard-stop continuation, but it has no scheduler; a PM agent that cannot wait five hours hands the resume to a human. Declared, not solved.
+8. **PM-curated notes are a trusted input.** `notes.md` is controller-owned (§8), which removes Developer tampering, but a PM that curates badly poisons its own later prompts — another face of the PM-seat dependency (item 2).

@@ -23,16 +23,16 @@ Why delete-first: it makes whittling-down structurally impossible (there is noth
 Each stage lists: files, its acceptance criteria (AC), and what may not exist yet. Stages are small enough to implement and review independently; later stages never require reworking earlier ones (interfaces come from the design, not discovery).
 
 **Stage 1 — State & plan foundations.** `pm_lib/state.py`, `pm_lib/plan.py`, `pm_lib/git_ops.py`, `pm.py`, `pm_lib/cli.py` (parse-only), tests.
-AC: `lite-1` state round-trips atomically with events; plan parser passes the retained behaviour suite (headings, sections, surface path rules, segment-aware matching incl. the full edge-case list from ledger §9.2, approval-flag exactness, digest, duplicate ids, lint warnings); `check-plan` runs standalone; state lives under `<git-common-dir>/pm/`; no worktree mirror exists.
+AC: `lite-1` state round-trips atomically with events under advisory locking; the run capability token is minted at init, hash-stored, and every state write is HMAC-verified (a hand-edited run.json fails closed as an integrity stop); state lives under the worktree-specific `<git-dir>/pm/` with a `current` pointer and `--run` selection (linked worktrees get distinct state); plan parser passes the retained behaviour suite (headings, sections, surface path rules, segment-aware matching incl. the full edge-case list from ledger §9.2, approval-flag exactness, digest, duplicate ids, lint warnings) **plus mechanical `plan_risk` derivation** (approval `yes` / independent-audit `yes` / risky-surfaces ≠ `none` ⇒ elevated, immutable); `check-plan` runs standalone.
 
 **Stage 2 — Sessions & floor.** `pm_lib/sessions.py`, `pm_lib/profiles.py`, `pm_lib/floor.py`, tests (tmux + fake harness; recorded marker fixtures per ledger §9.1).
-AC: fresh-session launch/readiness/inject/capture/liveness/stop for all four profiles; hard-prompt refusal on send; OpenCode model-identity check fails closed on mismatch; `floor.py` exposes one function returning the six floor facts (digest, slice identity, surface, commit/ancestry, cleanliness, result presence) with evidence paths — and *no* accept/reject decision.
+AC: fresh-session launch/readiness/inject/capture/liveness/stop for all four profiles; hard-prompt refusal on send; OpenCode model-identity check fails closed on mismatch; `floor.py` exposes one function returning **all eight floor facts of target-design §3.3** — plan digest, repo/worktree + current-branch identity, approval eligibility, result presence + slice identity, surface containment, commit/ancestry/branch-head, cleanliness, and a fresh hard-stop pane scan — with evidence paths and *no* accept/reject decision. A branch-switch scenario (commit on a different branch descending from `before_head`) must fail fact #2/#6; a visible credential prompt alongside a valid commit must fail fact #8.
 
-**Stage 3 — Slice lifecycle.** `pm_lib/slice_ops.py`, `pm_lib/prompts.py`, wire `init/status/approve/start-slice/observe/send/finalize/stop`.
-AC: full fake-harness end-to-end — init → start-slice → observe → finalize(`--accept`) → status shows an accepted slice with commit; `finalize` refuses `--accept` when any floor fact fails; attempt budget persists and blocks a fourth intervention; `stop` captures pane + writes terminal state; a dead session is detected and reported, not driven; a plan edited mid-run stops before the next slice.
+**Stage 3 — Slice lifecycle (evidence, not acceptance).** `pm_lib/slice_ops.py`, `pm_lib/prompts.py`, wire `init/status/approve/start-slice/observe/send/stop` and `finalize`'s floor-and-collect mode only.
+AC: fake-harness flow — init → start-slice → observe → `finalize` reports all eight floor facts + evidence paths and **refuses `--accept` outright at this stage** (no acceptance exists before assessments do); mutating commands refuse without the token; attempt accounting (initial launch = 0; each steer/relaunch increments; budget blocks beyond `max_attempts`) persists across process restarts; each launch rotates prior completion signals into `attempt-<n>/`; `stop` captures pane + writes terminal state, and `stop --scavenge` finds run-prefixed sessions with state deleted; a dead session is detected and reported, not driven; a plan edited mid-run stops before the next slice.
 
-**Stage 4 — Review & reporting.** `pm_lib/review.py`, `notes.md` handling, `run-report.md`/`assessment.md` scaffolding.
-AC: `review --skill drift-audit` composes from the profile table, embeds the skill's SKILL.md, runs read-only against the final diff, captures `review-*.md`; notes file is injected into the next slice's prompt and tripwires at the cap; report regenerates from state alone.
+**Stage 4 — Assessment, review & reporting (first acceptance lands here).** `pm_lib/review.py`, `notes.md` handling, `assessment.md`/`run-report.md`, `finalize --accept/--steer/--stop`.
+AC: `review --skill drift-audit` composes from the profile table, embeds the **complete transitive skill bundle** (test with `code-review`, asserting `review-matrix.md` content is present), pins its input to the `before_head..HEAD` diff, records reviewed-HEAD + artifact sha256 in state, and reaps its process on `stop`; a tree change after a mandatory review makes `finalize --accept` refuse until re-reviewed (freshness rule); `finalize --accept "reasoning"` requires an assessment and a passing floor, writes controller-owned `assessment.md`, and appends the slice's decision record; full end-to-end acceptance now passes; elevated slices refuse acceptance without both fresh reviews; notes file is controller-owned, mirrored, injected into the next slice's prompt, and tripwires at the cap; report regenerates from controller-owned data alone with `.pm/` deleted.
 
 **Stage 5 — Documentation & operator trial.** New `SKILL.md`, `README.md`, three references; the rewritten "Verify Your Setup" trial (fake-harness scripts updated to the 4-field `result.json`).
 AC: SKILL.md ≤ ~130 lines; the trial runs green from a clean checkout; a reader who has never seen old Mode B can run a toy plan from these docs alone (test this literally with a fresh session).
@@ -58,7 +58,7 @@ AC: §7's bar met, or the stop-and-revise rule (§8) triggers.
 The minimum protected behaviours, each one test scenario or a small family: the fifteen walkthroughs in design §15 (each becomes at least one scripted scenario with a fake harness where feasible — the drift/restore, budget-exhaustion, approval-gate, mid-run-plan-edit, hard-prompt-refusal, dead-session, stall-nudge, and elevated-review flows are all mechanisable); the plan-parser suite; the floor suite (~15 boundary cases: surface globs, ancestry, dirty tree, digest, wrong slice, missing result); state round-trip/recovery; marker fixtures per harness.
 
 ### 5.2 Structure
-Retain the proven patterns (ledger §9.3): pure-Python by default, `@skipUnless(tmux)` for session tests, fake harnesses via `--harness-command`, recorded pane fixtures, no real coding CLIs in CI. Target ~120 tests / ~2,500 LOC. Boundary-focused; no permutation mills.
+Retain the proven patterns (ledger §9.3): pure-Python by default, `@skipUnless(tmux)` for session tests, fake harnesses via `--harness-command`, recorded pane fixtures, no real coding CLIs in CI. Target ~140–170 tests / ~2,800–3,400 LOC (non-binding; coverage of the protected behaviours wins over the count). Boundary-focused; no permutation mills.
 
 ### 5.3 CI
 Same workflow shape as today: py_compile + unittest with tmux installed; orchestrator's (reduced) suite unchanged. Add the §6 no-baggage grep as a CI step.
@@ -95,7 +95,7 @@ Measured = from the current tree (subagent-verified). Projected = design targets
 
 | Measure | Current (measured) | Lite (projected) | Δ |
 |---|---|---|---|
-| PM implementation LOC | 8,406 | ~1,850 ◊ | −78% |
+| PM implementation LOC | 8,406 | ~2,200–2,600 ◊ (non-binding; re-estimate after the Stage 1–2 spike) | ≈ −70% |
 | Orchestrator LOC consumed by PM | 2,540 | 0 (standalone skill remains for its own users) | −100% (as PM dependency) |
 | PM modules | 20 files | 11 files | −45% |
 | CLI commands | 19 | 10 | −47% |
@@ -110,7 +110,7 @@ Measured = from the current tree (subagent-verified). Projected = design targets
 | Retry/recovery mechanisms | 7 (repair loop, breaker, dual budgets, idle statute, transient reclassifier, pause machinery, reconcile) | 2 (attempt budget, PM judgement) | −71% |
 | Persistent artifact types per slice | ~35 | ~10 | −71% |
 | Role seats | 4 (supervising model, PM tools, Developer, Reviewer) | 3 | −25% |
-| Tests | 336 (8,889 LOC) | ~120 (~2,500 LOC) ◊ | −64% / −72% |
+| Tests | 336 (8,889 LOC) | ~140–170 (~2,800–3,400 LOC) ◊ (non-binding; behaviour coverage wins over the number) | ≈ −55% / −65% |
 | PM documentation lines | 1,647 | ~450 | −73% |
 | Developer prompt (rendered, before slice content) | ~160 lines incl. embedded contract | ~55 ◊ | −65% |
 | Developer result format | 13 fields, 2 sub-schemas, 2 ledger vocabularies | 4 fields | −70% |
@@ -120,7 +120,7 @@ Measured = from the current tree (subagent-verified). Projected = design targets
 | Harness-specific branches | 4 profiles (+1 reviewer-only) | 4 profiles | ≈ 0% (genuine external variance) |
 | Operational steps, normal slice, operator-visible | launcher + ~9-step supervised loop | launcher + 4-step loop (start/observe/finalize/next) | ≈ −55% |
 
-**Honest read of the forcing function:** the 40–60% target is exceeded on most axes (code −78%, requirements/docs −73%). That is not virtue by itself — the brief warns against optimising the number. The reduction is a *consequence* of two structural moves (PM-commissioned review; judgement over verdict-relay), not of trimming to a quota; the axes that stay flat (plan format, harness profiles, mandatory floor) stay flat because their value survived scrutiny. The ◊-marked numbers are the ones implementation could move ±30%.
+**Honest read of the forcing function:** the 40–60% target is exceeded on most axes (code ≈ −70%, requirements/docs ≈ −70%). That is not virtue by itself — the brief warns against optimising the number. The reduction is a *consequence* of two structural moves (PM-commissioned review; judgement over verdict-relay), not of trimming to a quota; the axes that stay flat (plan format, harness profiles, mandatory floor) stay flat because their value survived scrutiny. The ◊-marked numbers are the ones implementation could move ±30%.
 
 ### Qualitative measures
 
@@ -161,6 +161,34 @@ Weights: how much the capability matters to the proposed vision's users (H/M/L).
 
 **Practical-value retention estimate:** weighting the H-rows, Lite retains or improves every high-weight capability except deterministic reproducibility (deliberately relinquished, low weight under the proposed vision) — an honest estimate is **~85–90% of current practical value retained, with several high-weight capabilities improved**, exceeding the 80% objective *conditional on Run A confirming the completion-rate projection*. If PM-judgement quality in live runs disappoints, the true figure falls; that is exactly what §7 measures before adoption.
 
-## 11. Vision replacement timing
+## 11. Independent design-review record
+
+The committed first revision of these reports (`3cc9f8a`) was independently reviewed by a delegated read-only Reviewer — **Codex CLI, model `gpt-5.6-sol`, high reasoning effort** — through the orchestrator's validated contract (label `01-codex-mode-b-lite-design-review-r1`, artifacts under `.orchestrator/runs/reviewers-20260718-095510-89424/`). Verdict: `RESULT: revise`, with 6 P1, 10 P2, and 1 P3 findings. All 17 were assessed by the Developer (this design's author); 13 were adopted as recommended and 4 adopted in adapted form (the authority/tamper findings resolved with the run-token + HMAC + controller-owned-originals design inside the declared threat model rather than OS-level capability separation, and pause scheduling resolved as a declared harness dependency rather than a scheduler subsystem). No finding was rejected. The material changes: the eight-fact floor enumeration (incl. branch identity and finalize-time hard-stop scan), the review-freshness invalidation rule, the authority/tamper model, mechanical `plan_risk` derivation, run discovery/locking, attempt isolation and budget semantics, stage reordering (acceptance moved after assessment exists), transitive skill-bundle embedding, loosened non-binding projections, three evidence-citation corrections in the vision assessment, and the rewritten three-part assurance-loss register (ledger §10).
+
+## 12. Vision replacement timing
 
 `docs/VISION.md` is replaced in Stage 6, in the same change-set as the cutover, after (a) the owner approves the proposed vision (possibly amended by anything learned in Stages 1–5) and (b) Stage 7's plan is ready to run. Never earlier (the repo would describe a system it doesn't contain) and never later (the repo would run a system its vision disclaims). The CHANGELOG entry names the swap explicitly.
+
+## 13. Implementation kickoff (copy into the fresh implementation session)
+
+Implementation happens in a fresh session that has never seen the design discussion. Paste the following, verbatim, as that session's opening prompt:
+
+```md
+Repo: /Users/dcroton/Documents/AI/repos/ai-agent-coder
+Branch: create feature/mode-b-lite-impl from experiment/mode-b-lite.
+
+You are implementing Mode B Lite — an approved, decision-complete greenfield replacement of this repository's Mode B (Project Manager) system. The complete, binding specification is the six reports in docs/mode-b-lite/, in this order of authority: proposed-vision.md → target-design.md → replacement-ledger.md → implementation-blueprint.md (current-state-map.md and vision-assessment.md are context/evidence). Read all six completely before writing anything. The design has already been through an independent Codex review and revised (implementation-blueprint.md §11) — do not re-litigate it.
+
+Non-negotiable rules from the approved design:
+1. Follow implementation-blueprint.md §2 exactly: your FIRST commit deletes all of skills/project-manager/, skills/orchestrator/references/pm-slice-contract.md, and the PM-facing orchestrator machinery listed in replacement-ledger.md §5. Build the new system from scratch into the emptied skills/project-manager/. Never copy, adapt, subclass, or wrap old code; the only sanctioned carry-overs are the five items in replacement-ledger.md §9.
+2. Build in the stage order of implementation-blueprint.md §3, meeting each stage's acceptance criteria before moving on. Write each stage's behavioural acceptance tests first (§5.1). Note the ordering rule: no acceptance path exists until Stage 4.
+3. Any deviation you need that touches roles, gates, the floor, state shape, commands, artifacts, the risk model, or PM authority is a design change: STOP, amend the docs/mode-b-lite/ reports in a dedicated commit explaining the gap, then resume (§8). Do not quietly add machinery, enums, schemas, or state.
+4. Run the no-baggage checks (§6) at cutover; the terminology grep list is replacement-ledger.md §8. docs/VISION.md is replaced by docs/mode-b-lite/proposed-vision.md only in the cutover change-set (§12), not before.
+5. Ask the owner before any commit, and before Stage 6 (cutover) and Stage 7 (live validation runs, which cost real model usage).
+
+Decisions already made — do not reopen them: the unattended no-model batch mode is dropped; deterministic semantic acceptance is replaced by the eight-fact mechanical floor plus recorded PM judgement; PM commissions independent reviews itself, pinned to commit ranges, with freshness invalidation on tree change; authority is capability-token-raised with HMAC-authenticated single-copy state outside the worktree; the value-retention bar and its validation plan are implementation-blueprint.md §7 and §10.
+
+Confirm before starting: the six reports read, the branch created, the Stage 1 file list, and your understanding of what the first commit deletes.
+```
+
+The reports are self-contained by construction: the implementing session needs no context from the design sessions, and if implementation reveals a genuine gap, the reports get amended first (§8), keeping them authoritative for any later session as well.

@@ -331,3 +331,88 @@ def set_current(repo: Path, run_id: str) -> None:
     root.mkdir(parents=True, exist_ok=True)
     pointer = root / "current"
     _atomic_write_bytes(pointer, run_id.encode("utf-8"))
+
+
+def render_run_report(state: dict[str, Any], events: list[dict[str, Any]], run_dir: Path) -> str:
+    """Render `run-report.md` from controller-owned data alone.
+
+    Reads only `state`, `events`, and each accepted/stopped slice's
+    `assessment.md` text from its ORIGINAL path under `run_dir` — never
+    from the `.pm/` mirror. This is what makes the report regenerate
+    correctly with `.pm/` deleted entirely (target-design §9): the caller
+    (`slice_ops.regenerate_report`) writes this text to the original and
+    mirrors it, but nothing in this function itself touches `.pm/`.
+    """
+    lines: list[str] = []
+    run_id = state.get("run_id")
+    plan_info = state.get("plan") or {}
+    harness_info = state.get("harness") or {}
+    plan_sha = (plan_info.get("sha256") or "")[:12]
+
+    lines.append(f"# PM Run Report: {run_id}")
+    lines.append("")
+    lines.append(f"- Repo: {state.get('repo')}")
+    lines.append(f"- Branch: {state.get('branch')}")
+    lines.append(f"- Plan: {plan_info.get('path')} (sha256 {plan_sha}…)")
+    lines.append(
+        f"- Harness: {harness_info.get('name')} model={harness_info.get('model')} "
+        f"effort={harness_info.get('effort')}"
+    )
+    lines.append(f"- Status: {state.get('status')}")
+    lines.append(f"- Stop reason: {state.get('stop_reason')}")
+    lines.append("")
+
+    lines.append("## Slices")
+    lines.append("")
+    lines.append("| id | title | risk | status | attempts | commit | decision |")
+    lines.append("|---|---|---|---|---|---|---|")
+    slices = state.get("slices") or []
+    for entry in slices:
+        risk = entry.get("risk")
+        plan_risk = entry.get("plan_risk")
+        risk_display = risk if risk == plan_risk or not plan_risk else f"{risk} (plan: {plan_risk})"
+        commit = entry.get("commit")
+        commit_short = commit[:10] if commit else "-"
+        lines.append(
+            f"| {entry.get('id')} | {entry.get('title')} | {risk_display} | "
+            f"{entry.get('status') or 'pending'} | {entry.get('attempts', 0)} | {commit_short} | "
+            f"{entry.get('decision') or ''} |"
+        )
+    lines.append("")
+
+    lines.append("## Assessments")
+    any_assessment = False
+    for entry in slices:
+        assessment_path = entry.get("assessment")
+        if not assessment_path:
+            continue
+        any_assessment = True
+        lines.append("")
+        lines.append(f"### {entry.get('id')}: {entry.get('title')}")
+        lines.append("")
+        try:
+            lines.append(Path(assessment_path).read_text(encoding="utf-8").rstrip())
+        except OSError as exc:
+            lines.append(f"(assessment could not be read: {exc})")
+    if not any_assessment:
+        lines.append("")
+        lines.append("(no slice has been accepted or stopped yet)")
+    lines.append("")
+
+    lines.append("## Approvals")
+    approvals = state.get("approvals") or {}
+    if approvals:
+        for slice_id, record in approvals.items():
+            lines.append(f"- {slice_id}: {record.get('reason')} (at {record.get('at')})")
+    else:
+        lines.append("(none)")
+    lines.append("")
+
+    lines.append("## Evidence")
+    mirror_dir = Path(str(state.get("repo") or "")) / ".pm" / "runs" / str(run_id)
+    lines.append(f"- State dir: {run_dir}")
+    lines.append(f"- Mirror dir: {mirror_dir}")
+    lines.append(f"- Events recorded: {len(events)}")
+    lines.append("")
+
+    return "\n".join(lines)

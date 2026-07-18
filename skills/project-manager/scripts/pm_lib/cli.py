@@ -1,13 +1,12 @@
 """Command-line parsing and dispatch (target-design §12).
 
-Stage 3 wires `init`, `status`, `approve`, `start-slice`, `observe`, `send`,
-`stop`, and `finalize`'s floor-and-collect mode. `finalize --accept/--steer/
---stop`, `status --report`, and `review` stay refused with a clear
-not-yet-available message — acceptance and independent review land in
-Stage 4. This module stays thin: argument parsing, resolving the repo/run/
-token, dispatching into `slice_ops`, and formatting output. The actual
-mechanics (state mutation, session control, git facts) live in the modules
-that own them; nothing here decides anything semantic.
+All ten commands are wired: `init`, `status` (incl. `--report`), `approve`,
+`start-slice`, `observe`, `send`, `finalize` (bare, and its
+`--accept`/`--steer`/`--stop` decision paths), `review`, and `stop`. This
+module stays thin: argument parsing, resolving the repo/run/token,
+dispatching into `slice_ops`/`review`, and formatting output. The actual
+mechanics (state mutation, session control, git facts, review commissioning)
+live in the modules that own them; nothing here decides anything semantic.
 """
 
 from __future__ import annotations
@@ -20,16 +19,13 @@ from pathlib import Path
 from . import IntegrityError, PmError
 from . import git_ops
 from . import plan as plan_mod
+from . import review as review_mod
 from . import slice_ops
 from . import state as state_mod
 
 # Mutating commands accept --token, falling back to PM_RUN_TOKEN in the
 # controller's environment — never the Developer's.
 _TOKEN_ENV_VAR = "PM_RUN_TOKEN"
-
-# Commands (or command modes) not yet implemented. Each exits 2 with a
-# clear message; acceptance and independent review land in Stage 4.
-_NOT_YET_AVAILABLE = ("review",)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -71,6 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     start_slice.add_argument("--effort")
     start_slice.add_argument("--reviewer-tools")
     start_slice.add_argument("--harness-command")
+    start_slice.add_argument("--risk", help='only "elevated" is accepted; risk can never be lowered')
     start_slice.add_argument("--run")
     start_slice.add_argument("--token")
 
@@ -86,9 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     finalize = subparsers.add_parser("finalize", help="Run the floor and collect assessment evidence")
     finalize_group = finalize.add_mutually_exclusive_group()
-    finalize_group.add_argument("--accept")
-    finalize_group.add_argument("--steer")
-    finalize_group.add_argument("--stop")
+    finalize_group.add_argument("--accept", help="accept the slice; reasoning must be >= 40 characters")
+    finalize_group.add_argument("--steer", help="send a written correction into the live session")
+    finalize_group.add_argument("--stop", help="stop the slice, recording the reason")
+    finalize.add_argument("--risk", help='only "elevated" is accepted; risk can never be lowered')
     finalize.add_argument("--run")
     finalize.add_argument("--token")
 
@@ -98,6 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--tool")
     review.add_argument("--model")
     review.add_argument("--effort")
+    review.add_argument("--reviewer-command", help="override the whole reviewer command (tests/unsupported tools)")
     review.add_argument("--run")
     review.add_argument("--token")
 
@@ -194,11 +193,17 @@ def _run_init(args: argparse.Namespace) -> int:
 
 
 def _run_status(args: argparse.Namespace) -> int:
-    if args.report:
-        raise PmError("status --report is not available yet (implemented in a later stage)")
-
     repo = _repo_from_cwd()
     run_dir = state_mod.resolve_run_dir(repo, args.run)
+
+    if args.report:
+        state = state_mod.load_state(run_dir)
+        report_path = slice_ops.regenerate_report(repo, run_dir, state)
+        print(f"run report regenerated: {report_path}")
+        mirror_path = slice_ops.run_artifact_dir(repo, state["run_id"]) / "run-report.md"
+        print(f"mirror: {mirror_path}")
+        return 0
+
     result = slice_ops.status(repo, run_dir)
     state = result.state
 
@@ -279,6 +284,7 @@ def _run_start_slice(args: argparse.Namespace) -> int:
         effort=args.effort,
         reviewer_tools=args.reviewer_tools,
         harness_command=args.harness_command,
+        risk=args.risk,
     )
 
     if outcome.kind == "all_complete":
@@ -300,6 +306,8 @@ def _run_start_slice(args: argparse.Namespace) -> int:
     print(f"{verb} {outcome.slice_id} (attempt {outcome.attempt}) in tmux session {outcome.session}")
     if outcome.reaped:
         print(f"reaped stale sessions: {', '.join(outcome.reaped)}")
+    if outcome.notes_warning:
+        print(f"WARNING: {outcome.notes_warning}")
     return 0
 
 
@@ -341,28 +349,85 @@ def _run_send(args: argparse.Namespace) -> int:
     return 0
 
 
-# --- finalize (evidence mode only, this stage) ---------------------------------
+# --- finalize (bare, and its --accept/--steer/--stop decision paths) ----------
+
+
+def _print_floor_facts(report) -> None:
+    for fact in report.facts:
+        status = "PASS" if fact.passed else "FAIL"
+        print(f"{fact.number} {fact.name} {status} {fact.detail}")
 
 
 def _run_finalize(args: argparse.Namespace) -> int:
-    if args.accept or args.steer or args.stop:
-        raise PmError("acceptance decisions land in Stage 4; finalize currently reports the floor only")
-
     token = _require_token(args)
     repo = _repo_from_cwd()
     run_dir = state_mod.resolve_run_dir(repo, args.run)
-    outcome = slice_ops.finalize(repo, run_dir, token)
 
+    if args.accept:
+        outcome = slice_ops.finalize_accept(repo, run_dir, token, reasoning=args.accept, risk=args.risk)
+        print(f"slice: {outcome.slice_id}")
+        if outcome.report:
+            _print_floor_facts(outcome.report)
+        if outcome.kind == "accepted":
+            print(f"ACCEPTED {outcome.slice_id}")
+            print(f"assessment: {outcome.assessment_path}")
+            return 0
+        print(f"pm: refused: {outcome.message}", file=sys.stderr)
+        return 1
+
+    if args.steer:
+        outcome = slice_ops.finalize_steer(repo, run_dir, token, correction=args.steer, risk=args.risk)
+        if outcome.kind == "steered":
+            print(f"steered {outcome.slice_id} (attempt {outcome.attempts})")
+            print(f"correction: {outcome.steer_path}")
+            return 0
+        print(f"pm: error: {outcome.message}", file=sys.stderr)
+        return 2
+
+    if args.stop:
+        outcome = slice_ops.finalize_stop(repo, run_dir, token, reason=args.stop, risk=args.risk)
+        print(f"STOPPED {outcome.slice_id}")
+        _print_floor_facts(outcome.report)
+        print(f"assessment: {outcome.assessment_path}")
+        return 0
+
+    outcome = slice_ops.finalize(repo, run_dir, token, risk=args.risk)
     print(f"slice: {outcome.slice_id}")
-    for fact in outcome.report.facts:
-        status = "PASS" if fact.passed else "FAIL"
-        print(f"{fact.number} {fact.name} {status} {fact.detail}")
+    _print_floor_facts(outcome.report)
     print(f"evidence: status-before={outcome.status_before_path}")
     print(f"evidence: status-after={outcome.status_after_path}")
     print(f"evidence: diff={outcome.diff_path}")
     print(f"evidence: pane={outcome.pane_path}")
     print(f"evidence: result={outcome.result_path}")
     return 0 if outcome.report.passed else 1
+
+
+# --- review -----------------------------------------------------------------
+
+
+def _run_review(args: argparse.Namespace) -> int:
+    token = _require_token(args)
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    outcome = review_mod.run_review(
+        repo,
+        run_dir,
+        token,
+        slice_id=args.slice,
+        skill=args.skill,
+        tool=args.tool,
+        model=args.model,
+        effort=args.effort,
+        reviewer_command=args.reviewer_command,
+    )
+    print(f"slice: {outcome.slice_id}")
+    print(f"skill: {outcome.skill}  tool: {outcome.tool}")
+    print(f"reviewed head: {outcome.head}  before_head: {outcome.before_head}")
+    print(f"diff: {outcome.diff_path}")
+    print(f"changed files: {len(outcome.changed_files)}")
+    print(f"report: {outcome.artifact_path}")
+    print(f"sha256: {outcome.sha256}")
+    return 0
 
 
 # --- stop -----------------------------------------------------------------
@@ -402,6 +467,7 @@ _HANDLERS = {
     "observe": _run_observe,
     "send": _run_send,
     "finalize": _run_finalize,
+    "review": _run_review,
     "stop": _run_stop,
 }
 
@@ -414,9 +480,6 @@ def main(argv: list[str] | None = None) -> int:
         handler = _HANDLERS.get(args.command)
         if handler is not None:
             return handler(args)
-        if args.command in _NOT_YET_AVAILABLE:
-            _resolve_token(args)  # plumbing exercised now; unused until wired
-            raise PmError(f"{args.command} is not available yet (implemented in a later stage)")
         parser.error(f"unknown command: {args.command}")
         return 2
     except IntegrityError as exc:

@@ -31,8 +31,8 @@ the retained fake-harness pattern (replacement-ledger §9.1/§9.3). Pins:
    makes an authorized commit and writes `result.json`) → `observe --wait`
    until the result appears → `finalize`: exits 0, prints all eight floor
    facts as PASS plus evidence paths; state is unchanged except
-   `updated_at`; `finalize --accept "…"` is refused with the Stage 4
-   message.
+   `updated_at`. (Stage 4's `finalize --accept/--steer/--stop` decision
+   paths are pinned in `test_finalize.py`, not here.)
 6. `finalize` with a floor failure (the fake harness also touches an
    unauthorized file): exits 1, the surface fact prints FAIL, a `floor`
    event is recorded.
@@ -464,10 +464,6 @@ class TestFullFakeHarnessFlow(SliceOpsTestCase):
         after.pop("updated_at")
         before.pop("updated_at")
         self.assertEqual(after, before)
-
-        code, _out, err = self.run_cli_in_repo(["finalize", "--accept", "looks good", "--token", token])
-        self.assertEqual(code, 2)
-        self.assertIn("Stage 4", err)
 
     def _wait_for_result(self, run_id: str, token: str) -> bool:
         run_dir = state_mod.resolve_run_dir(self.repo, run_id)

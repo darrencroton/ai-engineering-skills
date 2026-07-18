@@ -33,8 +33,7 @@ Pins the single-copy authenticated state model (target-design §8):
 - A slice entry may be created with status "attested" (operator-attested
   prior completion) directly at creation time.
 - `check-plan` exercised end-to-end through the CLI on a good and a bad
-  plan (exit 0 / exit 2); every other Stage 1 command exits 2 with a
-  not-yet-available message.
+  plan (exit 0 / exit 2).
 """
 
 from __future__ import annotations
@@ -327,23 +326,6 @@ class TestCliCheckPlanAndStubs(PmTestCase):
         code, out, _err = self.run_cli(["check-plan", "--plan", str(plan_path)])
         self.assertEqual(code, 2)
         self.assertIn("ERROR", out)
-
-    def test_unwired_commands_exit_two_with_not_yet_available_message(self) -> None:
-        # Stage 3 wires init/status/approve/start-slice/observe/send/stop and
-        # finalize's floor-and-collect mode (see test_slice_ops.py for their
-        # protected behaviours). `review` alone remains a Stage 4 stub here;
-        # `finalize --accept/--steer/--stop` and `status --report` are also
-        # still refused, but with their own Stage-4 messages, pinned in
-        # test_slice_ops.py rather than duplicated here.
-        cases = [
-            ["review", "--slice", "Slice 1", "--skill", "code-review"],
-        ]
-        self.assertEqual(len(cases), 1)
-        for argv in cases:
-            with self.subTest(command=argv[0]):
-                code, _out, err = self.run_cli(argv)
-                self.assertEqual(code, 2)
-                self.assertIn("not available yet", err)
 
 
 if __name__ == "__main__":

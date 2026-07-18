@@ -9,6 +9,9 @@ run-creation helper built on `state.create_run`. Kept deliberately minimal
 from __future__ import annotations
 
 import io
+import os
+import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -23,6 +26,44 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from pm_lib import cli  # noqa: E402
 from pm_lib import plan as plan_mod  # noqa: E402
 from pm_lib import state as state_mod  # noqa: E402
+
+# Stage 3 additions -----------------------------------------------------------
+#
+# Most Stage 3 commands (status/approve/start-slice/observe/send/finalize/
+# stop) resolve their repo from the controller's cwd, not a --repo flag
+# (only init/check-plan take one) — `run_cli_in_repo` runs a CLI call with
+# cwd temporarily set to the test repo. `write_fake_harness` builds a tiny
+# `sh` script standing in for a coding CLI in tmux-gated slice_ops tests
+# (the retained fake-harness pattern, replacement-ledger §9.1/§9.3).
+# `parse_init_output` extracts the run id and one-time-printed token from
+# `init`'s stdout so later commands in the same test can use them.
+
+_RUN_ID_RE = re.compile(r"^run id:\s*(?P<run_id>\S+)", re.MULTILINE)
+_TOKEN_RE = re.compile(r"^PM_RUN_TOKEN=(?P<token>\S+)$", re.MULTILINE)
+
+
+def parse_init_output(stdout: str) -> tuple[str, str]:
+    """Extract (run_id, token) from `init`'s stdout. Fails loudly if either
+    is absent — a silent None would surface as a confusing failure much
+    later in whatever test called this."""
+    run_id_match = _RUN_ID_RE.search(stdout)
+    token_match = _TOKEN_RE.search(stdout)
+    if not run_id_match or not token_match:
+        raise AssertionError(f"could not parse run id/token from init output:\n{stdout}")
+    return run_id_match.group("run_id"), token_match.group("token")
+
+
+def write_fake_harness(path: Path, body: str) -> Path:
+    """Write an executable `sh` script fake harness at `path`.
+
+    `body` is arbitrary shell; the caller composes it per scenario (reading
+    $PM_RESULT_PATH / $PM_SLICE_ID / $PM_SLICE_ARTIFACT_DIR, sleeping,
+    optionally committing, writing result.json). No real coding CLI is
+    ever invoked in this suite.
+    """
+    path.write_text(f"#!/bin/sh\n{body}\n", encoding="utf-8")
+    path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return path
 
 
 def render_slice(
@@ -126,6 +167,18 @@ class PmTestCase(unittest.TestCase):
         except SystemExit as exc:
             code = 0 if exc.code is None else (exc.code if isinstance(exc.code, int) else 1)
         return code, out.getvalue(), err.getvalue()
+
+    def run_cli_in_repo(self, argv: list[str]) -> tuple[int, str, str]:
+        """Like `run_cli`, but with cwd set to `self.repo` for the call's
+        duration. Stage 3's non-init commands resolve their repo from the
+        controller's cwd (`git_ops.resolve_repo(Path.cwd())`), matching an
+        operator running `pm` from inside the working tree."""
+        previous = os.getcwd()
+        os.chdir(self.repo)
+        try:
+            return self.run_cli(argv)
+        finally:
+            os.chdir(previous)
 
     def make_run(
         self,

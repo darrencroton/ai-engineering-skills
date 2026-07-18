@@ -329,18 +329,16 @@ class TestCliCheckPlanAndStubs(PmTestCase):
         self.assertIn("ERROR", out)
 
     def test_unwired_commands_exit_two_with_not_yet_available_message(self) -> None:
+        # Stage 3 wires init/status/approve/start-slice/observe/send/stop and
+        # finalize's floor-and-collect mode (see test_slice_ops.py for their
+        # protected behaviours). `review` alone remains a Stage 4 stub here;
+        # `finalize --accept/--steer/--stop` and `status --report` are also
+        # still refused, but with their own Stage-4 messages, pinned in
+        # test_slice_ops.py rather than duplicated here.
         cases = [
-            ["init", "--repo", str(self.repo), "--plan", "plan.md", "--harness", "codex"],
-            ["status"],
-            ["approve", "--slice", "Slice 1", "--reason", "ok"],
-            ["start-slice"],
-            ["observe"],
-            ["send", "--text", "hi", "--reason", "steer"],
-            ["finalize"],
             ["review", "--slice", "Slice 1", "--skill", "code-review"],
-            ["stop", "--reason", "done"],
         ]
-        self.assertEqual(len(cases), 9)
+        self.assertEqual(len(cases), 1)
         for argv in cases:
             with self.subTest(command=argv[0]):
                 code, _out, err = self.run_cli(argv)

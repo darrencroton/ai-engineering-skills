@@ -1,8 +1,13 @@
 """Command-line parsing and dispatch (target-design §12).
 
-Stage 1 implements `check-plan` only. Every other command is wired into the
-parser now (so flag shapes are frozen) but exits 2 with a not-yet-available
-message when invoked — later stages replace those stubs one at a time.
+Stage 3 wires `init`, `status`, `approve`, `start-slice`, `observe`, `send`,
+`stop`, and `finalize`'s floor-and-collect mode. `finalize --accept/--steer/
+--stop`, `status --report`, and `review` stay refused with a clear
+not-yet-available message — acceptance and independent review land in
+Stage 4. This module stays thin: argument parsing, resolving the repo/run/
+token, dispatching into `slice_ops`, and formatting output. The actual
+mechanics (state mutation, session control, git facts) live in the modules
+that own them; nothing here decides anything semantic.
 """
 
 from __future__ import annotations
@@ -12,26 +17,19 @@ import os
 import sys
 from pathlib import Path
 
-from . import PmError
+from . import IntegrityError, PmError
+from . import git_ops
 from . import plan as plan_mod
+from . import slice_ops
+from . import state as state_mod
 
 # Mutating commands accept --token, falling back to PM_RUN_TOKEN in the
-# controller's environment. The plumbing is defined now; nothing reads it
-# until the commands it guards are implemented.
+# controller's environment — never the Developer's.
 _TOKEN_ENV_VAR = "PM_RUN_TOKEN"
 
-# Commands not yet implemented, in Stage 1. Each exits 2 with a clear message.
-_NOT_YET_AVAILABLE = (
-    "init",
-    "status",
-    "approve",
-    "start-slice",
-    "observe",
-    "send",
-    "finalize",
-    "review",
-    "stop",
-)
+# Commands (or command modes) not yet implemented. Each exits 2 with a
+# clear message; acceptance and independent review land in Stage 4.
+_NOT_YET_AVAILABLE = ("review",)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -120,6 +118,17 @@ def _resolve_token(args: argparse.Namespace) -> str | None:
     return os.environ.get(_TOKEN_ENV_VAR)
 
 
+def _require_token(args: argparse.Namespace) -> str:
+    token = _resolve_token(args)
+    if not token:
+        raise PmError("run capability token required (pass --token or set PM_RUN_TOKEN)")
+    return token
+
+
+def _repo_from_cwd() -> Path:
+    return slice_ops.repo_from_cwd(Path.cwd())
+
+
 def _run_check_plan(args: argparse.Namespace) -> int:
     plan_path = Path(args.plan)
     repo_path = Path(args.repo) if args.repo else None
@@ -133,17 +142,285 @@ def _run_check_plan(args: argparse.Namespace) -> int:
     return 0 if not report["errors"] else 2
 
 
+# --- init ----------------------------------------------------------------
+
+
+def _run_init(args: argparse.Namespace) -> int:
+    repo = git_ops.resolve_repo(Path(args.repo))
+    plan_path = git_ops.resolve_plan(Path(args.plan))
+
+    report = plan_mod.plan_check_report(plan_path, repo=repo)
+    for error in report["errors"]:
+        print(f"ERROR: {error}")
+    for warning in report["warnings"]:
+        print(f"WARNING: {warning}")
+    if report["errors"]:
+        return 2
+
+    result = slice_ops.init_run(
+        repo,
+        plan_path,
+        harness=args.harness,
+        model=args.model,
+        effort=args.effort,
+        branch=args.branch,
+        create_branch=args.create_branch,
+        attest=args.attest,
+        max_attempts=args.max_attempts,
+        reviewer_tools=args.reviewer_tools,
+        reviewer_model=args.reviewer_model,
+        reviewer_effort=args.reviewer_effort,
+        harness_command=args.harness_command,
+    )
+
+    print(f"run id: {result.run_id}")
+    print(f"state dir: {result.run_dir}")
+    print(f"branch: {result.branch}")
+    print("slices:")
+    for entry, plan_slice in zip(result.state["slices"], result.slices):
+        print(
+            f"  {entry['id']:<10} {plan_slice.title:<40} risk={entry['risk']:<9} "
+            f"status={entry['status'] or 'pending'}"
+        )
+    print(f"PM_RUN_TOKEN={result.token}")
+    print(
+        "Keep this token out of Developer sessions — it authorizes PM state writes; "
+        "the operator or PM agent should hold it, never the harness being supervised."
+    )
+    return 0
+
+
+# --- status ----------------------------------------------------------------
+
+
+def _run_status(args: argparse.Namespace) -> int:
+    if args.report:
+        raise PmError("status --report is not available yet (implemented in a later stage)")
+
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    result = slice_ops.status(repo, run_dir)
+    state = result.state
+
+    print(f"run id: {state['run_id']}  status: {state['status']}")
+    print(f"branch: {state['branch']}")
+    plan_info = state.get("plan") or {}
+    print(f"plan: {plan_info.get('path')}  sha256: {(plan_info.get('sha256') or '')[:12]}…")
+    print(f"stop reason: {state.get('stop_reason')}")
+
+    print("slices:")
+    for entry in state.get("slices", []):
+        commit = entry.get("commit")
+        commit_short = commit[:10] if commit else "-"
+        print(
+            f"  {entry['id']:<10} status={entry.get('status') or 'pending':<10} "
+            f"risk={entry.get('risk'):<9} attempts={entry.get('attempts', 0)} commit={commit_short}"
+        )
+
+    current = state.get("current_slice")
+    if current:
+        alive = result.current_session_alive
+        before_head = (current.get("before_head") or "")[:12]
+        print(
+            f"current slice: {current.get('id')}  session={current.get('tmux_session')} "
+            f"alive={alive}  before_head={before_head}…  started_at={current.get('started_at')} "
+            f"attempts={current.get('attempts')}"
+        )
+    else:
+        print("current slice: none")
+
+    if result.plan_error:
+        print(f"next slice: plan could not be read ({result.plan_error})")
+    elif result.next_slice_id is None:
+        print("next slice: none (all slices complete)")
+    else:
+        if result.next_slice_eligible:
+            print(f"next slice: {result.next_slice_id} (eligible)")
+        else:
+            print(f"next slice: {result.next_slice_id} (blocked)")
+            for reason in result.next_slice_reasons:
+                print(f"  - {reason}")
+
+    approvals = state.get("approvals") or {}
+    if approvals:
+        print("approvals:")
+        for slice_id, record in approvals.items():
+            print(f"  {slice_id}: {record.get('reason')} (at {record.get('at')})")
+    else:
+        print("approvals: none")
+
+    return 0
+
+
+# --- approve ----------------------------------------------------------------
+
+
+def _run_approve(args: argparse.Namespace) -> int:
+    token = _require_token(args)
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    slice_ops.approve(repo, run_dir, token, slice_id=args.slice, reason=args.reason)
+    print(f"approved {args.slice}: {args.reason}")
+    return 0
+
+
+# --- start-slice --------------------------------------------------------------
+
+
+def _run_start_slice(args: argparse.Namespace) -> int:
+    token = _require_token(args)
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    outcome = slice_ops.start_slice(
+        repo,
+        run_dir,
+        token,
+        model=args.model,
+        effort=args.effort,
+        reviewer_tools=args.reviewer_tools,
+        harness_command=args.harness_command,
+    )
+
+    if outcome.kind == "all_complete":
+        print("all slices complete")
+        return 0
+    if outcome.kind == "blocked":
+        print(f"{outcome.slice_id} is not eligible:")
+        for reason in outcome.reasons:
+            print(f"  - {reason}")
+        return 2
+    if outcome.kind == "plan_changed":
+        print(f"pm: error: plan file changed mid-run: {outcome.message}", file=sys.stderr)
+        return 2
+    if outcome.kind == "attempts_exhausted":
+        print(f"pm: error: attempt budget exhausted for {outcome.slice_id}", file=sys.stderr)
+        return 2
+
+    verb = "relaunched" if outcome.kind == "relaunched" else "launched"
+    print(f"{verb} {outcome.slice_id} (attempt {outcome.attempt}) in tmux session {outcome.session}")
+    if outcome.reaped:
+        print(f"reaped stale sessions: {', '.join(outcome.reaped)}")
+    return 0
+
+
+# --- observe ------------------------------------------------------------------
+
+
+def _run_observe(args: argparse.Namespace) -> int:
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    outcome = slice_ops.observe(repo, run_dir, wait=args.wait)
+
+    if not outcome.has_current_slice:
+        print("no current slice")
+        return 0
+
+    print(f"slice: {outcome.slice_id}")
+    print(f"session running: {outcome.running}")
+    print(f"pane changed: {outcome.pane_changed}")
+    status_note = f" (status={outcome.result_status})" if outcome.result_status else ""
+    print(f"result present: {outcome.result_present}{status_note}")
+    if outcome.hard_stop["present"]:
+        print(f"hard-stop scan: {', '.join(outcome.hard_stop['kinds'])}")
+    else:
+        print("hard-stop scan: clear")
+    print("--- pane tail ---")
+    print(outcome.tail)
+    return 0
+
+
+# --- send ---------------------------------------------------------------------
+
+
+def _run_send(args: argparse.Namespace) -> int:
+    token = _require_token(args)
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    slice_ops.send(repo, run_dir, token, text=args.text, reason=args.reason)
+    print(f"sent: {args.text!r} ({args.reason})")
+    return 0
+
+
+# --- finalize (evidence mode only, this stage) ---------------------------------
+
+
+def _run_finalize(args: argparse.Namespace) -> int:
+    if args.accept or args.steer or args.stop:
+        raise PmError("acceptance decisions land in Stage 4; finalize currently reports the floor only")
+
+    token = _require_token(args)
+    repo = _repo_from_cwd()
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    outcome = slice_ops.finalize(repo, run_dir, token)
+
+    print(f"slice: {outcome.slice_id}")
+    for fact in outcome.report.facts:
+        status = "PASS" if fact.passed else "FAIL"
+        print(f"{fact.number} {fact.name} {status} {fact.detail}")
+    print(f"evidence: status-before={outcome.status_before_path}")
+    print(f"evidence: status-after={outcome.status_after_path}")
+    print(f"evidence: diff={outcome.diff_path}")
+    print(f"evidence: pane={outcome.pane_path}")
+    print(f"evidence: result={outcome.result_path}")
+    return 0 if outcome.report.passed else 1
+
+
+# --- stop -----------------------------------------------------------------
+
+
+def _run_stop(args: argparse.Namespace) -> int:
+    repo = _repo_from_cwd()
+
+    if args.scavenge:
+        try:
+            token = _require_token(args)
+            run_dir = state_mod.resolve_run_dir(repo, args.run)
+            state = slice_ops.load_writable_state(run_dir, token)
+            outcome = slice_ops.stop(repo, run_dir, token, reason=args.reason, slice_status=args.slice_status)
+            extra_killed = slice_ops.stop_scavenge_sweep(run_id=state["run_id"])
+            all_killed = outcome.killed + [name for name in extra_killed if name not in outcome.killed]
+            print(f"stopped run {state['run_id']}; killed sessions: {all_killed}")
+            return 0
+        except PmError as exc:
+            killed = slice_ops.stop_scavenge_sweep(run_id=args.run)
+            print(f"pm: scavenge: state unavailable ({exc}); swept sessions: {killed}")
+            return 0
+
+    token = _require_token(args)
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    outcome = slice_ops.stop(repo, run_dir, token, reason=args.reason, slice_status=args.slice_status)
+    print(f"stopped run {outcome.run_id}; killed sessions: {outcome.killed}")
+    return 0
+
+
+_HANDLERS = {
+    "check-plan": _run_check_plan,
+    "init": _run_init,
+    "status": _run_status,
+    "approve": _run_approve,
+    "start-slice": _run_start_slice,
+    "observe": _run_observe,
+    "send": _run_send,
+    "finalize": _run_finalize,
+    "stop": _run_stop,
+}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
     try:
-        if args.command == "check-plan":
-            return _run_check_plan(args)
+        handler = _HANDLERS.get(args.command)
+        if handler is not None:
+            return handler(args)
         if args.command in _NOT_YET_AVAILABLE:
             _resolve_token(args)  # plumbing exercised now; unused until wired
             raise PmError(f"{args.command} is not available yet (implemented in a later stage)")
         parser.error(f"unknown command: {args.command}")
+        return 2
+    except IntegrityError as exc:
+        print(f"pm: error: INTEGRITY: {exc}", file=sys.stderr)
         return 2
     except PmError as exc:
         print(f"pm: error: {exc}", file=sys.stderr)

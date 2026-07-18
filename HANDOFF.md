@@ -9,12 +9,12 @@
 - [x] Stage 2 (`c767127`): `sessions.py`, `profiles.py`, `floor.py` — eight-fact floor, hard-stop markers, four harness profiles.
 - [x] Stage 3 (`b41acaa`): `slice_ops.py`, `prompts.py`, `references/developer-prompt.md`, CLI wiring — full lifecycle, evidence-mode finalize.
 - [x] Stage 4 (`db0f0f2`): `review.py`, `references/reviewer-prompt.md`, finalize `--accept/--steer/--stop`, review freshness, controller-owned originals + `.pm/` mirrors, run report. Suite: 252 tests green, zero skips.
-- [ ] Stage 5 — Documentation & operator trial. Draft docs ALREADY IN WORKTREE, untracked: `skills/project-manager/SKILL.md` (61 lines; cap ≤~130), `README.md` (111), `references/run-state.md` (65). AC: docs accurate vs shipped CLI; the README "Verify your setup" fake-harness trial runs green from a clean checkout; a fresh reader can run a toy plan from the docs alone (this new session IS that fresh-reader test).
+- [x] Stage 5 — Documentation & operator trial (committed with this change-set). Docs validated flag-by-flag against the shipped CLI (three omissions fixed in the README table: init `--reviewer-model/--reviewer-effort`, start-slice `--reviewer-tools`, review `--effort`); README "Verify your setup" trial executed verbatim by a fresh session from the docs alone — floor 8/8 PASS, acceptance recorded, run report readable, `stop --scavenge` clean; Python-3.13 floor, harness roster, and reviewer roster (`+qwen`) claims verified in code.
 - [ ] Stage 6 — Cutover: root README Mode B sections, CONTRIBUTING doc map, `implementation-plan`/`handoff`/`report` SKILL.md texts, `.gitignore` (`.ai-pm` → `.pm`), `ci.yml` paths, orchestrator doc simplification sweep, replace `docs/VISION.md` with `docs/mode-b-lite/proposed-vision.md` (same change-set, never earlier), run blueprint §6 no-baggage checks (terminology grep list = ledger §8; add grep to CI). **Ask the owner before Stage 6.**
 - [ ] Stage 7 — Validation: Run C (scripted adversarial fake-harness scenarios, blueprint §7) is mechanisable now; Runs A/B need the owner's local model pairings and cost real usage — **report to owner before running**. Update blueprint §9 metrics with measured values; CHANGELOG adoption entry.
 
 ## Current Status
-- Branch `feature/mode-b-lite-impl`; committed through Stage 4; working tree contains ONLY the three untracked Stage 5 doc drafts.
+- Branch `feature/mode-b-lite-impl`; committed through Stage 5 (docs were checkpointed in `fadeea3`, validated and finalized in the Stage 5 commit). Stages 6–7 await owner go-ahead.
 - `python3 -m unittest discover -s skills/project-manager/tests -p 'test_*.py'` → 252 tests OK (tmux present). Orchestrator suite separately green.
 
 ## Decisions Made
@@ -43,10 +43,11 @@
 
 ## Validation
 - Done: full suite per stage; independent end-to-end CLI verification of every stage AC (fake harness in scratch repos): 8-fact floor evidence, branch-switch fails facts 2+6, credential-pane fails only fact 8, token gating + INTEGRITY terminality, attempt rotation/budget, scavenge with state deleted, standard + elevated acceptance, staleness invalidation, report with `.pm/` deleted, transitive bundle embeds `review-matrix.md`.
-- Still needed: Stage 5 doc-accuracy pass + trial run from the drafts; Stage 6 no-baggage greps; Stage 7 runs.
+- Done (Stage 5): doc-accuracy pass against every subcommand's `--help`; README trial run verbatim in a scratch directory by a fresh session (8/8 floor, acceptance, report, scavenge).
+- Still needed: Stage 6 no-baggage greps; Stage 7 runs.
 
 ## Authorization Gate
 - Not a scoped-implementation slice; governed by blueprint §8: any deviation touching roles/gates/floor/state/commands/artifacts/risk/authority requires amending `docs/mode-b-lite/` first in a dedicated commit. None has been needed so far.
 
 ## Next Action
-- Start Stage 5: read the three untracked draft docs against the shipped CLI (`python3 skills/project-manager/scripts/pm.py --help` and each subcommand), fix any drift (e.g. verify every flag named in README exists), then execute the README "Verify your setup" trial verbatim in a scratch directory as the fresh-reader test, then commit Stage 5 as one commit. Delegate mechanical doc-vs-CLI checking to a Sonnet subagent if desired; the trial itself is the lead's to run.
+- **Ask the owner** for the Stage 6 go-ahead (cutover: root README, CONTRIBUTING, skill cross-references, `.gitignore`, `ci.yml`, orchestrator doc sweep, VISION.md swap, no-baggage greps + CI grep). Stage 7 (Runs A/B) separately needs owner model pairings; Run C is mechanisable once authorized.

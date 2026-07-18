@@ -16,15 +16,15 @@ All commands: `python3 skills/project-manager/scripts/pm.py <command> …`, run 
 | Command | Purpose |
 |---|---|
 | `check-plan --plan P [--repo R]` | "Is this plan runnable?" — errors fail closed; also runs automatically at init |
-| `init --repo R --plan P --harness H [--model M] [--effort E] [--branch B \| --create-branch B] [--attest "Slice 1,…"] [--max-attempts N] [--reviewer-tools T,…] [--harness-command CMD]` | set up the run; freezes the plan digest; prints the token once |
+| `init --repo R --plan P --harness H [--model M] [--effort E] [--branch B \| --create-branch B] [--attest "Slice 1,…"] [--max-attempts N] [--reviewer-tools T,…] [--reviewer-model M] [--reviewer-effort E] [--harness-command CMD]` | set up the run; freezes the plan digest; prints the token once |
 | `status [--report] [--run ID]` | where are we? `--report` regenerates `run-report.md` |
 | `approve --slice ID --reason TEXT` | record a **human** approval for a plan-gated slice |
-| `start-slice [--model M] [--effort E] [--risk elevated] [--harness-command CMD]` | launch (or relaunch) the next eligible slice in a fresh tmux session |
+| `start-slice [--model M] [--effort E] [--risk elevated] [--reviewer-tools T,…] [--harness-command CMD]` | launch (or relaunch) the next eligible slice in a fresh tmux session |
 | `observe [--wait N]` | evidence: liveness, pane tail, result presence, hard-stop markers |
 | `send --text T --reason R` | one-line nudge into the live session (refused over hard prompts; costs nothing) |
 | `finalize` | run the eight-fact floor and collect evidence (decides nothing) |
 | `finalize --accept "reasoning" \| --steer "correction" \| --stop "reason" [--risk elevated]` | PM's recorded decision; accept requires a passing floor (+ both fresh reviews when elevated); steer costs an attempt |
-| `review --slice ID --skill drift-audit\|code-review [--tool T] [--model M]` | commission an independent review pinned to `before_head..HEAD` |
+| `review --slice ID --skill drift-audit\|code-review [--tool T] [--model M] [--effort E]` | commission an independent review pinned to `before_head..HEAD` |
 | `stop --reason R [--slice-status stopped] [--scavenge]` | end the run preserving evidence; `--scavenge` sweeps sessions even with state destroyed |
 
 Exit codes: 0 success; 1 = `finalize` ran and a floor fact failed; 2 = error/refusal (integrity failures are prefixed `INTEGRITY:` and are terminal — start a new run).

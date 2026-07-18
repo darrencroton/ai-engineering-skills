@@ -1,53 +1,52 @@
 # HANDOFF
 
 ## Objective
-- Complete the approved Mode B Lite greenfield replacement of the Project Manager system, per the binding six-report spec in `docs/mode-b-lite/` (authority order: proposed-vision → target-design → replacement-ledger → implementation-blueprint; stage order = blueprint §3). Do not re-litigate the design.
+- Complete the approved Mode B Lite greenfield replacement of the Project Manager system, per the binding six-report spec in `docs/mode-b-lite/` (authority order: proposed-vision → target-design → replacement-ledger → implementation-blueprint). Do not re-litigate the design. Stages 1–6 are done; Stage 7 (live validation & reassessment) remains.
 
 ## Task List
-- [x] Deletion first commit (`f9d36a3`): old `skills/project-manager/`, `pm-slice-contract.md`, PM-facing orchestrator machinery removed; orchestrator standalone suite green (26 tests).
-- [x] Stage 1 (`20e6ecc`): `pm_lib/{state,plan,git_ops,cli}.py` + `pm.py` — lite-1 HMAC-authenticated single-copy state, plan parser + mechanical `plan_risk`, segment-aware surface matching.
-- [x] Stage 2 (`c767127`): `sessions.py`, `profiles.py`, `floor.py` — eight-fact floor, hard-stop markers, four harness profiles.
-- [x] Stage 3 (`b41acaa`): `slice_ops.py`, `prompts.py`, `references/developer-prompt.md`, CLI wiring — full lifecycle, evidence-mode finalize.
-- [x] Stage 4 (`db0f0f2`): `review.py`, `references/reviewer-prompt.md`, finalize `--accept/--steer/--stop`, review freshness, controller-owned originals + `.pm/` mirrors, run report. Suite: 252 tests green, zero skips.
-- [x] Stage 5 — Documentation & operator trial (committed with this change-set). Docs validated flag-by-flag against the shipped CLI (three omissions fixed in the README table: init `--reviewer-model/--reviewer-effort`, start-slice `--reviewer-tools`, review `--effort`); README "Verify your setup" trial executed verbatim by a fresh session from the docs alone — floor 8/8 PASS, acceptance recorded, run report readable, `stop --scavenge` clean; Python-3.13 floor, harness roster, and reviewer roster (`+qwen`) claims verified in code.
-- [ ] Stage 6 — Cutover: root README Mode B sections, CONTRIBUTING doc map, `implementation-plan`/`handoff`/`report` SKILL.md texts, `.gitignore` (`.ai-pm` → `.pm`), `ci.yml` paths, orchestrator doc simplification sweep, replace `docs/VISION.md` with `docs/mode-b-lite/proposed-vision.md` (same change-set, never earlier), run blueprint §6 no-baggage checks (terminology grep list = ledger §8; add grep to CI). **Ask the owner before Stage 6.**
-- [ ] Stage 7 — Validation: Run C (scripted adversarial fake-harness scenarios, blueprint §7) is mechanisable now; Runs A/B need the owner's local model pairings and cost real usage — **report to owner before running**. Update blueprint §9 metrics with measured values; CHANGELOG adoption entry.
+- [x] Deletion, Stages 1–4 (`f9d36a3`, `20e6ecc`, `c767127`, `b41acaa`, `db0f0f2`): full toolkit (`pm_lib/`, 11 modules), 252 tests green, every stage AC verified end-to-end.
+- [x] Stage 5 (`61074d9`): docs validated flag-by-flag against the shipped CLI; README "Verify your setup" trial run verbatim by a fresh session (floor 8/8, acceptance, report, scavenge).
+- [x] Stage 6 (this change-set): root README Mode B sections rewritten per Lite; CONTRIBUTING source-of-truth map updated; `implementation-plan`/`handoff`/`report` SKILL.md texts re-bound (`Independent audit required: yes` ⇒ elevated risk); orchestrator docs rewritten standalone-only; `.gitignore` state-dir entry now `.pm/`; `docs/VISION.md` replaced with the adopted vision; blueprint §6 no-baggage greps pass and run in CI (`ci.yml`, two steps with historical-file + orchestrator carve-outs).
+- [ ] Stage 7 — Run C (adversarial spot-checks, blueprint §7): scripted fake-harness scenarios replaying known failure shapes — false success report, unauthorized file change, `.pm/` vandalism (must not corrupt PM state or decisions; damaged Developer evidence fails the slice closed via floor fact 4), wrong-slice result, approval-gate bypass. Bar: every one caught or rendered harmless. Mechanisable without owner input.
+- [ ] Stage 7 — Run A (killer case, **owner gates**): local pairing qwen3.6-27b Developer / qwen3.6-35b review seat on the `pm-test` fixture's hard 5-slice plan. Bar: ≥ 4/5 slices sound where the four documented baseline runs (Tests 14/16/17/18) got 0/5.
+- [ ] Stage 7 — Run B (strong pairing, **owner gates**): Test 6/12-class pairing. Bar: 5/5 parity with fewer PM interventions and materially fewer model interactions (count from `events.jsonl` vs baseline operational events).
+- [ ] Stage 7 — bookkeeping: record per run slices completed, wall-clock, interventions, human touches, artifact volume, assessment usefulness; update blueprint §9 metrics as *measured*; write the CHANGELOG adoption entry. If Run A misses the bar, apply blueprint §8: diagnose implementation vs design vs vision — do not patch forward.
+- [ ] Blueprint §6.6 anti-resurrection review — a one-time **human** check (no enum failure classifiers, no second state copy, no per-round artifact families, no verdict-string parsing); flagged to the owner, not an agent task.
 
 ## Current Status
-- Branch `feature/mode-b-lite-impl`; committed through Stage 5 (docs were checkpointed in `fadeea3`, validated and finalized in the Stage 5 commit). Stages 6–7 await owner go-ahead.
-- `python3 -m unittest discover -s skills/project-manager/tests -p 'test_*.py'` → 252 tests OK (tmux present). Orchestrator suite separately green.
+- Branch `feature/mode-b-lite-impl`; committed through Stage 6. Both test suites green (PM 252, orchestrator 26); no-baggage greps clean and enforced in CI.
+- Stage 6 work was independently reviewed pre-commit (see Developer / Reviewer State).
 
 ## Decisions Made
-- Owner authorized: commit per stage once its ACs pass, no per-commit approval; owner gates Stage 6 and Stage 7 live runs.
-- Delegation policy (owner instruction): all non-trivial coding via Sonnet subagents from a frozen written brief, tests written first; the lead session reviews every module, independently verifies stage ACs end-to-end, and owns the commit.
-- IntegrityError is terminal: never rewrite/re-sign state after a MAC failure (re-signing would launder tampered bytes); tampered `run.json` survives as evidence and every mutating command keeps failing closed.
-- `--risk elevated` ratchet flag on `start-slice`/`finalize` (raise-only; `plan_risk` immutable) and `review --reviewer-command` test hook are deliberate, recorded implementations of designed behaviour — not drift.
-- Elevated acceptance mechanically requires BOTH drift-audit and code-review reviews fresh for the exact final HEAD (sha256-verified artifacts); `finalize --accept` needs ≥40-char reasoning and a passing floor.
-- `PM_NOTES_PATH` points at the `.pm/` mirror; controller originals live under `<git-dir>/pm/<run-id>/`; report regenerates from controller data only.
+- Owner authorized per-stage commits once ACs pass; owner gates Stage 7 Runs A/B (they cost real model usage on the owner's local pairings).
+- Stage 7 validation runs use the existing local `pm-test/` fixture (gitignored, own repo) and `pm-test/docs/implementation-plan-hard-pi-convergence.md`; baseline runs execute from a `main` checkout, Lite runs from this branch (blueprint §7).
+- Delegation policy: non-trivial coding via Sonnet subagents from frozen written briefs, tests first; the lead reviews, verifies ACs end-to-end, and owns commits.
+- IntegrityError is terminal: never rewrite/re-sign state after a MAC failure; tampered `run.json` survives as evidence.
+- Elevated acceptance requires BOTH drift-audit and code-review fresh at the exact final HEAD; `finalize --accept` needs ≥40-char reasoning and a passing floor.
 
 ## Failed or Rejected Approaches
-- Stage 4 subagent's "heal" of tampered state (re-sign + needs-human) — rejected and replaced (see Decisions); the tamper test now pins the terminal behaviour.
-- Stage 4 subagent died at a usage limit before its final report; lead completed verification directly — nothing pending from it.
-- Fake-harness test scripts must drain stdin (`cat -`), not bare `sleep`: the pasted multi-KB prompt can saturate the pty input queue and silently drop a later steer line (documented in `test_slice_ops.py`).
+- Fake-harness scripts must drain stdin (`cat -`), not bare `sleep` — the pasted multi-KB prompt can saturate the pty queue and drop a later steer line (documented in `test_slice_ops.py`). Directly relevant to scripting Run C.
+- A subagent's "heal" of tampered state (re-sign + continue) was rejected; the tamper test pins terminal behaviour.
 
 ## Active Blockers
-- None technical. Stage 6 and Stage 7 (Runs A/B) await explicit owner go-ahead.
+- Runs A/B await explicit owner go-ahead and model pairing confirmation. Run C needs no input.
 
 ## Files That Matter
-- `skills/project-manager/scripts/pm_lib/*.py` — the complete toolkit (11 modules); `tests/` — 252 tests, fake-harness pattern.
-- `skills/project-manager/{SKILL.md,README.md,references/run-state.md}` — UNTRACKED Stage 5 drafts to review/validate/commit.
-- `references/{developer-prompt.md,reviewer-prompt.md}` — committed prompt templates (single ```md fence each; str.format contract).
-- `docs/mode-b-lite/implementation-blueprint.md` — §3 stage ACs, §6 no-baggage checks, §7 validation plan, §8 stop rule.
-- `docs/mode-b-lite/replacement-ledger.md` — §8 terminology grep list, §9 sanctioned carry-overs.
-- `.github/workflows/ci.yml` — still points at deleted PM test paths; fix in Stage 6.
+- `skills/project-manager/scripts/pm_lib/*.py` + `tests/` — the shipped toolkit and 252-test suite (fake-harness pattern to reuse for Run C).
+- `pm-test/` — local validation fixture (own git repo; not tracked here); `docs/implementation-plan-hard-pi-convergence.md` is the Stage 7 plan; `docs/pm-lessons-learnt.md` holds the baseline test record (Tests 14/16/17/18 = the 0/5 baselines).
+- `docs/mode-b-lite/implementation-blueprint.md` — §7 validation plan and bars, §8 stop rule, §9 metrics table to update.
+- `.github/workflows/ci.yml` — the two no-baggage grep steps; keep them green in any follow-up.
+
+## Developer / Reviewer State
+- Orchestrator run dir: `.orchestrator/runs/` (see latest `reviewers-*` entry). Stage 5+6 change-set reviewed pre-commit by codex `gpt-5.6-sol` (high effort, read-only sandbox): drift-audit against the ledger/blueprint dispositions, then code-review. Findings and dispositions are recorded in the Stage 6 commit message.
+- Audit provenance: both reviews Reviewer-performed (codex); the lead session verified and dispositioned every finding.
 
 ## Validation
-- Done: full suite per stage; independent end-to-end CLI verification of every stage AC (fake harness in scratch repos): 8-fact floor evidence, branch-switch fails facts 2+6, credential-pane fails only fact 8, token gating + INTEGRITY terminality, attempt rotation/budget, scavenge with state deleted, standard + elevated acceptance, staleness invalidation, report with `.pm/` deleted, transitive bundle embeds `review-matrix.md`.
-- Done (Stage 5): doc-accuracy pass against every subcommand's `--help`; README trial run verbatim in a scratch directory by a fresh session (8/8 floor, acceptance, report, scavenge).
-- Still needed: Stage 6 no-baggage greps; Stage 7 runs.
+- Done: per-stage suites; Stage 5 fresh-reader trial; Stage 6 §6 checks 1–5 (terminology grep, path grep, `pm_lib` import graph stdlib-only, README/CONTRIBUTING link reachability, fixture sweep) all pass locally and the greps run in CI.
+- Still needed: Stage 7 Runs A/B/C and the §6.6 human anti-resurrection pass.
 
 ## Authorization Gate
-- Not a scoped-implementation slice; governed by blueprint §8: any deviation touching roles/gates/floor/state/commands/artifacts/risk/authority requires amending `docs/mode-b-lite/` first in a dedicated commit. None has been needed so far.
+- Governed by blueprint §8: any deviation touching roles/gates/floor/state/commands/artifacts/risk/authority requires amending `docs/mode-b-lite/` first in a dedicated commit. None has been needed through Stage 6.
 
 ## Next Action
-- **Ask the owner** for the Stage 6 go-ahead (cutover: root README, CONTRIBUTING, skill cross-references, `.gitignore`, `ci.yml`, orchestrator doc sweep, VISION.md swap, no-baggage greps + CI grep). Stage 7 (Runs A/B) separately needs owner model pairings; Run C is mechanisable once authorized.
+- Script and run Stage 7 Run C: build the five adversarial fake-harness scenarios from blueprint §7 against a scratch clone of `pm-test` (reuse the `--harness-command` pattern from `skills/project-manager/tests/`), record each outcome (caught / rendered harmless) with evidence paths, then report to the owner and request the Run A/B go-ahead and pairing confirmation before any real-model run.

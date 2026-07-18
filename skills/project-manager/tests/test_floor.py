@@ -79,7 +79,7 @@ class FloorTestCase(PmTestCase):
     def _plan_path(self) -> Path:
         # Deliberately outside self.repo: a plan.md living untracked inside
         # the repo would itself show up as a "changed" (untracked) file in
-        # every floor evaluation — a self-inflicted surface/dirty-worktree
+        # every floor evaluation — a self-inflicted surface/cleanliness
         # failure that has nothing to do with the fact under test. The real
         # CLI (Stage 3) accepts an arbitrary --plan path, so this is a
         # faithful, not merely convenient, test shape.

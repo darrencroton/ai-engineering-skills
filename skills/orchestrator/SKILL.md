@@ -49,7 +49,7 @@ Equal eligibility does not imply identical enforcement. Read the selected tool r
 | OpenCode CLI | Plan agent denies edit tools; shell discipline remains prompt-enforced | [references/opencode.md](references/opencode.md) |
 | Qwen Code | Prompt-enforced repository read-only behavior; launcher requests sandboxing | [references/qwen.md](references/qwen.md) |
 
-Harness enforcement is evidence, not model-ranking policy. The Developer and, under Project Manager, repository mutation gates remain the backstop.
+Harness enforcement is evidence, not model-ranking policy. The Developer's own gates remain the backstop.
 
 ## Skill and Tool Coordination
 
@@ -97,9 +97,9 @@ Use lowercase kebab-case labels shaped as `<nn>-<tool>-<subtask-slug>[-rN]`. Use
 
 ## Audit Provenance and Self-Audit
 
-Prefer an independent Reviewer for drift audit and code review. If no Reviewer is configured, a selected Reviewer cannot launch, or the launcher explicitly selects self-audit, the Developer may self-audit a default slice. The final report must explicitly identify each audit as `reviewer` or `developer-self-audit` and explain fallback context when applicable.
+Prefer an independent Reviewer for drift audit and code review. If no Reviewer is configured, a selected Reviewer cannot launch, or the launcher explicitly selects self-audit, the Developer may self-audit a default slice. The final report must explicitly identify each audit as Reviewer-performed or Developer self-audit and explain fallback context when applicable.
 
-A slice marked `Independent audit required: yes` never permits self-audit. It requires separate validated Reviewer launches for `drift-audit` and `code-review`, in that order, with exact `PASS` verdict evidence.
+A plan that asks for independent review (`Independent audit required: yes`) deserves separate Reviewer launches for `drift-audit` and `code-review`, in that order; if a Reviewer cannot be launched for such a slice, stop and report rather than self-audit.
 
 ## Reviewer Summary
 

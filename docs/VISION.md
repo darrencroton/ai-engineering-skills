@@ -4,107 +4,98 @@ This document records why this repository exists, who it serves, and the princip
 
 ## Why This Repository Exists
 
-AI coding agents are strong implementers and unreliable narrators. Left unsupervised, they fail in a characteristic way: they expand scope beyond what was asked, grade their own work generously, and report success in confident prose that can diverge from what actually happened in the repository. This failure mode worsens in exactly the two directions users most want to go — stepping away from the keyboard (more autonomy) and using cheaper, weaker, or self-hosted models (less capability per token).
+AI coding agents are strong implementers and unreliable narrators. Left unsupervised, they fail in a characteristic way: they expand scope beyond what was asked, grade their own work generously, and report success in confident prose that can diverge from what actually happened in the repository. The conventional answers are all-or-nothing: keep a human in the loop for every change, or trust the agent and audit the wreckage later.
 
-The conventional answers are all-or-nothing: either keep a human in the loop for every change, or trust the agent and audit the wreckage later.
+This repository takes a third position: **make AI-assisted software engineering safe to scale up in autonomy by combining a small mechanical floor of non-negotiable checks with an empowered, accountable supervisor.** The floor makes the highest-harm failures — unauthorized surface changes, broken commit history, self-approved human gates — mechanically impossible. Above the floor, a capable supervising agent (the Project Manager) judges the work the way a good engineering lead would: by reading the plan, the diff, the validation output, and the review evidence, and by owning the decision it records.
 
-This repository takes a third position: **make AI-assisted software engineering safe to scale up in autonomy by moving trust out of the model and into contracts, evidence, and role separation.** The agent moves fast inside the lane — it just doesn't get to redraw it. And the lane is enforced by evidence, not by the agent's promise.
+An earlier iteration of this system pursued a stronger claim — that *every* acceptance decision could be made deterministic. Its own operating record showed the cost: the machinery required to avoid trusting any model judgement grew until passing the process cost more than doing the work, and the weakest models it was built to protect were the ones it failed. This vision keeps that iteration's threat model and its honesty, and deliberately trades its maximal determinism for proportionate, accountable judgement.
 
 ## What This Repository Is
 
-This is an **autonomy system first**, with graduated use cases: from a single standalone code review, through user-supervised slice-by-slice implementation, up to fully autonomous execution of a complete implementation plan under an external supervisor. Its parts — the individual skills — are deliberately reusable on their own, but the system is designed top-down around one question: *how much independence can be granted to an AI implementer without losing authorization, auditability, and truth?*
+An **autonomy system first**, with graduated use: from a single standalone code review, through user-supervised slice-by-slice implementation, up to autonomous execution of a complete implementation plan under a supervising Project Manager. The parts — the individual skills — are deliberately reusable on their own. The system is designed around one question: *how much useful, verified engineering outcome can a supervised autonomous run produce per unit of human attention and system complexity — while the highest-harm failures remain mechanically impossible and every acceptance remains accountable?*
 
 Three commitments define the answer:
 
-1. **Contracts before code.** What "authorized" means is frozen before implementation begins. A plan defines narrow slices, each with acceptance criteria, an authorized surface, explicit non-goals, a validation plan, and a rollback path. Implementation happens inside that frozen contract, never as a negotiation with it.
+1. **Contracts before code.** What "authorized" means is frozen before implementation begins. A plan defines narrow slices, each with acceptance criteria, an authorized surface, explicit non-goals, a validation plan, and a rollback path. Implementation happens inside that frozen contract. The supervisor may resolve minor ambiguity in a contract on the record; it may never widen a surface, downgrade a risk flag, or invent scope.
 
-2. **Authorization and quality are separate questions.** "Was this change authorized?" is audited first, as its own gate, before "is this change good?" A beautiful diff that redrew the lane fails; the two judgments are never blended.
+2. **A mechanical floor, and judgement above it.** A small set of invariants is always checked by code, never by a model: the changed-file surface against the frozen authorization, commit ancestry and a clean worktree, the frozen plan digest, and human-approval flags. Everything semantic — is the change good, is the evidence sufficient, is a deviation material — is an explicit, recorded judgement by the Project Manager against repository evidence. The documentation always says which kind of check protects what.
 
-3. **Evidence over narration.** Acceptance decisions rest on repository state and durable artifacts — diffs, commits, validation output, structured results, recorded launches — never on the agent's account of what it did. Where a boundary is enforced by prompt or heuristic rather than mechanism, the documentation says so plainly.
-
-These commitments are embodied in one constant chain: **plan → scoped implementation → validation → drift audit → code review → commit**. Raising the autonomy level changes *who holds the gates* — never what the gates are.
+3. **Evidence informs judgement; narration never decides.** Acceptance rests on repository state and durable artifacts — diffs, commits, validation output, review reports. The implementing agent's account of its work is a pointer to evidence, never evidence itself. The Project Manager's acceptances cite what was examined and why, so a human can audit any decision after the fact in minutes.
 
 ## The Autonomy Ladder
 
-**Rung 0 — Standalone skills.** Every skill is independently useful in any coding-agent harness, with no supporting infrastructure: a lone code review, a disciplined commit, a drift audit against an ad-hoc contract, a session handoff. This is the entry point and the fallback; the system degrades gracefully to it.
+**Rung 0 — Standalone skills.** Every skill is independently useful in any coding-agent harness with no supporting infrastructure: a lone code review, a disciplined commit, a drift audit against an ad-hoc contract, a session handoff. This is the entry point and the fallback; the system degrades gracefully to it.
 
-**Rung 1 — Assisted implementation (Mode A).** One agent session runs the chain against frozen slices. In its default, checkpointed usage the user supervises slice by slice: the agent restates each frozen contract, implements, audits, and reviews, and the human approves risky slices before coding and every commit after gates pass. The same mode has an autonomous alternate usage — the identical session and launcher family, pointed at all remaining slices with standing authorization to commit whatever clears every gate — for when the plan is straightforward, the implementing and reviewing models are strong, and the user does not want to stand up an external supervisor. In that usage the gates are promises kept in-session — disciplined, but not externally verified — so it trades assurance for simplicity.
+**Rung 1 — Assisted implementation (Mode A).** One agent session runs plan → implement → audit → review → commit against frozen slices, with the user supervising slice by slice, or — for straightforward plans with strong models — autonomously in one session with standing commit authorization. Gates here are in-session discipline, not external verification.
 
-**Rung 2 — Supervised autonomy (Mode B, Project Manager).** The gatekeeper moves outside the implementing agent entirely. The Project Manager keeps durable run state and launches a fresh implementing session per slice — resetting working memory so very long plans remain tractable without forcing later Developers to work in isolation. Each new session receives a bounded, provenance-labelled account of accepted prior outcomes, decisions, lessons, failed approaches, interface discoveries, validation knowledge, and residual findings alongside the full plan and current frozen contract. PM verifies every gate from local evidence, steers fixable gaps back into the live session through a bounded repair loop that never relaxes a gate, and stops for a human on anything outside policy. Supervision is a dial within this rung, not a fork: the default operating style keeps a supervising model in the loop for operational judgment (interruptions, usage resets, stalls), while a fail-closed unattended style exists for runs where no supervising model is available or wanted, at the cost of stopping on the first ambiguity. Acceptance is deterministic in both styles; the supervising model only ever handles operational judgment, never acceptance.
+**Rung 2 — Supervised autonomy (Mode B).** The Project Manager supervises from outside the implementing session: it keeps durable run state, launches a fresh implementing session per slice with a bounded account of accepted prior work, enforces the mechanical floor itself, assesses each completed slice from evidence at a depth proportional to its risk, commissions independent review when risk warrants it, steers fixable gaps back into the session under a bounded budget, and stops for a human on anything the plan or the floor reserves for one.
 
-Choosing a rung is a function of stakes, plan length, model strength, and available attention — not of user sophistication. The same user should move up and down the ladder from task to task.
+Choosing a rung is a function of stakes, plan length, model strength, and available attention — not of user sophistication.
 
 ## The Roles
 
-**Project Manager (PM) — the trust anchor.** A deterministic supervisor that owns run state and gates. It recomputes the highest-risk checks itself — the changed-file surface against the frozen authorization, commit ancestry, clean worktree — rather than trusting any report. It steers bounded repairs, holds sole authority to stop for a human, and never writes code, never plans, and never delegates. Where PM's verification is existence-and-consistency checking rather than full re-derivation, that boundary is documented, and the always-mechanical checks are chosen to cover the changes most likely to cause real harm.
+**Project Manager (PM) — the accountable supervisor.** One agent seat, backed by a small deterministic toolkit. The toolkit owns run state, session control, artifact capture, and the mechanical floor; the PM agent owns everything that requires reading and judgement: assessing completed work against the contract, choosing proportionate validation depth, deciding whether a deviation is material, commissioning independent review, steering repairs, and deciding when a human is genuinely needed. PM never writes slice code and never authors or expands plans. Authority and accountability sit in the same seat: every PM acceptance is recorded with its reasoning and evidence, and PM answers for it.
 
-**Developer — the context-rich executor.** The agent that runs one slice through the constant chain and self-corrects first. The Developer owns planning, coding, validation, session management, semantic verification of Reviewer output, gate decisions, commits, and the final deliverable. Under PM, it is a per-slice implementing session that reports a structured result and holds no authority above PM. Same discipline, different boss.
+**Developer — the context-rich executor.** A fresh implementing session per slice. It owns implementation, tests, validation, and the slice commit, inside the frozen contract. It reports completion with pointers to evidence; it holds no acceptance authority. Its job is engineering, not paperwork: the reporting burden on the Developer is deliberately minimal.
 
-**Reviewer — read-only leverage without authority.** A single-purpose helper launched only through a validated semantic contract to investigate, gather evidence, perform drift audits, or perform code reviews. The Reviewer never edits files, mutates Git or GitHub state, commits, makes a final gate decision, or re-delegates. The launcher validates the request, composes the harness command, embeds the instructions, and records mechanical evidence of what ran. Every supported model and harness is eligible for the role; differences in how strongly a harness enforces read-only behaviour are documented as facts, not used as capability rankings. Verifying that a Reviewer's *output* satisfied its task remains the Developer's job.
+**Reviewer — independent eyes, commissioned by the judge.** When risk warrants independent review, *PM* launches a read-only review session against the final diff — the judge hires the auditor; the implementer never grades or relays its own audit. On low-risk slices PM's own assessment of the diff is the review. The `drift-audit` and `code-review` skills define the questions asked either way.
 
-Using a *separate* Reviewer for drift audit and code review is the strongest form of this leverage — a second model auditing the work is a better check than the author grading itself — and every rung prefers it. But independence is a degradable preference chosen in the plan or launcher, not a universal requirement: when no Reviewer is configured or available, Developer self-audit is a valid and explicitly reported outcome on default slices. A plan may opt a high-stakes slice into mechanical proof that distinct Reviewer audits ran, which the external supervisor verifies. That is the constant chain again — the gate is "was this audited?"; raising autonomy changes who must *prove* the audit's independence, never whether the audit happens.
+**The atomic skills — the shared vocabulary.** Planning, scoped implementation, drift audit, code review, simplification, commit, handoff, and reporting are each self-contained and harness-agnostic. A plan written once is executable by a fresh chat, an assisted session, or PM, and an authorization verdict means the same thing at every rung.
 
-**The atomic skills — the shared vocabulary.** Planning, scoped implementation, drift audit, code review, simplification, commit, handoff, and reporting are each self-contained and harness-agnostic. Composition is what makes the system worth more than the sum of its parts: because the skills share frozen contract shapes, a plan written once is executable by a fresh chat, an orchestrated session, or PM's parser, and an authorization verdict means the same thing at every rung of the ladder.
+## The Risk Model
+
+Controls scale with risk; the floor does not.
+
+- Every slice gets the mechanical floor, PM assessment of the final state, and a per-slice commit.
+- A slice is **elevated** when the plan flags it (approval-gated, risky surfaces, independent review required) or when PM escalates it on evidence (unexpected surface breadth, sensitive files, surprising diffs). Elevated slices get independent review, deeper validation, and — where the plan says so — a human decision. PM may raise a slice's risk level on the record; it may never lower a plan-declared one.
+- Human attention is reserved for what actually needs it: plan-flagged approvals, floor violations, integrity breaches, exhausted budgets, and anything PM judges beyond its brief. Routine completion does not ask a human anything.
 
 ## Who It Serves
 
-The three personas below are distinguished by operating constraints — attention, accountability, and data locality — not by skill level.
+**The unattended operator** — several projects, multiple model providers, scarce attention. Freezes a plan, hands it to PM, returns to committed, assessed slices with a readable run report: what was accepted, why, on what evidence, and what residual risk remains. Their protection is the floor plus PM's recorded judgement plus per-slice commits that keep any mistake one revert away.
 
-### The unattended operator
+**The accountable engineer** — answers personally for correctness. Uses the chain à la carte at Rungs 0–1 with human checkpoints; possibly never uses PM. Everything at these rungs is prompt-discipline plus their own review, and the documentation says so.
 
-**Context and goals.** An engineer or researcher with several concurrent projects and access to multiple coding agents and model providers. Their scarce resource is attention. They want well-planned work to keep progressing while they are elsewhere — overnight, between meetings — using each model where it is strongest, without surrendering the audit trail.
-
-**How they use the system.** Freeze a multi-slice plan, hand it to PM at Rung 2, and let supervised autonomy run: fresh session per slice, deterministic gates, bounded repairs, operational recovery from transient interruptions and usage windows, and durable evidence for every slice. They place the supervising model and the implementing harness on different providers so one provider's limits cannot stall both, route stronger and cheaper models to the roles that warrant them, and review run summaries and per-slice artifacts afterward.
-
-**Value.** Hours of validated, committed slices per prompt; per-slice evidence bundles auditable in minutes; recovery from routine interruptions without human intervention; a repair loop that keeps one formatting slip from wasting a long slice.
-
-**Constraints and risks.** Provider usage windows; supervision commands that outlive the tool-call limits of the assistant driving them; the documented trust boundary (verdicts are evidence-checked, not semantically re-derived); and the permanent ceiling: PM amplifies a good plan and stops on a bad one — it never fixes one.
-
-### The accountable engineer
-
-**Context and goals.** A developer or scientist-developer using one coding assistant, on code where they answer personally for correctness — production services, or research code where subtle errors corrupt results. They want to delegate real implementation without losing track of what changed and why.
-
-**How they use the system.** The chain à la carte at Rungs 0–1: plan in one session, implement slice by slice in fresh sessions with human checkpoints, drift audit before quality review, commit only on explicit approval, handoff at session boundaries. Occasionally Mode A's autonomous usage for well-isolated, low-stakes work. Possibly never PM.
-
-**Value.** Diffs small enough to genuinely review; scope drift surfaced as a first-class verdict instead of discovered mid-review; commit messages that record every file and reason; sessions that resume cleanly; a defensible record of every decision.
-
-**Constraints and risks.** Ceremony must stay proportional to the task — the system must make it easy to know when the full chain is worth invoking; at these rungs the gates are prompt-enforced discipline, not mechanism, so model obedience matters; and the plan format must serve them even when they never use the machinery that also parses it.
-
-### The local-first engineer
-
-**Context and goals.** Someone whose code or data cannot leave their machines — proprietary work, pre-publication research, regulated data, or principle — running open-weight models on their own hardware. They also gain zero marginal token cost and offline capability. They want real multi-step engineering from mid-tier local models, safely, accepting slower wall-clock time.
-
-**How they use the system.** The same plans and the same supervised autonomy, with local models in the Developer and Reviewer roles. They lean hardest on the structural machinery, because their models are the least reliable link: the validated launcher and embedded instructions (their harness may have no native skill support), precise rejection feedback that lets a weak model self-correct, the bounded repair loop for format slips, and PM's recomputed gates as the real mutation backstop when a harness's "read-only" mode turns out to be a suggestion rather than a mechanism. If they cannot or will not run a supervising model, the fail-closed unattended style still gives them deterministic gates with themselves as the fallback.
-
-**Value.** A disciplined engineering workflow, entirely on-premises, whose safety guarantees come from the architecture rather than from a vendor's guardrails — with an evidence trail that matters more to them than to anyone else.
-
-**Constraints and risks.** Weak-model behaviors are their daily weather: delegation evasion, inconsistent readings of ambiguous instructions, self-graded audits that the system deliberately does not re-derive. Slices run long; cold starts and silent prefill must not be misread as stalls. For this persona above all, plan-level controls — small authorized surfaces, approval gates on risky slices — and actually reading the artifacts carry the most weight. And they must know which supervision choices keep data local: any cloud-hosted supervising model sees operational evidence, including fragments of code.
+**The local-first engineer** — code and data cannot leave their machines; open-weight models on their own hardware. Everything PM produces stays local, and every seat can be a local model. Their protection comes from where it always really came from: small authorized surfaces, approval gates on risky slices, independent review on elevated slices, and reading the artifacts. The system buffers weak-model sloppiness in the supervisor instead of demanding format perfection from the implementer — but a weak model in the *PM seat* weakens the judgement layer itself, and this document says that plainly rather than pretending the architecture absorbs it.
 
 ## Design Principles
 
-1. **Trust the architecture, not the model.** Every acceptance claim traces to mechanical evidence. Anything resting on a model's narration or self-grading is named as such where users will read it.
+1. **Protect outcomes, not ceremony.** A control exists because a meaningful failure becomes more likely without it, and it is removed when its cost exceeds that protection. Process artifacts exist to support execution, review, and recovery — never to prove compliance with other process.
 
-2. **One responsibility per layer, fixed at the owning layer.** Planning belongs to the planner, execution and self-correction to the Developer, verification and stop authority to PM, and read-only investigation and review to Reviewers. Fixes strengthen the layer that owns the problem; they never migrate a Developer responsibility into PM or a gate into a Reviewer.
+2. **Mechanise the floor; judge the rest.** Cheap, high-impact invariants are code. Semantic quality is accountable judgement. Never blur which is which, in either direction: no judgement dressed as determinism, no determinism quietly replaced by judgement.
 
-3. **Graduated autonomy, constant chain.** Rungs vary who holds the gates — never what the gates are. A feature that weakens a gate at one rung breaks the promise at every rung.
+3. **One seat holds authority and accountability.** PM decides and PM answers. Every acceptance is recorded with reasoning and evidence; nothing is accepted by default, by timeout, or by unexamined narration.
 
-4. **Design for the weakest model in the loop.** The system must remain safe and usable when its models are slow, inconsistent, or evasive. Structure substitutes for capability: semantic contracts instead of composed commands, embedded instructions instead of assumed knowledge, actionable rejection feedback instead of silent failure, bounded repair instead of one-shot acceptance. This is what makes the cost and privacy stories real.
+4. **Proportionality.** Small, low-risk changes carry light process; consequential changes carry independent review and human decisions. The plan declares risk; PM may only raise it.
 
-5. **Atomic usefulness is non-negotiable.** Each skill stands alone, infrastructure-free, in any harness. Composition adds value through shared contract shapes, never through hidden coupling.
+5. **Fail closed where it counts.** Integrity breaches, floor violations, approval gates, and credential/billing/destructive/external-side-effect conditions stop the run. Operational ambiguity and evidence-format imperfection are for PM to resolve on the record.
 
-6. **One source of truth per contract.** Every template, role definition, and harness-enforcement fact lives in exactly one place; everything else points at it. Duplicated guidance is treated as a defect even when the copies currently agree.
+6. **Bounded persistence.** Fixable gaps earn steered retries under a finite per-slice budget, re-assessed at full rigour. The floor is never waivable; a judgement-level tolerance is always recorded.
 
-7. **Fail closed; repair bounded; never relax a gate.** Unclear evidence stops the run. Fixable gaps earn a budgeted, in-session repair that is re-verified at full rigor. Integrity breaches — evidence that reality and the record disagree — are never steered, only stopped.
+7. **Atomic usefulness is non-negotiable.** Each skill stands alone, infrastructure-free, in any harness. Composition adds value through shared contract shapes, never hidden coupling.
 
-8. **An honest threat model, stated where it matters.** The system defends against corner-cutting, drift, and overconfidence — not against a determined adversary fabricating coherent evidence. Where a stop condition is heuristic or a boundary is prompt-shaped, the documentation attributes the real guarantee to the correct layer, and plan-level controls are presented as the compensating control they actually are.
+8. **One source of truth per contract.** Every template, role definition, and enforcement fact lives in exactly one place. Duplicated guidance is a defect even when the copies agree.
+
+9. **Minimise the whole system.** Complexity is measured across code, prompts, schemas, state, artifacts, commands, documentation, and model interactions together. Moving complexity between layers is not simplification. No mechanism exists for a hypothetical future need.
+
+10. **An honest threat model, stated where it matters.** The system defends against corner-cutting, drift, and overconfidence — not against a determined adversary fabricating coherent evidence. Where protection is heuristic, prompt-shaped, or judgement-based, the documentation attributes the real guarantee to the correct layer.
+
+## What the Repository Guarantees — and What It No Longer Claims
+
+**Still guaranteed mechanically, at Rung 2:** no slice is accepted whose final Git-visible worktree state changes files outside its frozen authorized surface; no acceptance without a commit that descends from the slice start on the intended, re-validated branch with a clean worktree; no run continues past a mid-run plan edit; no approval-gated slice proceeds without a recorded human approval; a mandatory independent review is valid only against the exact final commit it reviewed; durable per-slice evidence and a durable, reasoned acceptance record for every slice. These guarantees bind the supervisor's toolkit and are protected against a corner-cutting implementing agent by a run capability withheld from its sessions and by authenticated state writes — not by an OS boundary. A same-user process determined enough to steal the capability or subvert the supervisor itself is outside the threat model, and ignored files, Git metadata, and effects reverted before acceptance are outside the floor's vision; both residuals are documented where operators will read them.
+
+**Claimed as accountable judgement, not mechanism:** quality of accepted work; sufficiency of validation and review evidence; materiality of deviations; operational recovery decisions; the decision that independent review was or wasn't warranted on a standard slice.
+
+**No longer claimed at all:** deterministic acceptance of semantic gates; mechanical proof that an independent audit process ran; mechanical preservation of every prior finding's wording; protection against a supervisor model that is itself unreliable — the PM seat is trusted, calibrated by the operator's choice of model, and that trust is this system's honestly stated foundation.
 
 ## Non-Goals
 
-- **Not a planner-free autopilot.** Nothing in this system invents or repairs plans on the fly. Plan quality is the ceiling on everything above it, and keeping planning human-approved is a feature.
-- **Not a sandbox or container system.** Isolation, when needed, is the environment's job. The system's containment is contractual and evidential, not OS-level.
-- **Not adversary-proof.** The mechanical floor — recomputed file authorization, commit ancestry, clean-worktree checks — is chosen to cover the highest-harm failure shapes, and the residual gap is documented rather than papered over.
-- **Not tied to any vendor, harness, or model.** Harnesses are pluggable adapters and every supported tool is eligible for either agent role. Tool/model suitability belongs to the user, plan, or launcher; the repository documents factual enforcement differences without turning vendor names into rankings or role policy.
+- **Not a planner-free autopilot.** Nothing here invents or repairs plans on the fly. Plan quality is the ceiling on everything above it, and keeping planning human-approved is a feature.
+- **Not a sandbox or container system.** Isolation, when needed, is the environment's job. Containment here is contractual and evidential, not OS-level.
+- **Not adversary-proof.** The floor covers the highest-harm failure shapes; the residual gap is documented, not papered over.
+- **Not tied to any vendor, harness, or model.** Harnesses are pluggable; every supported tool is eligible for any seat; factual enforcement differences are documented without becoming rankings.
+- **Not a maximal-assurance system.** Where near-total assurance per change matters more than throughput, use Rungs 0–1 with a human at every gate. Rung 2 is calibrated for high practical reliability at reasonable cost, and says so.
 
 ## Stability Note
 
-Mode letters, skill names, command interfaces, and supported harnesses are implementation vocabulary and may evolve. The commitments — contracts before code, authorization before quality, evidence over narration, graduated autonomy over a constant chain — are the identity of this repository. Revise this document deliberately or not at all.
+Mode letters, skill names, command interfaces, and supported harnesses are implementation vocabulary and may evolve. The commitments — contracts before code, a mechanical floor with accountable judgement above it, evidence informing every decision, proportionality, honesty about where guarantees come from — are the identity of this repository. Revise this document deliberately or not at all.

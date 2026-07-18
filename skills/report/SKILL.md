@@ -17,7 +17,7 @@ Prefer the more specific skill whenever one applies:
 - Use `drift-audit` for authorization gates.
 - Use `code-review` for quality findings and review verdicts.
 - Use `handoff` when the goal is to preserve continuation state for another chat or agent.
-- Use `project-manager` summaries and artifacts for PM run status.
+- Use `project-manager`'s `run-report.md` and per-slice assessments for PM run status.
 - Use `commit` for commit messages and staging discipline.
 
 `report` may summarize outputs from those skills after they have done their jobs, but it must not redefine their contracts or invent replacement sections.

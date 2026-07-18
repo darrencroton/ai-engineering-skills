@@ -11,7 +11,7 @@ The orchestrator is the workflow, not a person or model tier.
 
 There are no senior/junior Reviewer variants and no harness ranking. Every supported tool is eligible for either role. Harness profiles describe command mechanics and the factual strength of read-only enforcement; they do not decide suitability.
 
-Reviewer self-audit fallback is allowed on default slices and must be reported as `developer-self-audit`. It is forbidden when a plan says `Independent audit required: yes`.
+Developer self-audit fallback is allowed on default slices when no Reviewer is configured or available; the final report must identify any self-performed audit and its fallback context. A plan that asks for independent review (`Independent audit required: yes`) deserves separate Reviewer launches for `drift-audit` and `code-review`; if a Reviewer cannot be launched for such a slice, stop and report rather than self-audit.
 
 ## Package layout
 

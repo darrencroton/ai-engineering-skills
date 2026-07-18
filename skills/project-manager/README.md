@@ -27,12 +27,12 @@ All commands: `python3 skills/project-manager/scripts/pm.py <command> …`, run 
 | `review --slice ID --skill drift-audit\|code-review [--tool T] [--model M] [--effort E]` | commission an independent review pinned to `before_head..HEAD` |
 | `stop --reason R [--slice-status stopped] [--scavenge]` | end the run preserving evidence; `--scavenge` sweeps sessions even with state destroyed |
 
-Exit codes: 0 success; 1 = `finalize` ran and a floor fact failed; 2 = error/refusal (integrity failures are prefixed `INTEGRITY:` and are terminal — start a new run).
+Exit codes: 0 success; 1 = a `finalize` refusal — a floor fact failed, or `--accept` was refused for another recorded reason (e.g. a missing or stale mandatory review on an elevated slice); 2 = error/refusal (integrity failures are prefixed `INTEGRITY:` and are terminal — start a new run).
 
 ## Layout: who owns what
 
 - **`<git-dir>/pm/<run-id>/`** — authoritative state and every PM-authored original (assessments, reviews, notes, report). Outside the worktree; HMAC-authenticated; see [references/run-state.md](references/run-state.md).
-- **`<repo>/.pm/runs/<run-id>/`** — the human-facing mirror of PM artifacts plus Developer-authored evidence (`result.json`, `validation.md`, pane captures, diffs, prompts). Self-ignoring via `.pm/.gitignore`. Vandalizing `.pm/` damages the mirror and the Developer's own evidence, never PM's records or decisions; nothing here is ever read back for control.
+- **`<repo>/.pm/runs/<run-id>/`** — the human-facing mirror of PM artifacts plus Developer-authored evidence (`result.json`, `validation.md`, pane captures, diffs, prompts). Self-ignoring via `.pm/.gitignore`. The boundary, precisely: PM's records and decisions live in the controller originals and are never read back from this mirror — but Developer-authored evidence here (`result.json`, `validation.md`) *is* input to the floor and to PM's assessment. Vandalizing it damages the Developer's own case and fails the slice closed (floor fact 4); it can never forge an acceptance or alter PM state.
 - Per slice: `prompt.md` (the rendered authorization), `pane-live.txt`/`pane.txt`, `status-before/after.txt`, `diff.patch`, `validation.md`, `result.json`, `attempt-<n>/` for superseded launches, `assessment.md` + `review-*.md` mirrors.
 
 ## Trust model, honestly
@@ -91,7 +91,7 @@ echo "fake developer starting"; sleep 3
 echo hello > hello.txt && git add hello.txt
 git -c user.name=dev -c user.email=dev@local commit -q -m "Slice 1: hello file"
 echo "ran: cat hello.txt -> $(cat hello.txt)" > "$PM_SLICE_ARTIFACT_DIR/validation.md"
-printf '{"slice":"%s","status":"done","summary":"created hello.txt"}\n' "$PM_SLICE_ID" > "$PM_RESULT_PATH"
+printf '{"slice":"%s","status":"done","summary":"created hello.txt","notes":"trial run; nothing to carry forward"}\n' "$PM_SLICE_ID" > "$PM_RESULT_PATH"
 cat -
 FAKE
 PM=<path-to>/skills/project-manager/scripts/pm.py

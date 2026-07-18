@@ -40,9 +40,9 @@ In your coding assistant: *"Use the code-review skill on the diff on this branch
 - Chat 2: paste the launcher into a fresh session. The agent implements one slice, audits its own authorization, reviews quality, and asks you before committing. Repeat per slice.
 - Both launchers (checkpointed and autonomous): [`skills/implementation-plan/SKILL.md`](skills/implementation-plan/SKILL.md) → "Next Chat Prompt Format".
 
-**3. Mode B — Supervised autonomy (Project Manager).** The gatekeeper moves outside the implementing agent. PM keeps durable run state, sanity-checks the whole plan before starting, launches a fresh session per slice (the context reset that makes long plans tractable), verifies gates from git and artifact evidence, steers bounded repairs, and stops for a human on anything outside policy. Supervision is a dial, not a fork: by default a supervising model stays in the loop for operational judgment (usage resets, stalls, transient interruptions); if you can't or don't want to provide one, PM's fail-closed batch style runs unattended and stops at the first ambiguity.
+**3. Mode B — Supervised autonomy (Project Manager).** The gatekeeper moves outside the implementing agent. PM is an accountable supervising agent backed by a deterministic toolkit: the toolkit owns durable run state, fresh tmux-backed sessions (one per slice — the context reset that makes long plans tractable), artifact capture, and an eight-fact mechanical floor (frozen surface, commit ancestry, clean worktree, plan digest, recorded approvals, and more); the PM agent owns everything semantic — it assesses each completed slice from the diff, commit, and validation evidence, records its reasoning in a durable assessment, commissions independent drift-audit and code-review sessions where risk warrants, steers bounded corrections, and stops for a human on anything the plan or the floor reserves for one. The PM seat is a model you choose — a local model can hold it — and its recorded judgement is the accountability layer above the floor.
 
-- Verify your machine once with the tmux-backed trial in [`skills/project-manager/README.md`](skills/project-manager/README.md) → "Verify Your Setup".
+- Verify your machine once with the tmux-backed trial in [`skills/project-manager/README.md`](skills/project-manager/README.md) → "Verify your setup".
 - Sanity-check the plan: `python3 skills/project-manager/scripts/pm.py check-plan --plan <plan.md>` (also runs automatically at `init` — a defective plan stops before any harness launches).
 - Start the run with the Mode B launcher in [`skills/project-manager/SKILL.md`](skills/project-manager/SKILL.md) → "Launcher".
 
@@ -52,7 +52,7 @@ Choosing a rung is about the task, not your skill level:
 |---|---|
 | One-off review, audit, commit, or handoff | Call the skill directly |
 | Risky or unfamiliar surfaces; you want a checkpoint between slices | Mode A — checkpointed |
-| Straightforward plan, strong models, fits in one session, no third model available to supervise | Mode A — autonomous usage |
+| Straightforward plan, strong models, fits in one session | Mode A — autonomous usage |
 | Long plan, unattended time, weaker/cheaper/local models, or you want external verification and a durable audit trail | Mode B — Project Manager |
 
 ## Skills
@@ -62,7 +62,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | Skill | What it does |
 |-------|-------------|
 | [`implementation-plan`](skills/implementation-plan/) | Breaks a request into auditable slices with frozen contracts: acceptance criteria, authorized surface, validation, risk flags, and a copyable launcher for the next chat. |
-| [`project-manager`](skills/project-manager/) | Supervises execution of an existing plan one slice at a time: durable run state, whole-plan sanity check, fresh tmux-backed session per slice, evidence-based gates, bounded repair loop. |
+| [`project-manager`](skills/project-manager/) | Supervises execution of an existing plan one slice at a time: durable run state, whole-plan sanity check, fresh tmux-backed session per slice, an eight-fact mechanical floor, recorded PM assessments, commissioned independent reviews. |
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope; prepares the receipt for drift audit. |
 | [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Runs before any quality review. |
 | [`code-review`](skills/code-review/) | Senior-level quality review after drift audit passes: correctness, edge cases, tests, error handling, domain-specific risks. |
@@ -84,13 +84,15 @@ The default flow for feature or bug work, at every rung:
 4. **Review quality** — `code-review` after the authorization gate passes.
 5. **Simplify** (optional) — `code-simplifier` as a separate pass over working code.
 6. **Hand off** (if needed) — `handoff` before ending an unfinished session.
-7. **Commit** — `commit`, only with explicit approval (yours in checkpointed Mode A; the plan's standing authorization in autonomous Mode A and Mode B after all gates pass).
+7. **Commit** — `commit`, only with explicit approval (yours in checkpointed Mode A; the plan's standing authorization in autonomous Mode A; in Mode B the Developer commits per slice and PM's recorded acceptance above a passing floor is what lets the run advance).
+
+One deliberate ordering difference: in Mode B the slice commit comes *before* the reviews — the Developer commits, then PM runs the floor and commissions `drift-audit`/`code-review` against the committed diff before deciding acceptance. The per-slice commit is what makes the reviewed state exact and any mistake one revert away.
 
 Each launcher template lives in exactly one place: both Mode A launchers (checkpointed and autonomous) in `implementation-plan`'s SKILL.md, the Mode B launcher in `project-manager`'s SKILL.md, and the handoff resume prompt derives from the checkpointed Mode A launcher as described in `handoff`'s SKILL.md. Generated plans end with the right launcher already filled in.
 
 ## Privacy and Data Flows
 
-Everything the system produces — run state, artifacts, transcripts, Reviewer evidence — stays on your machine, and local/self-hosted models are first-class citizens at every rung. What leaves the machine is determined entirely by which models you place in which seats; the per-mode breakdown, the fully-local configurations, and the artifact sensitivity map are in [`skills/project-manager/README.md`](skills/project-manager/README.md) → "Privacy and Data Flows".
+Everything the system produces — run state, artifacts, transcripts, Reviewer evidence — stays on your machine, and local/self-hosted models are first-class citizens at every rung. What leaves the machine is determined entirely by which models you place in which seats; the artifact sensitivity map is in [`skills/project-manager/README.md`](skills/project-manager/README.md) → "Privacy & sensitive artifacts".
 
 ## Glossary
 
@@ -103,10 +105,10 @@ Everything the system produces — run state, artifacts, transcripts, Reviewer e
 - **Orchestrator** — the skill and workflow that coordinates Developer execution with optional read-only Reviewer evidence.
 - **Developer** — the context-rich agent that owns implementation, validation, session management, gates, commits, and delivery. Under PM it is the supervised per-slice session and has no authority above PM.
 - **Reviewer** — a read-only helper for investigation, evidence gathering, drift audit, and code review. It owns no gates, never mutates the repository, never commits, and never re-delegates.
-- **Supervising model** — in Mode B, the model that drives PM's commands and handles operational judgment; it never decides acceptance.
-- **Project Manager (PM)** — the deterministic supervisor: run state, gates, repair loop, stop authority.
-- **Repair loop** — PM's bounded self-correction: a fixable gate failure is steered back into the live session and re-verified at full rigor; budgets and a circuit breaker cap it.
-- **Run state** — durable JSON plus per-slice artifacts under `.ai-pm/` in the target repo; the audit trail.
+- **PM seat** — in Mode B, the model that drives Project Manager's commands and judgement; every acceptance is its recorded, accountable decision.
+- **Project Manager (PM)** — the accountable supervisor: a deterministic toolkit owns state, sessions, and the mechanical floor; the PM agent owns assessment, review depth, steering, and stop decisions.
+- **Floor** — the eight mechanical, non-waivable facts checked at finalize (frozen surface, commit ancestry, clean worktree, plan digest, approvals, result identity, hard-stop scan); any failure blocks acceptance.
+- **Run state** — authenticated state and PM-authored originals under the repo's git directory, mirrored with per-slice artifacts under `.pm/` in the target repo; the audit trail.
 
 ## License
 

@@ -15,23 +15,24 @@ Each contract lives in exactly one place; everything else points at it. Before e
 | Why the repo exists, principles, personas, autonomy ladder | `docs/VISION.md` |
 | Human-facing skill index, quickstart, glossary | `README.md` (top level) |
 | Mode A launchers (checkpointed default and autonomous alternate usage) | `skills/implementation-plan/SKILL.md` → "Next Chat Prompt Format" |
-| Mode B launcher and PM operating path | `skills/project-manager/SKILL.md` → "Launcher", "Default Operating Path" |
+| Mode B launcher and PM operating contract | `skills/project-manager/SKILL.md` → "Launcher", "Workflow" |
 | Handoff resume prompt | Derived from the checkpointed Mode A launcher per `skills/handoff/SKILL.md` — never restated |
 | Plan format and machine-consumed fields | `skills/implementation-plan/SKILL.md` |
-| PM trust boundary and safety rules | `skills/project-manager/SKILL.md` → "Safety Rules" |
-| Run-state schema | `skills/project-manager/references/run-state-schema.md` |
-| Developer and repair prompt contracts | `skills/project-manager/references/developer-prompt.md` |
-| Harness adapter/profile contract | `skills/project-manager/references/harness-adapter-contract.md` |
+| PM charter, floor facts, and always-stop rules | `skills/project-manager/SKILL.md` → "Charter", "The floor", "Always stop" |
+| PM trust model and known limits | `skills/project-manager/README.md` → "Trust model, honestly" |
+| Run-state layout and authority model | `skills/project-manager/references/run-state.md` |
+| Developer and Reviewer prompt contracts | `skills/project-manager/references/developer-prompt.md`, `…/reviewer-prompt.md` |
+| Harness profile table | `skills/project-manager/scripts/pm_lib/profiles.py` |
 | Reviewer request contract and read-only semantics | `skills/orchestrator/references/reviewer-contract.md` |
 | Per-harness CLI capabilities | `skills/orchestrator/references/<harness>.md` |
-| Privacy and data flows, artifact sensitivity | `skills/project-manager/README.md` → "Privacy and Data Flows" |
-| Maintainer guides | `skills/orchestrator/AGENTS.md`, `skills/project-manager/AGENTS.md` |
+| Privacy and artifact sensitivity | `skills/project-manager/README.md` → "Privacy & sensitive artifacts" |
+| Maintainer guides | `skills/orchestrator/AGENTS.md`; `skills/project-manager/README.md` → "Maintainer map" |
 
 Each skill's `SKILL.md` is the source of truth for its own triggers, workflow, and output format; the top-level README only indexes them.
 
 ## Tests
 
-- Project Manager: `python3 -m unittest discover -s skills/project-manager/tests -p 'test_*.py'`. Tests needing `tmux` self-skip when it is absent; no test needs a real coding CLI (runtime tests inject fake harnesses). Themed modules and what belongs where: see `skills/project-manager/AGENTS.md` → "Test Matrix".
+- Project Manager: `python3 -m unittest discover -s skills/project-manager/tests -p 'test_*.py'`. Tests needing `tmux` self-skip when it is absent; no test needs a real coding CLI (runtime tests inject fake harnesses). Module layout: `skills/project-manager/README.md` → "Maintainer map".
 - Orchestrator: `python3 -m unittest discover -s skills/orchestrator/tests -p 'test_*.py'`.
 - CI runs both suites plus compile checks on every push and pull request using the minimum supported PM runtime, Python 3.13. Keep them green; never weaken a failing test to make it pass — a failing test is evidence of a real problem.
 - New behavior lands with a regression test pinned beside it. Keep tests boundary-focused rather than permutation-heavy.

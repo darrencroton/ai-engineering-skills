@@ -1,6 +1,6 @@
 # Run State Reference (`lite-1`)
 
-Authoritative run state is a **single copy outside the worktree**: `<worktree-git-dir>/pm/<run-id>/` (found via `git rev-parse --absolute-git-dir`, so each linked worktree gets its own state). `<worktree-git-dir>/pm/current` names the active run; every command defaults to it and accepts `--run <id>`.
+Authoritative run state is a **single copy outside the worktree**: `<worktree-git-dir>/pm/<run-id>/` (found via `git rev-parse --absolute-git-dir`, so each linked worktree gets its own state). `<worktree-git-dir>/pm/current` names the active run; every run-scoped command (all except `check-plan` and `init`) defaults to it and accepts `--run <id>`.
 
 ## Files in a run directory
 
@@ -16,7 +16,7 @@ Authoritative run state is a **single copy outside the worktree**: `<worktree-gi
 
 ## Authority model
 
-`init` mints a random capability token, prints it once, and stores only its SHA-256 in `auth.token_sha256`. Every mutating command (`approve`, `start-slice`, `send`, `finalize`, `review`, `stop`) requires the token (`--token` or `PM_RUN_TOKEN` in the *controller's* environment — never a session's). Every state write is HMAC-signed with the token; every token-bearing read verifies. A `run.json` edited by anything not holding the token fails verification: an **integrity stop**, terminal by construction — the toolkit never re-signs unauthenticated bytes, so every later mutating command keeps failing closed and the tampered file survives as evidence. A *wrong* token is a plain error, not an integrity stop. Read-only commands (`status`, `observe`, `check-plan`) load without verification — treat their output as unverified when you have no token in the environment.
+`init` mints a random capability token, prints it once, and stores only its SHA-256 in `auth.token_sha256`. Every mutating command (`approve`, `start-slice`, `send`, `finalize`, `review`, `stop`) requires the token (`--token` or `PM_RUN_TOKEN` in the *controller's* environment — never a session's). Every state write is HMAC-signed with the token; every token-bearing read verifies. A `run.json` edited by anything not holding the token fails verification: an **integrity stop**, terminal by construction — the toolkit never re-signs unauthenticated bytes, so every later mutating command keeps failing closed and the tampered file survives as evidence. A *wrong* token is a plain error, not an integrity stop. One deliberate exception: `stop --scavenge` still sweeps `pm-*` tmux sessions when state is missing or unverifiable — it is cleanup of local processes, not a state write. Read-only commands (`status`, `observe`, `check-plan`) load without verification — treat their output as unverified when you have no token in the environment.
 
 Writes are atomic (temp file + rename) under an advisory `fcntl` lock (`.lock`); a held lock is reported after ~5 s and never stolen.
 
@@ -60,6 +60,6 @@ Validation is tolerant: only the fields PM reads are checked; unknown extras pas
 - **Risk:** `plan_risk` is derived mechanically at parse time (approval `yes`, independent-audit `yes`, or risky-surfaces ≠ exact `none` ⇒ `elevated`) and never changes. `risk` starts equal and may only be **raised** (`--risk elevated` on `start-slice`/`finalize`); elevated slices cannot be accepted without both a fresh `drift-audit` and `code-review` review pinned to the exact final HEAD.
 - **Attempts:** 0 on the initial launch; +1 per relaunch (`start-slice` again) and per steer (`finalize --steer`); pure observation and `send` nudges are free. `attempts > policy.max_attempts` forces a stop. Persisted in the slice entry, so budgets survive process restarts.
 - **Review freshness:** each review records the HEAD it reviewed and the report's sha256. Any tree change after a mandatory review invalidates it for acceptance; re-commission against the new HEAD.
-- **`wake_at`:** a persisted resume time for whoever continues the run (PM agent or human). The toolkit records and displays it but has no scheduler — multi-hour autonomous recovery depends on the PM harness's own scheduling, a declared dependency.
+- **`wake_at`:** a reserved slot for a persisted resume time for whoever continues the run (PM agent or human). The toolkit initializes it and carries it in state; it has no setter command and no scheduler — multi-hour autonomous recovery depends on the PM harness's own scheduling, a declared dependency.
 - **Recovery:** `run.json` + the artifact dir + git are sufficient. `status` reconstructs the situation and checks session liveness. With state deleted or unreadable, `stop --scavenge` still sweeps `pm-<run-id>-*` (or all `pm-*`) tmux sessions.
 - **Superseded attempts** live in `attempt-<n>/` subdirectories of the slice's `.pm/` artifact dir and in the event log — never as state rows.

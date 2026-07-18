@@ -42,3 +42,64 @@ jobs:
 
       - name: Orchestrator tests
         run: python3 -m unittest discover -s skills/orchestrator/tests -p 'test_*.py'
+
+      # Blueprint §6 no-baggage checks: retired Mode B vocabulary (ledger §8),
+      # the retired failure-signature taxonomy, and retired path/env tokens
+      # must not reappear in active files (tests included — this doubles as
+      # the §6.5 fixture sweep). Historical files are exempt. Of the 19 retired
+      # signature strings, "validation"/"drift"/"review" are ordinary words and
+      # cannot be grepped as bare tokens; the 16 distinctive ones are enforced.
+      # The §6.3 import-graph check lives in the PM test suite; §6.4 doc
+      # reachability is the step below the greps.
+      # Each pattern must find nothing (git grep exit 1). Exit 0 (a match) and
+      # exit >1 (a broken pattern/pathspec/invocation) both fail the step —
+      # a bare `! git grep` would silently convert fatal errors into a pass.
+      # Retired PM-side path tokens are banned everywhere active, including
+      # the orchestrator; the orchestrator's own policy-file and artifact-root
+      # names are permitted only inside skills/orchestrator (blueprint §6.2).
+      - name: No-baggage greps (terminology, signatures, retired paths)
+        run: |
+          check() {
+            local pattern="$1"; shift
+            local out status
+            set +e
+            out=$(git grep -nE "$pattern" -- "$@")
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              printf '%s\n' "$out"
+              echo "banned tokens found for pattern: $pattern"
+              return 1
+            elif [ "$status" -ne 1 ]; then
+              echo "git grep failed with status $status for pattern: $pattern"
+              return 1
+            fi
+          }
+          HIST=(':!CHANGELOG.md' ':!pm-test' ':!docs/mode-b-lite' ':!archive' ':!.github/workflows/ci.yml')
+          check "deterministic-batch|model-supervised|repair round|circuit breaker|operational_round|session_generation|reserved_skill_sets|PM_AUDIT_VERDICT|audit_provenance|developer-self-audit|prior-slice-context|residual_findings|continuation_notes|assumed-complete|\.ai-pm|schema_version[\"']?[[:space:]]*:[[:space:]]*[\"']?5|pm-reconciliation|stop-with-evidence|run-next|allow-unattended-default|assume-complete" "${HIST[@]}"
+          check "reviewer-evidence|unauthorized-files|changed-files-mismatch|result-malformed|residual-ledger-mismatch|commit-missing|dirty-worktree|developer-repairable|context-budget|transient-service-unavailable|idle-no-progress|ledger-retention|integrity-head|slice-id-mismatch|reviewer-unavailable|prior-context-integrity" "${HIST[@]}"
+          check "\.ai-pm|pm-slice-contract|PM_REVIEWER_" "${HIST[@]}"
+          check "reviewer-policy|ORCHESTRATOR_ARTIFACT_ROOT" "${HIST[@]}" ':!skills/orchestrator'
+          echo "all no-baggage greps clean"
+
+      - name: Doc-link reachability (root README and CONTRIBUTING)
+        run: |
+          python3 - <<'EOF'
+          import os, re, sys
+          bad = []
+          for f in ("README.md", "CONTRIBUTING.md"):
+              text = open(f).read()
+              for m in re.finditer(r'\[[^\]]*\]\(([^)#]+)(#[^)]*)?\)', text):
+                  target = m.group(1).strip()
+                  if target.startswith(("http://", "https://", "mailto:")):
+                      continue
+                  if not os.path.exists(target):
+                      bad.append((f, target))
+              for m in re.finditer(r'`((?:docs|skills)/[A-Za-z0-9_./-]+\.(?:md|py))`', text):
+                  if not os.path.exists(m.group(1)):
+                      bad.append((f, m.group(1)))
+          if bad:
+              print("broken doc links:", bad)
+              sys.exit(1)
+          print("all doc links resolve")
+          EOF

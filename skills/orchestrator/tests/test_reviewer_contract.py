@@ -122,23 +122,6 @@ class ReviewerContractTests(unittest.TestCase):
                 self.assertEqual(raised.exception.issues[0].code, "unknown-field")
                 self.assertEqual(raised.exception.issues[0].field, f"policy.{field}")
 
-    def test_policy_accepts_pm_binding_fields_with_or_without_them(self):
-        # Finding 15: PM always writes before_head/session_generation/
-        # repair_round to bind the policy digest to one slice attempt and
-        # repair round. A standalone hand-written policy may omit them —
-        # neither shape should be rejected as an unknown or missing field.
-        policy_with_binding_fields = dict(
-            self.policy,
-            before_head="a" * 40,
-            session_generation=2,
-            repair_round=1,
-        )
-        contract = reviewer_contract.validate_contract(policy_with_binding_fields, self.request, self.run_dir)
-        self.assertEqual(contract["role"], "reviewer")
-
-        contract_without = reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
-        self.assertEqual(contract_without["role"], "reviewer")
-
     def test_schema_v1_is_rejected_for_policy_and_request(self):
         for target in ("policy", "request"):
             policy = dict(self.policy)
@@ -250,34 +233,6 @@ class ReviewerContractTests(unittest.TestCase):
         self.assertIn("missing-input", codes)
         self.assertIn("path-outside-repo", codes)
 
-    def test_reserved_skill_sets_reject_mixed_and_accept_exact_request(self):
-        self.policy["reserved_skill_sets"] = [["drift-audit"], ["code-review"]]
-        self.request["required_skills"] = ["drift-audit", "code-review"]
-        with self.assertRaises(reviewer_contract.ReviewerContractError) as raised:
-            reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
-        self.assertIn("reserved-skill-mismatch", {issue.code for issue in raised.exception.issues})
-
-        self.request["required_skills"] = ["drift-audit"]
-        contract = reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
-        self.assertEqual(contract["required_skills"], ["drift-audit"])
-
-    def test_reserved_skill_sets_fail_closed_when_malformed(self):
-        malformed_values = (
-            [["drift-audit"], "code-review"],
-            [[]],
-            [["drift-audit", ""]],
-            [["drift-audit", 7]],
-        )
-        for value in malformed_values:
-            with self.subTest(value=value):
-                self.policy["reserved_skill_sets"] = value
-                with self.assertRaises(reviewer_contract.ReviewerContractError) as raised:
-                    reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
-                self.assertIn(
-                    "policy-reserved-skill-sets-malformed",
-                    {issue.code for issue in raised.exception.issues},
-                )
-
     def test_launch_records_schema_v2_normalized_evidence_and_artifacts(self):
         reviewer_jobs = load_reviewer_jobs()
         self.request["required_skills"] = ["drift-audit"]
@@ -324,24 +279,6 @@ class ReviewerContractTests(unittest.TestCase):
         bundle = reviewer_contract.compile_skill_bundle("orchestrator")
         self.assertIn("# Deterministic Reviewer Contract", bundle)
         self.assertIn("reviewer_jobs.py launch", bundle)
-
-    def test_audit_skill_prompt_and_verdict_extraction(self):
-        reviewer_jobs = load_reviewer_jobs()
-        self.request["required_skills"] = ["drift-audit"]
-        prompt = reviewer_contract.render_reviewer_prompt(
-            reviewer_contract.validate_contract(self.policy, self.request, self.run_dir)
-        )
-        self.assertIn("PM_AUDIT_VERDICT: PASS | PASS WITH RISKS | FAIL | BLOCKED", prompt)
-        self.assertEqual(
-            reviewer_jobs.audit_skill_verdicts(["code-review"], "report\nPM_AUDIT_VERDICT: PASS\n"),
-            {"code-review": "PASS"},
-        )
-        self.assertEqual(
-            reviewer_jobs.audit_skill_verdicts(
-                ["drift-audit"], "PM_AUDIT_VERDICT: FAIL\nPM_AUDIT_VERDICT: PASS\n"
-            ),
-            {"drift-audit": None},
-        )
 
     def test_reviewer_status_dead_wrapper_without_status_payload_is_failed(self):
         reviewer_jobs = load_reviewer_jobs()
@@ -414,13 +351,6 @@ class ReviewerContractTests(unittest.TestCase):
             reviewer_jobs.force_cancel_entry(entry)
 
         killpg.assert_not_called()
-        self.assertEqual(
-            reviewer_jobs.audit_skill_verdicts(
-                ["drift-audit"],
-                "PM_AUDIT_VERDICT: FAIL\nPM_AUDIT_VERDICT: PASS\n",
-            ),
-            {"drift-audit": None},
-        )
 
     def test_force_cancel_surfaces_permission_failure_without_claiming_cancelled(self):
         reviewer_jobs = load_reviewer_jobs()

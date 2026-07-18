@@ -101,8 +101,6 @@ Prefer an independent Reviewer for drift audit and code review. If no Reviewer i
 
 A slice marked `Independent audit required: yes` never permits self-audit. It requires separate validated Reviewer launches for `drift-audit` and `code-review`, in that order, with exact `PASS` verdict evidence.
 
-Under Project Manager, follow [references/pm-slice-contract.md](references/pm-slice-contract.md). PM validates process evidence and mutation gates; the Developer remains responsible for semantic sufficiency and the final gate decision.
-
 ## Reviewer Summary
 
 When Reviewers were used, summarize each tool briefly:

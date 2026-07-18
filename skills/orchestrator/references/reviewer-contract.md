@@ -28,18 +28,9 @@ Project Manager writes `reviewer-policy.json` for a slice. A standalone Develope
   "reviewer_artifact_root": "/absolute/path/to/slice/reviewer-runs",
   "required_tools": ["opencode"],
   "required_model": "provider/model",
-  "required_effort": "default",
-  "reserved_skill_sets": [],
-  "before_head": "<slice starting commit>",
-  "session_generation": 1,
-  "repair_round": 0,
-  "operational_round": 0
+  "required_effort": "default"
 }
 ```
-
-`reserved_skill_sets` is optional. When present, it is a list of exact allowed skill combinations, such as `[["drift-audit"], ["code-review"]]`. A malformed value fails closed. A request that mentions a reserved skill must exactly match one permitted combination.
-
-`before_head`, `session_generation`, `repair_round`, and `operational_round` are optional PM-binding fields: Project Manager always writes them so the policy digest binds to one slice attempt and repair round, so a Reviewer PASS from before a tree-changing repair cannot satisfy a later round's gate. `operational_round` advances separately from `repair_round` on idle-stall/transient-service repair rounds, which deliberately leave `repair_round` unchanged so they don't consume the substantive repair budget — without it, the digest would not change on those rounds and stale evidence could survive them. A standalone hand-written policy may omit all four.
 
 Schema v2 accepts only the documented policy fields. Retired Worker keys, role/access allow-lists, authorized write surfaces, and unknown extension fields are rejected.
 
@@ -93,8 +84,6 @@ python3 scripts/reviewer_jobs.py launch \
 
 Rejected requests create `<label>-request-feedback.{json,md}` and start no process. Correct the named fields and retry with the helper; never bypass validation with a raw harness command.
 
-Successful launches preserve the schema-v2 request, policy, rendered prompt, resolved command, normalized role/access, hashes, working directory, process status, stdout, and stderr. Required skills and linked Markdown resources must embed successfully before process creation.
-
-When `required_skills` contains `drift-audit` or `code-review`, the Reviewer must end with exactly one `PM_AUDIT_VERDICT: PASS | PASS WITH RISKS | FAIL | BLOCKED` line. Missing or duplicate sentinels record a null verdict.
+Successful launches preserve the schema-v2 request, policy, rendered prompt, resolved command, normalized role/access, hashes, working directory, process status, stdout, and stderr. Required skills and linked Markdown resources must embed successfully before process creation. The caller reads the Reviewer's report directly; the skill's own verdict vocabulary (for example `PASS WITH RISKS`) appears in the report body, not in any machine-captured sentinel.
 
 Default slices may fall back to a documented Developer self-audit. `Independent audit required: yes` requires separate validated Reviewer launches for drift audit and code review with exact `PASS` evidence.

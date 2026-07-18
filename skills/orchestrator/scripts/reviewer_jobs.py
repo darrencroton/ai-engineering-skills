@@ -59,10 +59,6 @@ INDEX_NAME = "index.json"
 INDEX_LOCK_NAME = ".index.lock"
 # Match line-based SECTION headers even when a model prefixes them with Markdown.
 SECTION_RE = re.compile(r"^\s*(?:#+\s*)?SECTION:\s*([A-Za-z0-9_ -]+)\s*$", re.MULTILINE)
-AUDIT_VERDICT_RE = re.compile(
-    r"^PM_AUDIT_VERDICT:\s*(PASS WITH RISKS|PASS|FAIL|BLOCKED)\s*$",
-    re.MULTILINE | re.IGNORECASE,
-)
 _LIBRARY_WRAPPERS: dict[int, subprocess.Popen[bytes]] = {}
 
 
@@ -571,16 +567,6 @@ def extract_best_text(entry: dict[str, Any]) -> str:
     return extract_best_result(entry)["text"]
 
 
-def audit_skill_verdicts(required_skills: list[str], text: str) -> dict[str, str | None]:
-    """Extract helper-owned semantic verdicts after the reviewer exits."""
-    audit_skills = [skill for skill in required_skills if skill in {"drift-audit", "code-review"}]
-    if not audit_skills:
-        return {}
-    matches = AUDIT_VERDICT_RE.findall(text)
-    verdict = matches[0].upper() if len(matches) == 1 else None
-    return {skill: verdict for skill in audit_skills}
-
-
 def command_init(args: argparse.Namespace) -> int:
     root = default_root()
     if args.root:
@@ -668,8 +654,6 @@ def start_tracked_reviewer(
             str(errfile),
             "--cwd",
             str(cwd),
-            "--required-skills-json",
-            json.dumps(list((launch_contract or {}).get("required_skills") or [])),
             "--",
             *command,
         ]
@@ -1144,14 +1128,6 @@ def command_runner(args: argparse.Namespace) -> int:
         )
         returncode = child.wait()
     child_identity = read_json(status_file).get("child_identity")
-    try:
-        required_skills = json.loads(args.required_skills_json)
-    except json.JSONDecodeError:
-        required_skills = []
-    if not isinstance(required_skills, list) or not all(isinstance(skill, str) for skill in required_skills):
-        required_skills = []
-    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace") if stdout_path.exists() else ""
-    skill_verdicts = audit_skill_verdicts(required_skills, stdout_text)
     final_state = "cancelled" if cancel_requested else ("completed" if returncode == 0 else "failed")
     write_json(
         status_file,
@@ -1164,7 +1140,6 @@ def command_runner(args: argparse.Namespace) -> int:
             "child_identity": child_identity,
             "cancel_requested": cancel_requested,
             "returncode": returncode,
-            "skill_verdicts": skill_verdicts,
             "cwd": str(Path(args.cwd).resolve()),
         },
     )
@@ -1259,7 +1234,6 @@ def build_parser() -> argparse.ArgumentParser:
     runner_parser.add_argument("--stdout", required=True)
     runner_parser.add_argument("--stderr", required=True)
     runner_parser.add_argument("--cwd", required=True)
-    runner_parser.add_argument("--required-skills-json", default="[]")
     runner_parser.add_argument("command", nargs=argparse.REMAINDER)
     runner_parser.set_defaults(func=command_runner)
 

@@ -1,6 +1,6 @@
 ---
 name: project-manager
-description: Supervise autonomous execution of a frozen implementation plan (Mode B): run one slice at a time in a fresh session, enforce the mechanical floor, assess every slice from repository evidence, commission independent review where risk warrants it, and stop for a human when the plan or the floor requires one.
+description: Supervise autonomous execution of a frozen implementation plan (Mode B) - run one slice at a time in a fresh session, enforce the mechanical floor, assess every slice from repository evidence, commission independent review where risk warrants it, and stop for a human when the plan or the floor requires one.
 ---
 
 # Project Manager (Mode B)

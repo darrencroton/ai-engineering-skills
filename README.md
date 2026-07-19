@@ -66,7 +66,7 @@ This README is the maintained human-facing skill index. Each skill's own `SKILL.
 | [`scoped-implementation`](skills/scoped-implementation/) | Implements one frozen slice without expanding scope; prepares the receipt for drift audit. |
 | [`drift-audit`](skills/drift-audit/) | Answers one question: was the implementation authorized? Runs before any quality review. |
 | [`code-review`](skills/code-review/) | Senior-level quality review after drift audit passes: correctness, edge cases, tests, error handling, domain-specific risks. |
-| [`orchestrator`](skills/orchestrator/) | Manages read-only Reviewer delegation through validated semantic contracts; the Developer retains implementation, verification, gates, commits, and final responsibility. |
+| [`orchestrator`](skills/orchestrator/) | Delegates bounded work to another harness through validated semantic contracts — read-only (investigation, drift-audit, code-review) or read-write (a bounded implementation task); the Developer retains verification, gates, commits, and final responsibility either way. |
 | [`code-simplifier`](skills/code-simplifier/) | Behaviour-preserving clarity pass over working code; a separate cleanup step, not part of the default chain. |
 | [`handoff`](skills/handoff/) | Compact continuation state for the next session: status, blockers, frozen contract, exact next action. |
 | [`commit`](skills/commit/) | Disciplined commits: stage by name, never skip hooks, message lists every file with reasons. |
@@ -102,8 +102,9 @@ Everything the system produces — run state, artifacts, transcripts, Reviewer e
 - **Drift audit** — the authorization gate: compares actual changes against the frozen contract, before any quality judgment.
 - **Gate** — a check that must pass before work advances. In Mode A these are the in-session chain steps (validation, drift audit, code review, commit evidence); in Mode B there are exactly three: the mechanical floor, PM assessment, and human approval.
 - **Harness** — a coding-agent CLI (Codex CLI, Claude Code, OpenCode, Copilot CLI, …) that PM or you run a session in.
-- **Orchestrator** — the skill and workflow that coordinates Developer execution with optional read-only Reviewer evidence.
+- **Orchestrator** — the standalone skill and workflow that lets a Developer delegate bounded work to another harness, in either access mode below.
 - **Developer** — the context-rich agent that owns implementation, validation, session management, gates, commits, and delivery. Under PM it is the supervised per-slice session and has no authority above PM.
+- **Delegate** — orchestrator's term for a harness session the Developer launches: **read-only** (a synonym for Reviewer below — investigation, evidence gathering, drift audit, code review) or **read-write** (a bounded implementer confined to an explicit authorized surface). Neither ever commits, mutates Git/GitHub state, or re-delegates; the Developer reviews and accepts its output either way.
 - **Reviewer** — a read-only helper for investigation, evidence gathering, drift audit, and code review. It owns no gates, never mutates the repository, never commits, and never re-delegates.
 - **PM seat** — in Mode B, the model that drives Project Manager's commands and judgement; every acceptance is its recorded, accountable decision.
 - **Project Manager (PM)** — the accountable supervisor: a deterministic toolkit owns state, sessions, and the mechanical floor; the PM agent owns assessment, review depth, steering, and stop decisions.

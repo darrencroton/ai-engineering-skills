@@ -10,10 +10,10 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
-import reviewer_sessions
+import delegate_sessions
 
 
-class ReviewerSessionTests(unittest.TestCase):
+class DelegateSessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
@@ -55,8 +55,8 @@ class ReviewerSessionTests(unittest.TestCase):
             ],
         )
 
-        claude = reviewer_sessions.session_activity("claude", claude_path)
-        codex = reviewer_sessions.session_activity("codex", codex_path)
+        claude = delegate_sessions.session_activity("claude", claude_path)
+        codex = delegate_sessions.session_activity("codex", codex_path)
 
         common_keys = {
             "session_path",
@@ -83,8 +83,8 @@ class ReviewerSessionTests(unittest.TestCase):
 
     def test_unknown_tool_has_no_session_fallback(self):
         path = self.write_rows("unknown.jsonl", [])
-        self.assertEqual(reviewer_sessions.session_activity("other", path), {})
-        self.assertIsNone(reviewer_sessions.extract_session_text("other", path))
+        self.assertEqual(delegate_sessions.session_activity("other", path), {})
+        self.assertIsNone(delegate_sessions.extract_session_text("other", path))
 
     def test_claude_activity_tracks_bare_assistant_row(self):
         path = self.write_rows(
@@ -92,7 +92,7 @@ class ReviewerSessionTests(unittest.TestCase):
             [{"type": "assistant", "timestamp": "2026-07-13T00:00:00Z", "message": {}}],
         )
 
-        activity = reviewer_sessions.session_activity("claude", path)
+        activity = delegate_sessions.session_activity("claude", path)
 
         self.assertEqual(activity["last_event_type"], "assistant")
         self.assertEqual(activity["last_assistant_type"], "assistant")
@@ -128,8 +128,8 @@ class ReviewerSessionTests(unittest.TestCase):
             ],
         )
 
-        self.assertEqual(reviewer_sessions.extract_session_text("claude", claude_path), "latest Claude")
-        self.assertEqual(reviewer_sessions.extract_session_text("codex", codex_path), "latest Codex")
+        self.assertEqual(delegate_sessions.extract_session_text("claude", claude_path), "latest Claude")
+        self.assertEqual(delegate_sessions.extract_session_text("codex", codex_path), "latest Codex")
 
 
 if __name__ == "__main__":

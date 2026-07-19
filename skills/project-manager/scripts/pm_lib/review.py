@@ -5,7 +5,7 @@ pinned diff (target-design §3.3/§5/§10, implementation-blueprint.md §4).
 launch path conceptually, but not its code: reviews run one-shot/exec where
 the tool supports it (never the Developer's interactive tmux TUI path), so
 this module composes its own command table — re-specified fresh from
-`skills/orchestrator/scripts/reviewer_contract.py`'s `compose_reviewer_command`
+`skills/orchestrator/scripts/delegate_contract.py`'s `compose_delegate_command`
 as behavioural evidence only (ledger §9.4). This module shares no code with
 `skills/orchestrator/` and never imports from it.
 

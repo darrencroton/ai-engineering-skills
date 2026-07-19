@@ -23,10 +23,10 @@ Each contract lives in exactly one place; everything else points at it. Before e
 | Run-state layout and authority model | `skills/project-manager/references/run-state.md` |
 | Developer and Reviewer prompt contracts | `skills/project-manager/references/developer-prompt.md`, `…/reviewer-prompt.md` |
 | Harness profile table | `skills/project-manager/scripts/pm_lib/profiles.py` |
-| Reviewer request contract and read-only semantics | `skills/orchestrator/references/reviewer-contract.md` |
+| Delegate request contract and access-mode semantics | `skills/orchestrator/references/delegate-contract.md` |
 | Per-harness CLI capabilities | `skills/orchestrator/references/<harness>.md` |
 | Privacy and artifact sensitivity | `skills/project-manager/README.md` → "Privacy & sensitive artifacts" |
-| Maintainer guides | `skills/orchestrator/AGENTS.md`; `skills/project-manager/README.md` → "Maintainer map" |
+| Maintainer guides | `skills/orchestrator/README.md`; `skills/project-manager/README.md` → "Maintainer map" |
 
 Each skill's `SKILL.md` is the source of truth for its own triggers, workflow, and output format; the top-level README only indexes them.
 

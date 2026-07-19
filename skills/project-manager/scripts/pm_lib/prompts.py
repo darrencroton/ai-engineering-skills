@@ -12,8 +12,8 @@ can be edited without touching code.
 `compile_skill_bundle` re-specifies (never imports) the transitive
 skill-bundle embedding behaviour documented as the one sanctioned
 carry-over in ``docs/mode-b-lite/replacement-ledger.md`` §9.4, whose
-behavioural evidence is ``skills/orchestrator/scripts/reviewer_contract.py``
-(`compile_skill_bundle` / `compose_reviewer_command`) — this module shares
+behavioural evidence is ``skills/orchestrator/scripts/delegate_contract.py``
+(`compile_skill_bundle` / `compose_delegate_command`) — this module shares
 no code with it and never imports from ``skills/orchestrator/``.
 """
 

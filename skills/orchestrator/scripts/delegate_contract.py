@@ -1,4 +1,21 @@
-"""Validate semantic reviewer requests and compose deterministic harness commands."""
+"""Validate semantic delegate requests and compose deterministic harness commands.
+
+A delegate is any external harness session the orchestrator launches on the
+Developer's behalf. Every delegate launches in one of two access modes:
+
+- ``read-only``: investigation, drift-audit, code-review. No edits, no
+  mutation-prone commands, no Git/GitHub mutations, no commits.
+- ``read-write``: a bounded implementation task inside an explicit
+  ``authorized_surface`` with explicit ``non_goals``. May create, edit, and run
+  commands to complete the task. Still never performs Git/GitHub mutations or
+  commits: the Developer reviews the delegate's diff and commits it, exactly
+  as it would for its own edits.
+
+Access is policy-constrained the same way tool/model/effort already are: the
+policy declares which access modes are authorized (``required_access``), and
+a request must select one of them. Neither role name nor an editing/commit
+grant is ever accepted directly from a request.
+"""
 
 from __future__ import annotations
 
@@ -10,20 +27,49 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = 2
-REVIEWER_ROLE = "reviewer"
-REVIEWER_ACCESS = "read-only"
+SCHEMA_VERSION = 3
+ACCESS_READ_ONLY = "read-only"
+ACCESS_READ_WRITE = "read-write"
+ACCESS_VALUES = {ACCESS_READ_ONLY, ACCESS_READ_WRITE}
 LABEL_RE = re.compile(r"^\d{2}-[a-z0-9]+-[a-z0-9]+(?:-[a-z0-9]+)*(?:-r\d+)?$")
-REVIEWER_PROFILES: dict[str, dict[str, Any]] = {
-    "claude": {"read_only_enforcement": "partial-plan-mode"},
-    "codex": {"read_only_enforcement": "mechanical-sandbox"},
-    "copilot": {"read_only_enforcement": "prompt-enforced"},
+SKILL_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+# Never appropriate to embed in a delegate prompt, in either access mode: these
+# edit/commit/re-delegate/supervise on the Developer's behalf, or (scoped-
+# implementation) are themselves written from the Developer's first-person
+# perspective and instruct "never let a Reviewer edit files" - embedding that
+# text into a read-write delegate's own prompt directly contradicts the task
+# it is being asked to do.
+NEVER_DELEGATE_SKILLS = {"commit", "orchestrator", "scoped-implementation", "project-manager"}
+# Edit-oriented; fine for a read-write delegate, never for a read-only one.
+WRITE_ONLY_SKILLS = {"code-simplifier"}
+
+# Factual command-mechanics and enforcement notes only; not a suitability or
+# capability ranking. `read_write_enforcement` describes whether the harness
+# mechanically confines writes to the working directory - none of these
+# profiles mechanically restrict writes to a request's specific
+# `authorized_surface`. That boundary is prompt-enforced for every harness and
+# is meant to be checked afterward with drift-audit against the actual diff.
+DELEGATE_PROFILES: dict[str, dict[str, Any]] = {
+    "claude": {
+        "read_only_enforcement": "partial-plan-mode",
+        "read_write_enforcement": "prompt-enforced-accept-edits",
+    },
+    "codex": {
+        "read_only_enforcement": "mechanical-sandbox",
+        "read_write_enforcement": "mechanical-sandbox-workspace-write",
+    },
+    "copilot": {
+        "read_only_enforcement": "prompt-enforced",
+        "read_write_enforcement": "prompt-enforced",
+    },
     "opencode": {
         "read_only_enforcement": "partial-edit-tools-denied",
+        "read_write_enforcement": "prompt-enforced-build-agent",
         "effort_override": "unsupported",
     },
     "qwen": {
         "read_only_enforcement": "prompt-enforced-sandbox-requested",
+        "read_write_enforcement": "prompt-enforced-sandbox-requested",
         "effort_override": "unsupported",
     },
 }
@@ -33,10 +79,11 @@ POLICY_FIELDS = {
     "slice_id",
     "plan_sha256",
     "repo_path",
-    "reviewer_artifact_root",
+    "delegate_artifact_root",
     "required_tools",
     "required_model",
     "required_effort",
+    "required_access",
 }
 REQUEST_FIELDS = {
     "schema_version",
@@ -46,10 +93,13 @@ REQUEST_FIELDS = {
     "tool",
     "model",
     "effort",
+    "access",
     "task",
     "context",
     "required_skills",
     "files",
+    "authorized_surface",
+    "non_goals",
     "constraints",
     "expected_output",
 }
@@ -71,8 +121,8 @@ class ContractIssue:
         }
 
 
-class ReviewerContractError(RuntimeError):
-    """A reviewer request cannot be launched under the supplied policy."""
+class DelegateContractError(RuntimeError):
+    """A delegate request cannot be launched under the supplied policy."""
 
     def __init__(self, issues: list[ContractIssue]):
         super().__init__("; ".join(issue.message for issue in issues))
@@ -87,11 +137,11 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
-        raise ReviewerContractError(
+        raise DelegateContractError(
             [ContractIssue("missing-file", label, f"{label} file does not exist: {path}", f"Create {path} as valid JSON.")]
         ) from exc
     except json.JSONDecodeError as exc:
-        raise ReviewerContractError(
+        raise DelegateContractError(
             [
                 ContractIssue(
                     "invalid-json",
@@ -102,7 +152,7 @@ def load_json_object(path: Path, label: str) -> dict[str, Any]:
             ]
         ) from exc
     if not isinstance(payload, dict):
-        raise ReviewerContractError(
+        raise DelegateContractError(
             [ContractIssue("wrong-type", label, f"{label} must be a JSON object", "Replace the top-level value with an object.")]
         )
     return payload
@@ -193,26 +243,27 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
     slice_id = _required_string(policy, "slice_id", issues)
     plan_sha256 = _required_string(policy, "plan_sha256", issues)
     repo_text = _required_string(policy, "repo_path", issues)
-    artifact_text = _required_string(policy, "reviewer_artifact_root", issues)
+    artifact_text = _required_string(policy, "delegate_artifact_root", issues)
     required_tools = _string_list(policy, "required_tools", issues, required=True)
     required_model = _required_string(policy, "required_model", issues)
     required_effort = _required_string(policy, "required_effort", issues)
+    required_access = _string_list(policy, "required_access", issues, required=True)
     if not required_tools:
         issues.append(
             ContractIssue(
                 "empty-field",
                 "required_tools",
-                "required_tools must select at least one Reviewer harness",
-                "Add at least one of claude, codex, copilot, opencode, or qwen, or do not create a Reviewer launch policy.",
+                "required_tools must select at least one delegate harness",
+                "Add at least one of claude, codex, copilot, opencode, or qwen, or do not create a delegate launch policy.",
             )
         )
     for index, required_tool in enumerate(required_tools):
-        if required_tool not in REVIEWER_PROFILES:
+        if required_tool not in DELEGATE_PROFILES:
             issues.append(
                 ContractIssue(
                     "unsupported-tool",
                     f"required_tools[{index}]",
-                    f"no deterministic Reviewer profile exists for {required_tool!r}",
+                    f"no deterministic delegate profile exists for {required_tool!r}",
                     "Choose claude, codex, copilot, opencode, or qwen.",
                 )
             )
@@ -222,7 +273,35 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                 "duplicate-value",
                 "required_tools",
                 "required_tools contains duplicate harness names",
-                "List each selected Reviewer harness once.",
+                "List each selected delegate harness once.",
+            )
+        )
+    if not required_access:
+        issues.append(
+            ContractIssue(
+                "empty-field",
+                "required_access",
+                "required_access must authorize at least one access mode",
+                f"Add at least one of {sorted(ACCESS_VALUES)}.",
+            )
+        )
+    for index, value in enumerate(required_access):
+        if value not in ACCESS_VALUES:
+            issues.append(
+                ContractIssue(
+                    "unsupported-access",
+                    f"required_access[{index}]",
+                    f"no access mode named {value!r} exists",
+                    f"Choose one of {sorted(ACCESS_VALUES)}.",
+                )
+            )
+    if len(set(required_access)) != len(required_access):
+        issues.append(
+            ContractIssue(
+                "duplicate-value",
+                "required_access",
+                "required_access contains duplicate values",
+                "List each authorized access mode once.",
             )
         )
 
@@ -235,8 +314,8 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "artifact-root-mismatch",
                 "run_dir",
-                f"run directory {run_dir} is outside policy reviewer_artifact_root {artifact_root}",
-                "Initialize the run through reviewer_jobs.py with the PM-provided artifact root, then retry.",
+                f"run directory {run_dir} is outside policy delegate_artifact_root {artifact_root}",
+                "Initialize the run through delegate_jobs.py with the PM-provided artifact root, then retry.",
             )
         )
 
@@ -247,7 +326,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "slice-mismatch",
                 "slice_id",
-                f"reviewer request targets {request_slice}, but policy authorizes {slice_id}",
+                f"delegate request targets {request_slice}, but policy authorizes {slice_id}",
                 f"Rewrite the request for {slice_id}; do not reuse a request from another slice.",
             )
         )
@@ -256,8 +335,8 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "plan-digest-mismatch",
                 "plan_sha256",
-                "reviewer request plan digest does not match the frozen PM policy",
-                f"Copy the exact plan_sha256 from the current reviewer policy ({plan_sha256}).",
+                "delegate request plan digest does not match the frozen PM policy",
+                f"Copy the exact plan_sha256 from the current delegate policy ({plan_sha256}).",
             )
         )
 
@@ -277,16 +356,16 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "tool-not-authorized",
                 "tool",
-                f"reviewer tool {tool!r} is not required or authorized; required tools: {', '.join(required_tools) or '(none)'}",
+                f"delegate tool {tool!r} is not required or authorized; required tools: {', '.join(required_tools) or '(none)'}",
                 "Use a required tool or stop and report that the configured tool cannot satisfy the task.",
             )
         )
-    elif tool not in REVIEWER_PROFILES:
+    elif tool not in DELEGATE_PROFILES:
         issues.append(
             ContractIssue(
                 "unsupported-tool",
                 "tool",
-                f"no deterministic reviewer profile exists for {tool!r}",
+                f"no deterministic delegate profile exists for {tool!r}",
                 "Use a supported tool or add and test its profile before authorizing it in PM.",
             )
         )
@@ -298,7 +377,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "model-mismatch",
                 "model",
-                f"reviewer request model {model!r} does not match required model {required_model!r}",
+                f"delegate request model {model!r} does not match required model {required_model!r}",
                 f"Set model to {required_model!r}; do not silently fall back.",
             )
         )
@@ -307,8 +386,28 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
             ContractIssue(
                 "effort-mismatch",
                 "effort",
-                f"reviewer request effort {effort!r} does not match required effort {required_effort!r}",
+                f"delegate request effort {effort!r} does not match required effort {required_effort!r}",
                 f"Set effort to {required_effort!r}; do not silently fall back.",
+            )
+        )
+
+    access = _required_string(request, "access", issues)
+    if access and access not in ACCESS_VALUES:
+        issues.append(
+            ContractIssue(
+                "unsupported-access",
+                "access",
+                f"no access mode named {access!r} exists",
+                f"Choose one of {sorted(ACCESS_VALUES)}.",
+            )
+        )
+    elif access and access not in required_access:
+        issues.append(
+            ContractIssue(
+                "access-not-authorized",
+                "access",
+                f"delegate access {access!r} is not authorized; required_access: {', '.join(required_access) or '(none)'}",
+                "Use an access mode from required_access, or update the policy if the operator genuinely intends to authorize it.",
             )
         )
 
@@ -316,6 +415,34 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
     context = str(request.get("context") or "").strip()
     expected_output = _required_string(request, "expected_output", issues)
     skills = _string_list(request, "required_skills", issues, required=True)
+    for index, skill in enumerate(skills):
+        if not SKILL_NAME_RE.fullmatch(skill):
+            issues.append(
+                ContractIssue(
+                    "invalid-skill-name",
+                    f"required_skills[{index}]",
+                    f"required_skills entries must be a canonical skill slug, got {skill!r}",
+                    "Use a lowercase kebab-case skill directory name such as 'code-review'.",
+                )
+            )
+        elif skill in NEVER_DELEGATE_SKILLS:
+            issues.append(
+                ContractIssue(
+                    "skill-not-permitted",
+                    f"required_skills[{index}]",
+                    f"{skill!r} must never be embedded in a delegate prompt in either access mode",
+                    "Remove this skill from required_skills; keep it with the Developer.",
+                )
+            )
+        elif access == ACCESS_READ_ONLY and skill in WRITE_ONLY_SKILLS:
+            issues.append(
+                ContractIssue(
+                    "skill-not-permitted-for-access",
+                    f"required_skills[{index}]",
+                    f"{skill!r} is a write-oriented skill and cannot be given to a read-only delegate",
+                    "Remove this skill, or change access to read-write if this is really an implementation task.",
+                )
+            )
     files = _string_list(request, "files", issues, required=True)
     constraints = _string_list(request, "constraints", issues, required=True)
     resolved_files = [path for index, value in enumerate(files) if (path := _resolve_repo_file(repo, value, f"files[{index}]", issues))]
@@ -325,13 +452,58 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                 ContractIssue(
                     "missing-input",
                     f"files[{index}]",
-                    f"read-only reviewer input does not exist: {path}",
-                    "Correct the path or create the input before launching the reviewer.",
+                    f"delegate input file does not exist: {path}",
+                    "Correct the path or create the input before launching the delegate.",
+                )
+            )
+
+    authorized_surface = _string_list(request, "authorized_surface", issues)
+    non_goals = _string_list(request, "non_goals", issues)
+    if access == ACCESS_READ_WRITE:
+        if not authorized_surface:
+            issues.append(
+                ContractIssue(
+                    "missing-field",
+                    "authorized_surface",
+                    "a read-write request must list at least one authorized file, function, or component",
+                    "Set authorized_surface to the bounded set of files/functions/components this delegate may change.",
+                )
+            )
+        if not non_goals:
+            issues.append(
+                ContractIssue(
+                    "missing-field",
+                    "non_goals",
+                    "a read-write request must list at least one explicit non-goal",
+                    "Set non_goals to what this delegate must not touch or change, even a single boundary statement.",
+                )
+            )
+    elif access == ACCESS_READ_ONLY:
+        # Check raw key presence, not parsed-list truthiness: an explicit
+        # "authorized_surface": [] still means the request author put a
+        # write-mode field on a read-only request and must remove it, not a
+        # silently-accepted no-op.
+        if "authorized_surface" in request:
+            issues.append(
+                ContractIssue(
+                    "field-not-applicable",
+                    "authorized_surface",
+                    "authorized_surface only applies to access: read-write requests",
+                    "Remove authorized_surface, or change access to read-write if this is really an implementation task.",
+                )
+            )
+        if "non_goals" in request:
+            issues.append(
+                ContractIssue(
+                    "field-not-applicable",
+                    "non_goals",
+                    "non_goals only applies to access: read-write requests",
+                    "Remove non_goals, or change access to read-write if this is really an implementation task.",
                 )
             )
 
     if issues:
-        raise ReviewerContractError(issues)
+        raise DelegateContractError(issues)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -339,17 +511,18 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
         "slice_id": slice_id,
         "plan_sha256": plan_sha256,
         "repo_path": str(repo),
-        "reviewer_artifact_root": str(artifact_root),
+        "delegate_artifact_root": str(artifact_root),
         "label": label,
         "tool": tool,
         "model": model,
         "effort": effort,
-        "role": REVIEWER_ROLE,
-        "access": REVIEWER_ACCESS,
+        "access": access,
         "task": task,
         "context": context,
         "required_skills": skills,
         "files": [str(path) for path in resolved_files],
+        "authorized_surface": authorized_surface if access == ACCESS_READ_WRITE else [],
+        "non_goals": non_goals if access == ACCESS_READ_WRITE else [],
         "constraints": constraints,
         "expected_output": expected_output,
     }
@@ -364,7 +537,7 @@ def compile_skill_bundle(skill_name: str) -> str:
     skill_dir = _skill_root() / skill_name
     entry = skill_dir / "SKILL.md"
     if not entry.is_file():
-        raise ReviewerContractError(
+        raise DelegateContractError(
             [
                 ContractIssue(
                     "required-skill-unavailable",
@@ -385,11 +558,11 @@ def compile_skill_bundle(skill_name: str) -> str:
         try:
             path.relative_to(skill_dir.resolve())
         except ValueError as exc:
-            raise ReviewerContractError(
+            raise DelegateContractError(
                 [ContractIssue("skill-resource-outside-root", "required_skills", f"skill resource escapes its root: {path}", "Fix the skill package before launching.")]
             ) from exc
         if not path.is_file():
-            raise ReviewerContractError(
+            raise DelegateContractError(
                 [ContractIssue("skill-resource-missing", "required_skills", f"required skill resource is missing: {path}", "Restore the complete skill package before launching.")]
             )
         text = path.read_text(encoding="utf-8")
@@ -405,27 +578,78 @@ def compile_skill_bundle(skill_name: str) -> str:
     return "\n\n".join(rendered)
 
 
-def render_reviewer_prompt(contract: dict[str, Any]) -> str:
+def render_delegate_prompt(contract: dict[str, Any]) -> str:
     skills = contract["required_skills"]
     skill_list = "\n".join(f"  - {name}" for name in skills) if skills else "  - none"
     files = "\n".join(f"  - {path}" for path in contract["files"]) if contract["files"] else "  - none"
+    access = contract["access"]
+
+    if access == ACCESS_READ_WRITE:
+        surface = contract["authorized_surface"]
+        non_goals = contract["non_goals"]
+        surface_text = "\n".join(f"  - {item}" for item in surface) if surface else "  - none"
+        non_goals_text = "\n".join(f"  - {item}" for item in non_goals) if non_goals else "  - none"
+        header = (
+            "DELEGATE MODE: read-write - bounded implementation task. Stay inside the authorized "
+            "surface below; no Git/GitHub mutations, no commits, no orchestrator invocation, no re-delegation."
+        )
+        constraints = [
+            "You may create, edit, and run commands needed to implement the task, but only inside the authorized surface below.",
+            "Do not create, edit, delete, move, or format any file outside the authorized surface.",
+            "Do not perform Git, GitHub, commit, branch, staging, push, or other repository-history operations. The calling session reviews your diff and commits it.",
+            "You are a delegated implementer, not the Developer and not the final approver. Do not invoke orchestrator, re-delegate, or make acceptance decisions.",
+            "Stop and report if completing the task would require touching anything outside the authorized surface or would violate a listed non-goal.",
+            *contract["constraints"],
+        ]
+        constraint_text = "\n".join(f"  - {item}" for item in constraints)
+        embedded = "\n\n".join(compile_skill_bundle(name) for name in skills)
+        prompt = f"""{header}
+
+TASK: {contract['task']}
+
+ACCESS: read-write
+
+AUTHORIZED SURFACE:
+{surface_text}
+
+NON-GOALS:
+{non_goals_text}
+
+REQUIRED SKILLS:
+{skill_list}
+
+FILES:
+{files}
+
+CONTEXT:
+{contract['context'] or '(none)'}
+
+CONSTRAINTS:
+{constraint_text}
+
+RETURN:
+{contract['expected_output']}
+"""
+        if embedded:
+            prompt += f"\nEMBEDDED SKILL INSTRUCTIONS:\n{embedded}\n"
+        return prompt
+
     constraints = [
         (
-            "Reviewer access is intrinsically read-only: you may read files and run commands that do not modify "
+            "Read-only access is intrinsic to this mode: you may read files and run commands that do not modify "
             "the workspace; you must not create, edit, delete, move, or format files."
         ),
         "Do not run tests or commands that may write caches, snapshots, generated files, or other workspace state.",
         "Do not perform Git, GitHub, commit, branch, staging, push, or other state-changing operations.",
-        "You are a delegated Reviewer, not the Developer. Do not invoke orchestrator, re-delegate, or make final acceptance decisions.",
+        "You are a delegated reviewer, not the Developer. Do not invoke orchestrator, re-delegate, or make the final acceptance decision.",
         *contract["constraints"],
     ]
     constraint_text = "\n".join(f"  - {item}" for item in constraints)
     embedded = "\n\n".join(compile_skill_bundle(name) for name in skills)
-    prompt = f"""REVIEWER MODE: Read-only delegated Reviewer — no edits, no state-changing commands, no orchestrator skill, no re-delegation, no commits, report blockers.
+    prompt = f"""DELEGATE MODE: read-only - no edits, no state-changing commands, no orchestrator skill, no re-delegation, no commits, report blockers.
 
 TASK: {contract['task']}
 
-ROLE: reviewer
 ACCESS: read-only
 
 REQUIRED SKILLS:
@@ -448,15 +672,16 @@ RETURN:
     return prompt
 
 
-def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]:
+def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]:
     tool = contract["tool"]
     model = contract["model"]
     effort = contract["effort"]
     repo = contract["repo_path"]
+    write = contract["access"] == ACCESS_READ_WRITE
 
     if tool == "opencode":
         if effort != "default":
-            raise ReviewerContractError(
+            raise DelegateContractError(
                 [
                     ContractIssue(
                         "unsupported-effort",
@@ -469,12 +694,12 @@ def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]
         command = ["opencode", "run", prompt]
         if model != "default":
             command.extend(["-m", model])
-        command.extend(["--agent", "plan", "--auto", "--dir", repo])
+        command.extend(["--agent", "build" if write else "plan", "--auto", "--dir", repo])
         return command
 
     if tool == "qwen":
         if effort != "default":
-            raise ReviewerContractError(
+            raise DelegateContractError(
                 [
                     ContractIssue(
                         "unsupported-effort",
@@ -496,7 +721,8 @@ def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
-        command.extend(["--permission-mode", "plan", "--output-format", "text", "--add-dir", repo])
+        permission_mode = "acceptEdits" if write else "plan"
+        command.extend(["--permission-mode", permission_mode, "--output-format", "text", "--add-dir", repo])
         return command
 
     if tool == "codex":
@@ -505,7 +731,8 @@ def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]
             command.extend(["-m", model])
         if effort != "default":
             command.extend(["-c", f'model_reasoning_effort="{effort}"'])
-        command.extend(["--sandbox", "read-only", "--skip-git-repo-check", "-C", repo])
+        sandbox = "workspace-write" if write else "read-only"
+        command.extend(["--sandbox", sandbox, "--skip-git-repo-check", "-C", repo])
         return command
 
     if tool == "copilot":
@@ -517,12 +744,12 @@ def compose_reviewer_command(contract: dict[str, Any], prompt: str) -> list[str]
         command.extend(["-p", prompt, "--allow-all-tools", "--autopilot", "--silent", "--add-dir", repo])
         return command
 
-    raise ReviewerContractError(
+    raise DelegateContractError(
         [
             ContractIssue(
                 "unsupported-tool",
                 "tool",
-                f"no deterministic reviewer profile exists for {tool!r}",
+                f"no deterministic delegate profile exists for {tool!r}",
                 "Use a tool supported by orchestrator or add and test a deterministic profile before launching it.",
             )
         ]

@@ -2,7 +2,7 @@
 
 Pins `pm_lib.prompts.compile_skill_bundle` / `render_reviewer_prompt` (the
 transitive skill-bundle embedding spec, re-specified fresh from
-`skills/orchestrator/scripts/reviewer_contract.py` as behavioural evidence
+`skills/orchestrator/scripts/delegate_contract.py` as behavioural evidence
 only — nothing here imports orchestrator code) and `pm_lib.review` (the
 one-shot reviewer command table and the end-to-end `review` command):
 

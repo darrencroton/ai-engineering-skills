@@ -939,7 +939,10 @@ def _attempts_summary(run_dir: Path, slice_id: str, attempts: int) -> str:
     if steer_events:
         lines.append(f"Steer interventions: {len(steer_events)}")
         for event in steer_events:
-            lines.append(f"  - {event.get('ts')}: {event.get('note')}")
+            lines.append(f"  - {event.get('ts')}:")
+            note_lines = str(event.get("note") or "").splitlines() or [""]
+            for note_line in note_lines:
+                lines.append(f"      {note_line}")
     return "\n".join(lines)
 
 
@@ -1108,7 +1111,6 @@ class SteerOutcome:
     kind: str  # steered | budget_exhausted
     slice_id: str
     attempts: int | None = None
-    steer_path: Path | None = None
     message: str = ""
 
 
@@ -1128,6 +1130,11 @@ def finalize_steer(repo: Path, run_dir: Path, token: str, *, correction: str, ri
     if entry is None:
         raise PmError(f"{slice_id} is not present in the run's slice entries")
 
+    # Stripped copy used only to decide "is this blank" and to summarize the
+    # risk-raise event's own note; the correction delivered to the session
+    # and recorded on the steer event below stays exactly as given — a
+    # verbatim correction can legitimately start or end with meaningful
+    # whitespace (e.g. an indented code block).
     stripped_correction = correction.strip()
     if apply_risk_ratchet(entry, current, risk_flag=risk):
         note = stripped_correction.splitlines()[0][:120] if stripped_correction else "risk raised via finalize --steer"
@@ -1153,20 +1160,20 @@ def finalize_steer(repo: Path, run_dir: Path, token: str, *, correction: str, ri
     current["attempts"] = attempts
     entry["attempts"] = attempts
 
-    steer_relative = f"slices/slice-{slice_number(slice_id):03d}/steer-{attempts}.md"
-    steer_original = write_controller_artifact(repo, run_dir, state["run_id"], steer_relative, correction)
-    mirror_path = run_artifact_dir(repo, state["run_id"]) / steer_relative
-
-    # The pointer names the MIRROR path: the Developer reads .pm/, never
-    # the state dir where the original lives.
-    sessions.send_line(session, f"PM correction written to {mirror_path} — read it before continuing.")
+    # Direct live-session injection, not a persistent numbered artifact
+    # (steer-artifact-assessment.md): the correction is rendered from the
+    # reference-sourced wrapper and pasted straight into the pane, verbatim.
+    message = prompts.render_steer_message(correction)
+    sessions.send_correction(session, message)
 
     state_mod.save_state(run_dir, state, token)
-    first_line = stripped_correction.splitlines()[0][:200] if stripped_correction else ""
-    state_mod.append_event(run_dir, "steer", slice_id=slice_id, note=first_line, evidence=str(steer_original))
+    # The complete, verbatim correction lives in the event's note (no
+    # truncation, no stripping, no evidence path) — it is the only durable
+    # record of what was said, now that no steer file exists to point to.
+    state_mod.append_event(run_dir, "steer", slice_id=slice_id, note=correction)
 
     return SteerOutcome(
-        kind="steered", slice_id=slice_id, attempts=attempts, steer_path=steer_original,
+        kind="steered", slice_id=slice_id, attempts=attempts,
         message=f"steered {slice_id} (attempt {attempts})",
     )
 

@@ -150,15 +150,15 @@ def scan_hard_stop(text: str) -> dict[str, Any]:
 # --- tmux process plumbing --------------------------------------------------
 
 
-def _run_tmux(*args: str) -> subprocess.CompletedProcess:
+def _run_tmux(*args: str, input_text: str | None = None) -> subprocess.CompletedProcess:
     try:
-        return subprocess.run(["tmux", *args], check=False, text=True, capture_output=True)
+        return subprocess.run(["tmux", *args], input=input_text, check=False, text=True, capture_output=True)
     except OSError:
         return subprocess.CompletedProcess(args=["tmux", *args], returncode=127, stdout="", stderr="tmux not found")
 
 
-def _tmux_or_raise(args: list[str], error_prefix: str) -> subprocess.CompletedProcess:
-    result = _run_tmux(*args)
+def _tmux_or_raise(args: list[str], error_prefix: str, *, input_text: str | None = None) -> subprocess.CompletedProcess:
+    result = _run_tmux(*args, input_text=input_text)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise PmError(f"{error_prefix}: {detail}" if detail else error_prefix)
@@ -379,6 +379,35 @@ def send_line(session: str, text: str) -> None:
     if hard_stop["present"]:
         raise PmError("refusing to send into hard prompt on screen: " + ", ".join(hard_stop["kinds"]))
     _tmux_or_raise(["send-keys", "-t", session, "-l", "--", text], "tmux literal send failed")
+    time.sleep(1.0)
+    _run_tmux("send-keys", "-t", session, "C-m")
+    time.sleep(1.0)
+    _run_tmux("send-keys", "-t", session, "C-m")
+
+
+def send_correction(session: str, text: str) -> None:
+    """A multi-line `finalize --steer` correction, delivered straight into
+    the live pane: refuses a dead session and a visible hard-stop prompt
+    exactly like `send_line`, then loads `text` into a tmux paste buffer via
+    stdin (no temp file, no persistent artifact) and submits it with the
+    same settle-and-double-C-m discipline as `send_prompt`.
+    """
+    if not session_exists(session):
+        raise PmError(f"tmux session is not running: {session}")
+    hard_stop = scan_hard_stop(pane_text(session))
+    if hard_stop["present"]:
+        raise PmError(
+            "refusing to inject correction into hard prompt on screen: " + ", ".join(hard_stop["kinds"])
+        )
+    buffer_name = f"{session}_steer"
+    _tmux_or_raise(["load-buffer", "-b", buffer_name, "-"], "tmux correction buffer load failed", input_text=text)
+    try:
+        _tmux_or_raise(["paste-buffer", "-b", buffer_name, "-t", session], "tmux correction paste failed")
+    finally:
+        # Guaranteed cleanup: a paste failure (e.g. the session exits between
+        # load and paste) must not leave the correction sitting in a named
+        # tmux server buffer indefinitely.
+        _run_tmux("delete-buffer", "-b", buffer_name)
     time.sleep(1.0)
     _run_tmux("send-keys", "-t", session, "C-m")
     time.sleep(1.0)

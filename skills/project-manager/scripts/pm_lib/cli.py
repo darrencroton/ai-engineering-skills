@@ -385,7 +385,7 @@ def _run_finalize(args: argparse.Namespace) -> int:
         outcome = slice_ops.finalize_steer(repo, run_dir, token, correction=args.steer, risk=args.risk)
         if outcome.kind == "steered":
             print(f"steered {outcome.slice_id} (attempt {outcome.attempts})")
-            print(f"correction: {outcome.steer_path}")
+            print("correction delivered directly to the live session (no artifact file written)")
             return 0
         print(f"pm: error: {outcome.message}", file=sys.stderr)
         return 2

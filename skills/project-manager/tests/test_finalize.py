@@ -31,12 +31,15 @@ matching Stage 3's convention; tmux-gated scenarios use a tiny fake-harness
    is rejected outright with a PmError ("risk can only be raised"); the
    ratchet's effect on the slice entry persists in state even though that
    particular `--accept` call was refused.
-6. `--steer`: a live session receives the correction as a one-line pointer
-   into the pane; the steer file exists as a controller-owned original and
-   mirror; `attempts` increments and persists across a fresh state load;
-   exhausting the attempt budget refuses the next steer and sets
-   `needs-human`; steering a dead session raises PmError directing the
-   operator to relaunch.
+6. `--steer`: a live session receives the full (possibly multiline)
+   correction pasted directly into the pane, wrapped in the reference-
+   sourced steer-message template — no `steer-<attempt>.md` artifact is
+   written, controller-side or in the `.pm/` mirror; the `steer` event's
+   `note` carries the complete correction verbatim and the assessment's
+   "Attempts / interventions" section renders it legibly; `attempts`
+   increments and persists across a fresh state load; exhausting the
+   attempt budget refuses the next steer and sets `needs-human`; steering a
+   dead session raises PmError directing the operator to relaunch.
 7. `--stop`: the slice entry becomes "stopped", `assessment.md` records
    decision STOPPED with the `--stop` reasoning verbatim (even though the
    floor may be failing — that's the point), the run becomes
@@ -74,6 +77,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 from pm_test_helpers import PmTestCase, parse_init_output, write_fake_harness
 
 from pm_lib import sessions
+from pm_lib import slice_ops
 from pm_lib import state as state_mod
 
 _HAS_TMUX = shutil.which("tmux") is not None
@@ -121,6 +125,34 @@ def _idle_script(*, sleep_seconds: float = 30.0) -> str:
 
 def _stdin_draining_idle_script() -> str:
     return "echo FAKE_HARNESS_READY\nexec cat -"
+
+
+def _credential_prompt_after_ready_script(*, reveal_after: float = 3.0, sleep_seconds: float = 20.0) -> str:
+    """Comes up clean so the initial slice-prompt injection succeeds, then
+    reveals a credential prompt `reveal_after` seconds later — the pane must
+    be clear of hard-stop markers at injection time (`send_prompt` refuses
+    into one), so the prompt has to appear strictly after start-slice."""
+    return f"echo FAKE_HARNESS_READY\nsleep {reveal_after}\necho 'Enter API key to continue'\nsleep {sleep_seconds}"
+
+
+def _steer_then_complete_script(repo: Path, *, authorized_file: str = "a.py", commit_delay: float = 4.0) -> str:
+    """Drains stdin in the background (so a steer paste sent during the
+    wait window is never dropped by the pty's input queue — the same lesson
+    `_stdin_draining_idle_script` exists for), then commits the authorized
+    change and writes result.json once `commit_delay` has passed."""
+    lines = [
+        "echo FAKE_HARNESS_READY",
+        "cat - >/dev/null &",
+        "CAT_PID=$!",
+        f"sleep {commit_delay}",
+        "kill $CAT_PID 2>/dev/null",
+        f'echo "authorized change" >> "{repo}/{authorized_file}"',
+        f'git -C "{repo}" add "{authorized_file}"',
+        f'git -C "{repo}" commit -q -m "slice work"',
+        _result_heredoc(),
+        "sleep 2",
+    ]
+    return "\n".join(lines)
 
 
 def _write_fake(path: Path, body: str) -> Path:
@@ -426,7 +458,7 @@ class TestRiskRatchet(FinalizeTestCase):
 
 @unittest.skipUnless(_HAS_TMUX, "tmux is required for slice lifecycle tests")
 class TestSteer(FinalizeTestCase):
-    def test_steer_writes_pointer_increments_attempts_and_exhausts_budget(self) -> None:
+    def test_steer_injects_correction_directly_increments_attempts_and_exhausts_budget(self) -> None:
         plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
         harness = write_fake_harness(self.repo.parent / "fake.sh", _stdin_draining_idle_script())
         code, out, _err = self._init(plan_path, harness, extra=["--max-attempts", "1"])
@@ -439,28 +471,39 @@ class TestSteer(FinalizeTestCase):
         session = self._track_current_session(run_id, token)
         self.assertTrue(self._wait_for(lambda: sessions.session_exists(session), timeout=10.0))
 
-        code, out, err = self.run_cli_in_repo(
-            ["finalize", "--steer", "Please also update the docstring.", "--token", token]
-        )
+        # Leading/trailing whitespace is meaningful in a verbatim correction
+        # (e.g. an indented code block) and must survive untouched.
+        correction = "  Please also update the docstring.\nAnd rerun the tests before committing.  \n"
+        code, out, err = self.run_cli_in_repo(["finalize", "--steer", correction, "--token", token])
         self.assertEqual(code, 0, out + err)
+        self.assertIn("no artifact file written", out)
 
         state = state_mod.load_state(run_dir, token)
         self.assertEqual(state["current_slice"]["attempts"], 1)
         self.assertEqual(state["slices"][0]["attempts"], 1)
 
-        steer_original = run_dir / "slices" / "slice-001" / "steer-1.md"
-        self.assertTrue(steer_original.is_file())
-        self.assertEqual(steer_original.read_text(encoding="utf-8").strip(), "Please also update the docstring.")
-        steer_mirror = self.repo / ".pm" / "runs" / run_id / "slices" / "slice-001" / "steer-1.md"
-        self.assertTrue(steer_mirror.is_file())
+        # No steer artifact anywhere in either tree — the whole run_dir and
+        # the whole .pm/ mirror, not just the one slice subdirectory the old
+        # artifact used to live in.
+        self.assertFalse(any(run_dir.rglob("steer-*.md")))
+        self.assertFalse(any((self.repo / ".pm" / "runs" / run_id).rglob("steer-*.md")))
 
-        # Assert a short, un-wrappable prefix of the pointer line rather than
-        # the full (long, tmpdir-based) mirror path: tmux wraps long lines at
-        # the pane width with no delimiter at the wrap point, so matching the
-        # full path risks flaking on a narrow default pane width.
+        # The full multiline correction lands directly in the pane.
         self.assertTrue(
-            self._wait_for(lambda: "PM correction written to" in sessions.pane_text(session), timeout=10.0)
+            self._wait_for(
+                lambda: "Please also update the docstring." in sessions.pane_text(session)
+                and "And rerun the tests before committing." in sessions.pane_text(session),
+                timeout=10.0,
+            )
         )
+
+        # The steer event's note carries the complete correction, not a
+        # truncated first line, and no evidence path (no file to point to).
+        events = state_mod.read_events(run_dir)
+        steer_events = [e for e in events if e["kind"] == "steer"]
+        self.assertEqual(len(steer_events), 1)
+        self.assertEqual(steer_events[0]["note"], correction)
+        self.assertNotIn("evidence", steer_events[0])
 
         # Budget (max_attempts=1) is now exhausted: the next steer is refused.
         code, _out, err = self.run_cli_in_repo(
@@ -469,6 +512,89 @@ class TestSteer(FinalizeTestCase):
         self.assertEqual(code, 2, err)
         state = state_mod.load_state(run_dir, token)
         self.assertEqual(state["status"], "needs-human")
+
+    def test_steer_refuses_into_visible_hard_stop_prompt(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(
+            self.repo.parent / "fake.sh", _credential_prompt_after_ready_script(sleep_seconds=15.0)
+        )
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        run_dir = state_mod.resolve_run_dir(self.repo, run_id)
+
+        code, _out, _err = self.run_cli_in_repo(["start-slice", "--token", token])
+        self.assertEqual(code, 0)
+        session = self._track_current_session(run_id, token)
+        self.assertTrue(
+            self._wait_for(lambda: "Enter API key" in sessions.pane_text(session), timeout=10.0)
+        )
+
+        code, _out, err = self.run_cli_in_repo(
+            ["finalize", "--steer", "please continue", "--token", token]
+        )
+        self.assertEqual(code, 2, err)
+        self.assertIn("credential_prompt", err)
+
+        # Refused before persisting: no steer event recorded, attempts unchanged.
+        state = state_mod.load_state(run_dir, token)
+        self.assertEqual(state["current_slice"]["attempts"], 0)
+        events = state_mod.read_events(run_dir)
+        self.assertFalse([e for e in events if e["kind"] == "steer"])
+
+    def test_accepted_assessment_retains_full_correction_narrative(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(
+            self.repo.parent / "fake.sh", _steer_then_complete_script(self.repo, commit_delay=4.0)
+        )
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        run_dir = state_mod.resolve_run_dir(self.repo, run_id)
+
+        code, _out, _err = self.run_cli_in_repo(["start-slice", "--token", token])
+        self.assertEqual(code, 0)
+        self._track_current_session(run_id, token)
+
+        correction = "Please rename the helper.\nAlso add a docstring."
+        code, out, err = self.run_cli_in_repo(["finalize", "--steer", correction, "--token", token])
+        self.assertEqual(code, 0, out + err)
+
+        self.assertTrue(self._wait_for_result(run_id, token))
+
+        code, out, err = self.run_cli_in_repo(["finalize", "--accept", _LONG_REASONING, "--token", token])
+        self.assertEqual(code, 0, out + err)
+
+        state = state_mod.load_state(run_dir, token)
+        assessment_text = Path(state["slices"][0]["assessment"]).read_text(encoding="utf-8")
+        self.assertIn("Please rename the helper.", assessment_text)
+        self.assertIn("Also add a docstring.", assessment_text)
+
+    def test_stopped_assessment_retains_full_correction_narrative(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _stdin_draining_idle_script())
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        run_dir = state_mod.resolve_run_dir(self.repo, run_id)
+
+        code, _out, _err = self.run_cli_in_repo(["start-slice", "--token", token])
+        self.assertEqual(code, 0)
+        self._track_current_session(run_id, token)
+
+        correction = "Try the other approach entirely.\nSee the notes for why."
+        code, out, err = self.run_cli_in_repo(["finalize", "--steer", correction, "--token", token])
+        self.assertEqual(code, 0, out + err)
+
+        code, out, err = self.run_cli_in_repo(
+            ["finalize", "--stop", "a human is needed to decide the approach", "--token", token]
+        )
+        self.assertEqual(code, 0, out + err)
+
+        state = state_mod.load_state(run_dir, token)
+        assessment_text = Path(state["slices"][0]["assessment"]).read_text(encoding="utf-8")
+        self.assertIn("Try the other approach entirely.", assessment_text)
+        self.assertIn("See the notes for why.", assessment_text)
 
     def test_steer_dead_session_raises_relaunch_error(self) -> None:
         plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
@@ -778,6 +904,42 @@ class TestStopReapsHungReviewer(PmTestCase):
                 return True
             time.sleep(interval)
         return predicate()
+
+
+# --- _attempts_summary: exact multiline formatting, no tmux required --------
+
+
+class TestAttemptsSummaryFormatting(unittest.TestCase):
+    def test_multiline_steer_note_is_indented_legibly(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            state_mod.append_event(
+                run_dir, "steer", slice_id="Slice 1", note="line one\nline two"
+            )
+            summary = slice_ops._attempts_summary(run_dir, "Slice 1", attempts=1)
+
+            events = state_mod.read_events(run_dir)
+            ts = events[0]["ts"]
+            expected = "\n".join(
+                [
+                    "Attempts: 1",
+                    "Steer interventions: 1",
+                    f"  - {ts}:",
+                    "      line one",
+                    "      line two",
+                ]
+            )
+            self.assertEqual(summary, expected)
+
+    def test_no_steer_events_omits_interventions_section(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            summary = slice_ops._attempts_summary(run_dir, "Slice 1", attempts=0)
+            self.assertEqual(summary, "Attempts: 0")
 
 
 if __name__ == "__main__":

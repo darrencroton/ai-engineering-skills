@@ -29,6 +29,10 @@ Pins:
   `detect_activity` flagging a pane change, `force_stop` killing a session,
   `sessions_with_prefix` finding sessions by prefix, and `wait_until_ready`
   raising when the session exits before becoming ready.
+- `send_correction` (steer-artifact-assessment.md's direct-injection
+  remediation): a multi-line correction lands in the pane verbatim without
+  ever touching disk, it refuses into a visible credential prompt exactly
+  like `send_line`, and it refuses against a dead session.
 """
 
 from __future__ import annotations
@@ -277,6 +281,50 @@ class TestSendLine(TmuxSessionTestCase):
     def test_send_line_refuses_when_session_dead(self) -> None:
         with self.assertRaises(PmError):
             sessions.send_line("pm-test-definitely-not-running-s01a0", "hello")
+
+
+class TestSendCorrection(TmuxSessionTestCase):
+    def test_send_correction_delivers_multiline_text_without_a_temp_file(self) -> None:
+        name = "pm-test-sendcorrection-s01a0"
+        self._start(name, "cat -")
+        self.assertTrue(self._wait_for(lambda: sessions.session_exists(name)))
+
+        correction = "PM_CORRECTION_FIRST_LINE\nPM_CORRECTION_SECOND_LINE"
+        sessions.send_correction(name, correction)
+
+        self.assertTrue(self._wait_for(lambda: "PM_CORRECTION_SECOND_LINE" in sessions.pane_text(name)))
+        pane = sessions.pane_text(name)
+        self.assertIn("PM_CORRECTION_FIRST_LINE", pane)
+        self.assertIn("PM_CORRECTION_SECOND_LINE", pane)
+
+    def test_send_correction_refuses_on_visible_credential_prompt(self) -> None:
+        name = "pm-test-sendcorrection-credential-s01a0"
+        self._start(name, "bash -c 'echo Enter API key to continue; sleep 5'")
+        self.assertTrue(self._wait_for(lambda: "Enter API key" in sessions.pane_text(name)))
+
+        with self.assertRaises(PmError) as ctx:
+            sessions.send_correction(name, "one\ntwo")
+        self.assertIn("credential_prompt", str(ctx.exception))
+
+    def test_send_correction_refuses_when_session_dead(self) -> None:
+        with self.assertRaises(PmError):
+            sessions.send_correction("pm-test-definitely-not-running-s01a0", "one\ntwo")
+
+    def test_send_correction_deletes_its_tmux_buffer_after_delivery(self) -> None:
+        """The correction must not linger in a named tmux server buffer once
+        delivery succeeds — that would be a persistent copy in a different
+        place, defeating the point of not writing a steer artifact file."""
+        name = "pm-test-sendcorrection-cleanup-s01a0"
+        self._start(name, "cat -")
+        self.assertTrue(self._wait_for(lambda: sessions.session_exists(name)))
+
+        sessions.send_correction(name, "PM_CLEANUP_CHECK_MARKER")
+        self.assertTrue(self._wait_for(lambda: "PM_CLEANUP_CHECK_MARKER" in sessions.pane_text(name)))
+
+        result = subprocess.run(
+            ["tmux", "list-buffers", "-F", "#{buffer_name}"], check=False, text=True, capture_output=True
+        )
+        self.assertNotIn(f"{name}_steer", result.stdout.splitlines())
 
 
 class TestStartSessionStripsInheritedToken(TmuxSessionTestCase):

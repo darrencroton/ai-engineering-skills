@@ -35,14 +35,42 @@ _DEFAULT_SKILLS_ROOT = Path(__file__).resolve().parents[3]
 
 _MD_FENCE_RE = re.compile(r"```md\n(?P<body>.*?)\n```", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\((?P<target>[^)]+)\)")
+_HEADING_RE = re.compile(r"^#{1,6} .*$", re.MULTILINE)
+
+_STEER_MESSAGE_HEADING = "## Steer Message Template"
 
 
-def load_template(reference_path: Path | None = None) -> str:
-    """Extract the single ```md fenced block from `reference_path`.
+def _section_text(text: str, heading: str | None) -> str:
+    """The slice of `text` scoped to `heading`.
+
+    `heading` is None for the file's leading section (from the top through
+    the line just before the second heading, or the whole file when there
+    is at most one heading) — this is what keeps `load_template`'s existing
+    single-block callers (the developer and reviewer prompt templates)
+    working unchanged as more sections are added to the same file. A named
+    `heading` (matched verbatim, e.g. "## Steer Message Template") returns
+    the text between that heading line and the next heading or end of file;
+    PmError if no heading matches exactly.
+    """
+    headings = list(_HEADING_RE.finditer(text))
+    if heading is None:
+        if len(headings) <= 1:
+            return text
+        return text[: headings[1].start()]
+    for index, match in enumerate(headings):
+        if match.group(0).strip() == heading:
+            end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+            return text[match.end() : end]
+    raise PmError(f"heading {heading!r} not found")
+
+
+def load_template(reference_path: Path | None = None, *, heading: str | None = None) -> str:
+    """Extract the single ```md fenced block from `reference_path`, scoped
+    to `heading` (the file's leading section when `heading` is None).
 
     PmError, naming the file, when the block is absent or there is more
-    than one — a reference file is expected to carry exactly one rendered
-    prompt, not a menu of alternatives.
+    than one within that scope — a reference file's section is expected to
+    carry exactly one rendered prompt, not a menu of alternatives.
     """
     path = reference_path or _DEFAULT_REFERENCE_PATH
     try:
@@ -50,11 +78,13 @@ def load_template(reference_path: Path | None = None) -> str:
     except OSError as exc:
         raise PmError(f"developer prompt template could not be read: {path} ({exc})") from exc
 
-    matches = _MD_FENCE_RE.findall(text)
+    section = _section_text(text, heading)
+    matches = _MD_FENCE_RE.findall(section)
+    scope = f"heading {heading!r} of" if heading else "developer prompt template"
     if not matches:
-        raise PmError(f"no fenced ```md block found in developer prompt template: {path}")
+        raise PmError(f"no fenced ```md block found in {scope}: {path}")
     if len(matches) > 1:
-        raise PmError(f"more than one fenced ```md block found in developer prompt template: {path}")
+        raise PmError(f"more than one fenced ```md block found in {scope}: {path}")
     return matches[0]
 
 
@@ -96,6 +126,24 @@ def render_developer_prompt(
     except (KeyError, IndexError, ValueError) as exc:
         raise PmError(
             f"developer prompt template {path_for_errors} has an unresolved or stray brace "
+            f"({exc}); escape literal '{{' / '}}' as '{{{{' / '}}}}' per the template's editing note"
+        ) from exc
+
+
+def render_steer_message(correction: str, *, reference_path: Path | None = None) -> str:
+    """Render a `finalize --steer` correction for direct live-session
+    injection (no artifact file — steer-artifact-assessment.md's
+    remediation). Sourced from the "## Steer Message Template" section of
+    `references/developer-prompt.md` so the fixed wrapper wording lives in
+    exactly one place, not inline here.
+    """
+    path = reference_path or _DEFAULT_REFERENCE_PATH
+    template = load_template(path, heading=_STEER_MESSAGE_HEADING)
+    try:
+        return template.format(correction=correction)
+    except (KeyError, IndexError, ValueError) as exc:
+        raise PmError(
+            f"steer message template {path} has an unresolved or stray brace "
             f"({exc}); escape literal '{{' / '}}' as '{{{{' / '}}}}' per the template's editing note"
         ) from exc
 

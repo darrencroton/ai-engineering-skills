@@ -4,8 +4,19 @@ Pins prompts.py (target-design §13.4, implementation-blueprint.md §4 — no
 inline prompt fragments elsewhere in the package):
 
 - `load_template` extracts the single fenced ```md block from a reference
-  file. A reference file with no such block, or with more than one, is
-  rejected with a `PmError` naming the file.
+  file's leading section (heading=None, the file's content before its
+  second heading, or the whole file with at most one heading — this is
+  what keeps the developer/reviewer prompt loaders working unchanged now
+  that developer-prompt.md carries a second, later section). A reference
+  file with no such block, or with more than one, is rejected with a
+  `PmError` naming the file. A named `heading` scopes extraction to that
+  section instead; an absent heading raises `PmError`.
+- `render_steer_message` (steer-artifact-assessment.md's remediation)
+  sources its fixed wrapper from developer-prompt.md's "## Steer Message
+  Template" section via `load_template(..., heading=...)`, and substitutes
+  `{correction}` — braces inside the correction text itself are never
+  treated as format fields, since they are a substituted value, not part
+  of the template string.
 - `render_developer_prompt`, against the real
   `skills/project-manager/references/developer-prompt.md` file (the default
   reference path, resolved relative to the pm_lib package), produces text
@@ -88,6 +99,60 @@ class TestLoadTemplate(unittest.TestCase):
     def test_missing_file_raises_pm_error(self) -> None:
         with self.assertRaises(PmError):
             prompts.load_template(Path("/does/not/exist/reference.md"))
+
+    def test_named_heading_scopes_extraction_around_a_second_section(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "two-section.md"
+            path.write_text(
+                "# Top\n\n```md\nmain: {slice_id}\n```\n\n"
+                "## Second Section\n\nsome prose\n\n```md\nsecond: {correction}\n```\n",
+                encoding="utf-8",
+            )
+            self.assertIn("{slice_id}", prompts.load_template(path))
+            self.assertIn("{correction}", prompts.load_template(path, heading="## Second Section"))
+
+    def test_unknown_heading_raises_pm_error(self) -> None:
+        with self.assertRaises(PmError):
+            prompts.load_template(_REAL_REFERENCE_PATH, heading="## Not A Real Section")
+
+
+class TestRenderSteerMessage(unittest.TestCase):
+    def test_render_against_real_reference_file_states_frozen_contract_and_includes_correction(self) -> None:
+        rendered = prompts.render_steer_message("Please also update the docstring.")
+        self.assertIn("Please also update the docstring.", rendered)
+        self.assertIn("frozen slice contract", rendered)
+        self.assertIn("never expands your authorized surface", rendered)
+        self.assertNotIn("{correction}", rendered)
+
+    def test_multiline_correction_survives_verbatim(self) -> None:
+        correction = "First line of the correction.\nSecond line with more detail."
+        rendered = prompts.render_steer_message(correction)
+        self.assertIn(correction, rendered)
+
+    def test_braces_in_correction_are_not_treated_as_format_fields(self) -> None:
+        correction = "Use the shape {\"slice\": \"Slice 1\"} exactly."
+        rendered = prompts.render_steer_message(correction)
+        self.assertIn(correction, rendered)
+
+    def test_wrapper_is_sourced_from_the_reference_file_not_hardcoded(self) -> None:
+        """A custom reference file with a distinctive wrapper string proves
+        `render_steer_message` actually reads its wording from disk rather
+        than duplicating an equivalent wrapper inline in prompts.py."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "custom-developer-prompt.md"
+            path.write_text(
+                "# Top\n\n```md\nmain: {slice_id}\n```\n\n"
+                "## Steer Message Template\n\n"
+                "```md\nCUSTOM_WRAPPER_MARKER_TEXT_9f3a: {correction}\n```\n",
+                encoding="utf-8",
+            )
+            rendered = prompts.render_steer_message("do the thing", reference_path=path)
+            self.assertIn("CUSTOM_WRAPPER_MARKER_TEXT_9f3a", rendered)
+            self.assertIn("do the thing", rendered)
 
 
 class TestRenderDeveloperPrompt(unittest.TestCase):

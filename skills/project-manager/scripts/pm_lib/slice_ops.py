@@ -1223,6 +1223,20 @@ def finalize_steer(repo: Path, run_dir: Path, token: str, *, correction: str, ri
     current["attempts"] = attempts
     entry["attempts"] = attempts
 
+    # Rotate the prior attempt's completion signal into attempt-<n>/ exactly
+    # as a relaunch does (start_slice), so a steered session can never be
+    # mistaken for complete on the pre-steer result.json — observe --wait,
+    # which breaks the instant result.json exists, would otherwise return
+    # immediately on stale evidence (target-design §9; Stage 7 Test 21).
+    # This must stay BEFORE send_correction: rotating after delivery would
+    # race the live session, which may write its fresh post-steer result
+    # before we rotate — archiving the NEW result instead of the stale one.
+    # If send_correction below raises (dead-session race, hard-stop refusal)
+    # the rotation is harmless: the result is preserved under attempt-<n>/,
+    # the attempt increment is not persisted, and a later relaunch re-rotates
+    # idempotently (nothing left at top level → no-op).
+    _rotate_prior_attempt(Path(current["artifact_dir"]), attempts - 1)
+
     # Direct live-session injection, not a persistent numbered artifact
     # (steer-artifact-assessment.md): the correction is rendered from the
     # reference-sourced wrapper and pasted straight into the pane, verbatim.

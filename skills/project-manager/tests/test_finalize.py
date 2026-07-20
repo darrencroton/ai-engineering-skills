@@ -135,17 +135,21 @@ def _credential_prompt_after_ready_script(*, reveal_after: float = 3.0, sleep_se
     return f"echo FAKE_HARNESS_READY\nsleep {reveal_after}\necho 'Enter API key to continue'\nsleep {sleep_seconds}"
 
 
-def _steer_then_complete_script(repo: Path, *, authorized_file: str = "a.py", commit_delay: float = 4.0) -> str:
-    """Drains stdin in the background (so a steer paste sent during the
-    wait window is never dropped by the pty's input queue — the same lesson
-    `_stdin_draining_idle_script` exists for), then commits the authorized
-    change and writes result.json once `commit_delay` has passed."""
+def _steer_then_complete_script(repo: Path, *, authorized_file: str = "a.py") -> str:
+    """Blocks reading stdin until the `finalize --steer` correction actually
+    arrives (the steer wrapper's stable "PM correction" marker), then commits
+    the authorized change and writes result.json. Completion is thus gated on
+    the steer, not raced against a fixed sleep: since a steer now rotates the
+    pre-steer result.json into attempt-<n>/ (Stage 7), a harness that finished
+    *before* the steer would leave no result for finalize to find. The launch
+    pointer and any earlier lines are read and ignored until the marker."""
     lines = [
         "echo FAKE_HARNESS_READY",
-        "cat - >/dev/null &",
-        "CAT_PID=$!",
-        f"sleep {commit_delay}",
-        "kill $CAT_PID 2>/dev/null",
+        "while IFS= read -r line; do",
+        '  case "$line" in',
+        '    *"PM correction"*) break ;;',
+        "  esac",
+        "done",
         f'echo "authorized change" >> "{repo}/{authorized_file}"',
         f'git -C "{repo}" add "{authorized_file}"',
         f'git -C "{repo}" commit -q -m "slice work"',
@@ -153,6 +157,14 @@ def _steer_then_complete_script(repo: Path, *, authorized_file: str = "a.py", co
         "sleep 2",
     ]
     return "\n".join(lines)
+
+
+def _result_then_drain_script() -> str:
+    """Writes result.json immediately, then drains stdin and stays alive, so
+    a steer can be delivered while a now-stale completion signal already
+    exists on disk (Stage 7 Test 21: the pre-steer result must be rotated
+    aside so observe --wait can't mistake it for the steered attempt's)."""
+    return "echo FAKE_HARNESS_READY\n" + _result_heredoc() + "\nexec cat -"
 
 
 def _write_fake(path: Path, body: str) -> Path:
@@ -516,6 +528,33 @@ class TestSteer(FinalizeTestCase):
         state = state_mod.load_state(run_dir, token)
         self.assertEqual(state["status"], "needs-human")
 
+    def test_steer_rotates_stale_pre_steer_result(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _result_then_drain_script())
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        run_dir = state_mod.resolve_run_dir(self.repo, run_id)
+
+        code, _out, _err = self.run_cli_in_repo(["start-slice", "--token", token])
+        self.assertEqual(code, 0)
+        session = self._track_current_session(run_id, token)
+        self.assertTrue(self._wait_for(lambda: sessions.session_exists(session), timeout=10.0))
+        artifact_dir = Path(state_mod.load_state(run_dir, token)["current_slice"]["artifact_dir"])
+
+        # Attempt 0 wrote a result.json BEFORE any steer.
+        self.assertTrue(self._wait_for(lambda: (artifact_dir / "result.json").is_file(), timeout=10.0))
+
+        code, out, err = self.run_cli_in_repo(["finalize", "--steer", "Remove the dead import.", "--token", token])
+        self.assertEqual(code, 0, out + err)
+
+        # The pre-steer completion signal is rotated into attempt-0/ so the
+        # steered attempt can't be mistaken for complete on stale evidence.
+        # The live session is `exec cat -` and writes no new result, so the
+        # top-level result.json is genuinely absent until real work lands.
+        self.assertTrue((artifact_dir / "attempt-0" / "result.json").is_file())
+        self.assertFalse((artifact_dir / "result.json").is_file())
+
     def test_steer_refuses_into_visible_hard_stop_prompt(self) -> None:
         plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
         harness = write_fake_harness(
@@ -548,7 +587,7 @@ class TestSteer(FinalizeTestCase):
     def test_accepted_assessment_retains_full_correction_narrative(self) -> None:
         plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
         harness = write_fake_harness(
-            self.repo.parent / "fake.sh", _steer_then_complete_script(self.repo, commit_delay=4.0)
+            self.repo.parent / "fake.sh", _steer_then_complete_script(self.repo)
         )
         code, out, _err = self._init(plan_path, harness)
         self.assertEqual(code, 0)

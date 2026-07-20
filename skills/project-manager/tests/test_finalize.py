@@ -185,6 +185,9 @@ def _pgid_alive(pgid: int) -> bool:
 class FinalizeTestCase(PmTestCase):
     def setUp(self) -> None:
         super().setUp()
+        # Operate on a dedicated feature branch, as a real run does — the
+        # implicit-current-branch init path now refuses main/master.
+        self._git("checkout", "-q", "-b", "pm-work")
         self._sessions_to_reap: list[str] = []
         self._subprocesses_to_reap: list[subprocess.Popen] = []
         self.addCleanup(self._reap_sessions)
@@ -695,6 +698,54 @@ class TestNotesMirrorAndTripwire(FinalizeTestCase):
         self._track_current_session(run_id, token)
         self.assertIn("WARNING", out)
         self.assertIn("512", out)
+
+
+# `notes` needs no tmux (init only), so it is deliberately not tmux-gated.
+class TestNotesCommand(FinalizeTestCase):
+    def test_set_then_append_write_authoritative_original_and_mirror(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _idle_script())
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        run_dir = state_mod.resolve_run_dir(self.repo, run_id)
+        original = run_dir / "notes.md"
+        mirror = self.repo / ".pm" / "runs" / run_id / "notes.md"
+
+        code, _out, err = self.run_cli_in_repo(["notes", "--set", "decision: approach B", "--token", token])
+        self.assertEqual(code, 0, err)
+        self.assertEqual(original.read_text(encoding="utf-8"), "decision: approach B\n")
+        self.assertEqual(mirror.read_text(encoding="utf-8"), "decision: approach B\n")
+
+        code, _out, err = self.run_cli_in_repo(["notes", "--append", "lesson: watch dedup", "--token", token])
+        self.assertEqual(code, 0, err)
+        text = original.read_text(encoding="utf-8")
+        self.assertIn("decision: approach B", text)
+        self.assertIn("lesson: watch dedup", text)
+        # The authoritative original carries both; because a later start-slice
+        # re-mirror reads from it, appended notes are never clobbered — the
+        # footgun of hand-editing only the mirror is gone.
+        self.assertEqual(mirror.read_text(encoding="utf-8"), text)
+
+    def test_requires_a_token(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _idle_script())
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, _token = parse_init_output(out)
+        code, _out, err = self.run_cli_in_repo(["notes", "--set", "x", "--run", run_id])
+        self.assertEqual(code, 2)
+        self.assertIn("token", err.lower())
+
+    def test_empty_or_whitespace_text_is_refused(self) -> None:
+        plan_path = self.write_plan(self._plan_path(), slices=[{"files": ["a.py"]}])
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _idle_script())
+        code, out, _err = self._init(plan_path, harness)
+        self.assertEqual(code, 0)
+        run_id, token = parse_init_output(out)
+        code, _out, err = self.run_cli_in_repo(["notes", "--append", "   ", "--token", token])
+        self.assertEqual(code, 2)
+        self.assertIn("non-empty", err.lower())
 
 
 # --- 9: report regenerates with .pm/ deleted ------------------------------

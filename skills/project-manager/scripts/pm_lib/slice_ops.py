@@ -50,6 +50,10 @@ _OBSERVE_TAIL_LINES = 40
 # a non-fatal warning, since a runaway notes file silently degrades every
 # later Developer prompt.
 _NOTES_SIZE_CAP_BYTES = 512 * 1024
+# Branches a run must never land on by *implicit* default (an explicit
+# --branch main is still honoured); per-slice commits piling onto a shared
+# default branch is the PM Test 20 branch-default footgun.
+_PROTECTED_DEFAULT_BRANCHES = frozenset({"main", "master"})
 
 # The stop_reason recorded on attempt-budget exhaustion. Load-bearing: the
 # exhaustion guard below matches on it, which is what makes the budget a
@@ -142,6 +146,44 @@ def write_controller_artifact(repo: Path, run_dir: Path, run_id: str, relative_p
     original.parent.mkdir(parents=True, exist_ok=True)
     original.write_text(content, encoding="utf-8")
     return mirror_artifact(repo, run_dir, run_id, relative_path)
+
+
+def write_notes(repo: Path, run_dir: Path, run_id: str, *, text: str, mode: str) -> tuple[Path, str | None]:
+    """Update the run notes safely: write the AUTHORITATIVE original under the
+    run state dir, then re-mirror into `.pm/` (`write_controller_artifact`).
+
+    This is the only sanctioned writer of `notes.md`. The `.pm/` mirror is
+    regenerate-only, so a direct hand-edit to it is silently clobbered by the
+    next `start-slice` re-mirror (PM Test 20 secondary finding); routing every
+    notes update through here removes that footgun. `mode` is "append" (add
+    `text` as a new trailing block, separated by a blank line) or "set"
+    (replace the whole file). Returns the original path and an optional
+    over-cap warning.
+    """
+    if not text.strip():
+        raise PmError("notes text must be non-empty (nothing to append or set)")
+    original = notes_original_path(run_dir)
+    if mode == "append":
+        existing = original.read_text(encoding="utf-8") if original.exists() else ""
+        if existing.strip():
+            if not existing.endswith("\n"):
+                existing += "\n"
+            content = f"{existing}\n{text.rstrip()}\n"
+        else:
+            content = f"{text.rstrip()}\n"
+    elif mode == "set":
+        content = f"{text.rstrip()}\n"
+    else:
+        raise PmError(f"unknown notes mode: {mode!r}")
+    write_controller_artifact(repo, run_dir, run_id, "notes.md", content)
+    size = original.stat().st_size
+    warning: str | None = None
+    if size > _NOTES_SIZE_CAP_BYTES:
+        warning = (
+            f"notes.md is {size} bytes, over the {_NOTES_SIZE_CAP_BYTES}-byte (512 KiB) cap; "
+            "a runaway notes file silently degrades every later Developer prompt — curate it down"
+        )
+    return original, warning
 
 
 def regenerate_report(repo: Path, run_dir: Path, state: dict[str, Any]) -> Path:
@@ -358,6 +400,12 @@ def _resolve_init_branch(repo: Path, *, branch: str | None, create_branch: str |
         raise PmError(
             "current HEAD is detached or the repository is unborn; pass --branch <existing> or "
             "--create-branch <new> so PM has a named branch to operate on"
+        )
+    if current in _PROTECTED_DEFAULT_BRANCHES:
+        raise PmError(
+            f"refusing to run PM on the default branch {current!r} by implicit default: every slice "
+            f"commit would land directly on it. Pass --create-branch <new> for a dedicated run branch, "
+            f"or --branch {current} to operate on it deliberately."
         )
     return current
 
@@ -582,10 +630,11 @@ def start_slice(
         (artifact_dir / "status-before.txt").write_text(git_ops.git_status_text(repo), encoding="utf-8")
 
     # Controller-owned notes.md: the PM agent curates the ORIGINAL (under
-    # run_dir) directly — the toolkit's job is only to create it if absent,
-    # mirror it into `.pm/` (PM_NOTES_PATH points at the mirror, since the
-    # Developer reads .pm/, never the state dir) on every start-slice, and
-    # tripwire-warn (non-fatal) when the original has grown past the cap.
+    # run_dir) via the `notes` command (write_notes) — start-slice's job here
+    # is only to create it if absent, mirror it into `.pm/` (PM_NOTES_PATH
+    # points at the mirror, since the Developer reads .pm/, never the state
+    # dir) on every launch, and tripwire-warn (non-fatal) when the original
+    # has grown past the cap.
     original_notes = notes_original_path(run_dir)
     if not original_notes.exists():
         original_notes.parent.mkdir(parents=True, exist_ok=True)
@@ -655,7 +704,7 @@ def start_slice(
     sessions.start_session(session_name, repo, command, env)
     launch_executable = shlex.split(command)[0] if command.strip() else ""
     sessions.wait_until_ready(session_name, launch_executable, expected_model_display=expected_model_display)
-    sessions.send_prompt(session_name, prompt_path)
+    sessions.send_prompt(session_name, prompts.render_launch_pointer(prompt_path))
 
     now = _utc_now_iso()
     new_current: dict[str, Any] = {

@@ -155,6 +155,33 @@ class TestRenderSteerMessage(unittest.TestCase):
             self.assertIn("do the thing", rendered)
 
 
+class TestRenderLaunchPointer(unittest.TestCase):
+    def test_single_line_pointer_names_the_contract_path(self) -> None:
+        rendered = prompts.render_launch_pointer(Path("/runs/x/slices/slice-001/prompt.md"))
+        # Must be a single line — sessions.send_prompt refuses a newline, and
+        # the whole point is that the multi-KB contract stays in the file.
+        self.assertNotIn("\n", rendered)
+        self.assertIn("/runs/x/slices/slice-001/prompt.md", rendered)
+        self.assertNotIn("{prompt_path}", rendered)
+
+    def test_wording_is_sourced_from_the_reference_file_not_hardcoded(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "custom-developer-prompt.md"
+            path.write_text(
+                "# Top\n\n```md\nmain: {slice_id}\n```\n\n"
+                "## Launch Pointer\n\n"
+                "```md\nCUSTOM_POINTER_MARKER_4b21 read {prompt_path}\n```\n\n"
+                "## Steer Message Template\n\n"
+                "```md\nsteer: {correction}\n```\n",
+                encoding="utf-8",
+            )
+            rendered = prompts.render_launch_pointer(Path("/p/prompt.md"), reference_path=path)
+            self.assertIn("CUSTOM_POINTER_MARKER_4b21", rendered)
+            self.assertIn("/p/prompt.md", rendered)
+
+
 class TestRenderDeveloperPrompt(unittest.TestCase):
     def test_render_against_real_reference_file(self) -> None:
         plan_slice = _make_plan_slice(3)

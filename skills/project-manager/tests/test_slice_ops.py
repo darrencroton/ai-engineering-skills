@@ -134,8 +134,9 @@ def _credential_prompt_script(*, reveal_after: float = 5.0, sleep_seconds: float
     *after* the developer prompt has been injected.
 
     The pane must be clear of hard-stop markers at injection time —
-    `send_prompt` refuses to paste into a visible credential/approval/side-
-    effect prompt (the launch-time hard-prompt floor), so a harness that
+    `send_prompt` refuses to send the launch pointer into a visible
+    credential/approval/side-effect prompt (the launch-time hard-prompt
+    floor), so a harness that
     printed the marker as its first line would fail `start-slice` itself and
     never reach the live-session `send`-refusal this scenario exercises.
     The readiness wait settles on the clean `FAKE_HARNESS_READY` pane and
@@ -170,9 +171,9 @@ def _dies_quickly_script(*, delay: float = 3.0) -> str:
 
 def _stdin_draining_idle_script() -> str:
     """A harness that actively reads (and echoes) stdin, unlike a bare
-    `sleep`. `send_prompt`'s injected multi-KB developer prompt would
-    otherwise sit unread in the pty's canonical-mode input queue and can
-    saturate it, silently dropping a *later* `send_line` steer — the same
+    `sleep`. Injected text (the launch pointer, then any `send_line` steer)
+    would otherwise sit unread in the pty's canonical-mode input queue and,
+    if it accumulates, silently drop a *later* `send_line` steer — the same
     reason a real coding CLI (which does read stdin) doesn't hit this."""
     return "echo FAKE_HARNESS_READY\nexec cat -"
 
@@ -203,6 +204,9 @@ def _cosmetic_churn_script() -> str:
 class SliceOpsTestCase(PmTestCase):
     def setUp(self) -> None:
         super().setUp()
+        # Operate on a dedicated feature branch, as a real run does — the
+        # implicit-current-branch init path now refuses main/master.
+        self._git("checkout", "-q", "-b", "pm-work")
         self._sessions_to_reap: list[str] = []
         self.addCleanup(self._reap_sessions)
 
@@ -357,6 +361,21 @@ class TestInitFailures(SliceOpsTestCase):
         self.assertIn("feature/new-branch", out)
         result = self._git("rev-parse", "--abbrev-ref", "HEAD")
         self.assertEqual(result.stdout.strip(), "feature/new-branch")
+
+    def test_default_onto_main_refused_but_explicit_branch_main_allowed(self) -> None:
+        # Implicitly landing every slice commit on the default branch is the
+        # PM Test 20 footgun; refuse it, but honour an explicit --branch main.
+        self._git("checkout", "-q", "main")
+        plan_path = self.write_plan(self._plan_path())
+        harness = write_fake_harness(self.repo.parent / "fake.sh", _idle_script())
+
+        code, _out, err = self._init(plan_path, harness)
+        self.assertEqual(code, 2)
+        self.assertIn("main", err)
+
+        code, out, _err = self._init(plan_path, harness, extra=["--branch", "main"])
+        self.assertEqual(code, 0)
+        self.assertIn("branch: main", out)
 
 
 # --- 3. token gating -------------------------------------------------------

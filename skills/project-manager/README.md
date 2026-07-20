@@ -16,7 +16,7 @@ All commands: `python3 skills/project-manager/scripts/pm.py <command> …`, run 
 | Command | Purpose |
 |---|---|
 | `check-plan --plan P [--repo R]` | "Is this plan runnable?" — errors fail closed; also runs automatically at init |
-| `init --repo R --plan P --harness H [--model M] [--effort E] [--branch B \| --create-branch B] [--attest "Slice 1,…"] [--max-attempts N] [--reviewer-tools T,…] [--reviewer-model M] [--reviewer-effort E] [--harness-command CMD]` | set up the run; freezes the plan digest; prints the token once |
+| `init --repo R --plan P --harness H [--model M] [--effort E] [--branch B \| --create-branch B] [--attest "Slice 1,…"] [--max-attempts N] [--reviewer-tools T,…] [--reviewer-model M] [--reviewer-effort E] [--harness-command CMD]` | set up the run; freezes the plan digest; prints the token once (refuses main/master by implicit default — pass `--branch`/`--create-branch`) |
 | `status [--report] [--run ID]` | where are we? `--report` regenerates `run-report.md` |
 | `approve --slice ID --reason TEXT` | record a **human** approval for a plan-gated slice |
 | `start-slice [--model M] [--effort E] [--risk elevated] [--reviewer-tools T,…] [--harness-command CMD]` | launch (or relaunch) the next eligible slice in a fresh tmux session |
@@ -24,7 +24,8 @@ All commands: `python3 skills/project-manager/scripts/pm.py <command> …`, run 
 | `send --text T --reason R` | one-line nudge into the live session (refused over hard prompts; costs nothing) |
 | `finalize` | run the eight-fact floor and collect evidence (decides nothing) |
 | `finalize --accept "reasoning" \| --steer "correction" \| --stop "reason" [--risk elevated]` | PM's recorded decision; accept requires a passing floor (+ both fresh reviews when elevated); steer costs an attempt |
-| `review --slice ID --skill drift-audit\|code-review [--tool T] [--model M] [--effort E] [--timeout N]` | commission an independent review pinned to `before_head..HEAD`; prints the report path, stderr path, and reviewer process-group id at launch, before waiting |
+| `review --slice ID --skill drift-audit\|code-review [--tool T] [--model M] [--effort E] [--timeout N]` | commission an independent review pinned to `before_head..HEAD` (`--tool` ∈ codex/claude/copilot/opencode/qwen); prints the report path, stderr path, and reviewer process-group id at launch, before waiting |
+| `notes --append TEXT \| --set TEXT [--run ID]` | update the run's curated `notes.md` — writes the state-dir original then re-mirrors; never hand-edit the `.pm/` mirror |
 | `stop --reason R [--slice-status stopped] [--scavenge]` | end the run preserving evidence; `--scavenge` sweeps sessions even with state destroyed |
 
 Exit codes: 0 success; 1 = a `finalize` refusal — a floor fact failed, or `--accept` was refused for another recorded reason (e.g. a missing or stale mandatory review on an elevated slice); 2 = error/refusal (integrity failures are prefixed `INTEGRITY:` and are terminal — start a new run).
@@ -96,7 +97,7 @@ printf '{"slice":"%s","status":"done","summary":"created hello.txt","notes":"tri
 cat -
 FAKE
 PM=<path-to>/skills/project-manager/scripts/pm.py
-python3 $PM init --repo . --plan ../trial-plan.md --harness fake --harness-command "sh ../fake-dev.sh"
+python3 $PM init --repo . --plan ../trial-plan.md --harness fake --create-branch pm-trial --harness-command "sh ../fake-dev.sh"
 export PM_RUN_TOKEN=<the token line init printed>
 python3 $PM start-slice
 python3 $PM observe --wait 30

@@ -31,7 +31,7 @@ Two levels. `plan_risk` is derived mechanically at parse time and is immutable. 
    - `finalize --accept "<your reasoning>"` — the reasoning is the accountability record: what you checked, what you read, why it satisfies the contract, any tolerance or interpretation you granted, findings worth carrying.
    - `finalize --steer "<written correction from the actual gap>"`
    - `finalize --stop "<why a human is needed>"`
-4. **Curate.** After each acceptance, update the run's `notes.md` (state dir original): decisions, interfaces, lessons, failed approaches, open findings the next slice needs. Prune stale entries; the file is re-read by every later session.
+4. **Curate.** After each acceptance, update the run's `notes.md` with `pm notes --append "<block>"` (or `--set` to rewrite): decisions, interfaces, lessons, failed approaches, open findings the next slice needs. It writes the state-dir original then re-mirrors — never hand-edit the `.pm/` mirror, which the next `start-slice` re-mirror would clobber. Prune stale entries; the file is re-read by every later session.
 5. **Finish.** `status --report` regenerates `run-report.md`. `stop --reason …` ends a run preserving evidence; `stop --scavenge --reason …` sweeps sessions even with state deleted.
 
 ## Always stop (no discretion)

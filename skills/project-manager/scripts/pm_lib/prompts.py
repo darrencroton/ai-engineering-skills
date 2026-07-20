@@ -38,6 +38,7 @@ _MARKDOWN_LINK_RE = re.compile(r"\[[^\]]*\]\((?P<target>[^)]+)\)")
 _HEADING_RE = re.compile(r"^#{1,6} .*$", re.MULTILINE)
 
 _STEER_MESSAGE_HEADING = "## Steer Message Template"
+_LAUNCH_POINTER_HEADING = "## Launch Pointer"
 
 
 def _section_text(text: str, heading: str | None) -> str:
@@ -126,6 +127,29 @@ def render_developer_prompt(
     except (KeyError, IndexError, ValueError) as exc:
         raise PmError(
             f"developer prompt template {path_for_errors} has an unresolved or stray brace "
+            f"({exc}); escape literal '{{' / '}}' as '{{{{' / '}}}}' per the template's editing note"
+        ) from exc
+
+
+def render_launch_pointer(prompt_path: Path, *, reference_path: Path | None = None) -> str:
+    """Render the one-line launch pointer that tells a fresh Developer
+    session to read its full contract from `prompt_path`.
+
+    The complete frozen contract is written to `prompt_path` in the slice
+    artifact directory; only this short pointer is injected into the
+    session, so delivery never depends on a harness TUI accepting a
+    multi-KB paste (PM Test 20, Finding 1). Sourced from the "## Launch
+    Pointer" section of `references/developer-prompt.md` so the wording
+    lives in exactly one place. The result must be a single line — a
+    newline would be rejected by `sessions.send_prompt`.
+    """
+    path = reference_path or _DEFAULT_REFERENCE_PATH
+    template = load_template(path, heading=_LAUNCH_POINTER_HEADING)
+    try:
+        return template.format(prompt_path=str(prompt_path))
+    except (KeyError, IndexError, ValueError) as exc:
+        raise PmError(
+            f"launch pointer template {path} has an unresolved or stray brace "
             f"({exc}); escape literal '{{' / '}}' as '{{{{' / '}}}}' per the template's editing note"
         ) from exc
 

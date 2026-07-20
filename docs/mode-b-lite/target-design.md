@@ -63,7 +63,7 @@ Four stages. One drive path (the PM agent), not two.
 
 ### 3.2 Execute (per slice)
 - **Purpose:** get one slice implemented. **Owner:** Developer, supervised by PM.
-- **Mechanical:** eligibility (in-order next uncompleted slice; approval flag cleared or recorded), fresh tmux session, prompt rendered from contract + curated notes, `before_head` recorded, hard-prompt refusal on any send, liveness checks, artifact capture.
+- **Mechanical:** eligibility (in-order next uncompleted slice; approval flag cleared or recorded), fresh tmux session, prompt rendered from contract + curated notes to `prompt.md` and delivered as a one-line pointer the Developer reads (not a multi-KB paste, which some harness TUIs silently truncate — PM Test 20, Finding 1), `before_head` recorded, hard-prompt refusal on any send, liveness checks, artifact capture.
 - **Judgement (PM, during):** observation cadence; nudge stalls (confirmed idle across observations — the byte-identical-pane discipline is kept as *guidance*, not statute); pause/resume on clear rolling usage resets; stop on hard-stop evidence; recover or stop on process exit.
 - **Slice-complete signal:** `result.json` appears (or the session dies/times out → PM decides relaunch vs stop).
 
@@ -145,7 +145,7 @@ Authoritative state: **one copy, outside the worktree**, at `<worktree-git-dir>/
 
 **Authority and tamper model — stated honestly.** The Developer session runs as the same OS user, needs Git-metadata access to commit, and can therefore *find* both the state directory and the `pm.py` CLI. There is no OS boundary here, exactly as the current system admits of itself, and building one is a declared non-goal. Within the declared threat model (corner-cutting and sloppy models, not determined adversaries), three cheap mechanisms make forgery a deliberate act rather than a shortcut, and make it detectable:
 
-1. **Run capability token.** `init` mints a random token, prints it once to the operator/PM agent, and stores only its SHA-256 in state. Every mutating command (`finalize`, `approve`, `send`, `stop`, `start-slice`, `review`) requires the token; the Developer prompt and environment never contain it, so a Developer cannot invoke PM authority by simply running the CLI it can see. (Test 7's Developer edited state under gate pressure; this closes the CLI-shaped version of that move.)
+1. **Run capability token.** `init` mints a random token, prints it once to the operator/PM agent, and stores only its SHA-256 in state. Every mutating command (`finalize`, `approve`, `send`, `stop`, `start-slice`, `review`, `notes`) requires the token; the Developer prompt and environment never contain it, so a Developer cannot invoke PM authority by simply running the CLI it can see. (Test 7's Developer edited state under gate pressure; this closes the CLI-shaped version of that move.)
 2. **Authenticated state writes.** The toolkit HMACs every state write with the token; every read verifies. A Developer editing `run.json` directly (minting an approval, marking a slice accepted) produces a verification failure, which is an integrity stop — restoring the tamper *detection* the dual-copy design provided, without a second copy.
 3. **Controller-owned originals.** Every PM-authored artifact — `assessment.md`, `notes.md`, `review-*.md`, the run report — is written under the state directory as the authoritative original and *mirrored* into `.pm/` for human reading. Developer-authored evidence (`result.json`, `validation.md`) stays in `.pm/` — it is inherently a Developer claim, judged against floor-computed facts, never trusted as control input.
 
@@ -191,13 +191,13 @@ So the honest sentence is: `.pm/` vandalism damages the human-facing mirror and 
 
 ## 9. Artifacts
 
-Per run: `run.json` + `events.jsonl` + the controller-owned originals of `notes.md`, `run-report.md`, and every assessment and review (all in the state dir, per §8); `.pm/runs/<id>/` carries the human-facing mirror of those plus the Developer-authored evidence. `notes.md` (PM-curated: decisions, lessons, interfaces, failed approaches, open findings) replaces prior-slice-context generation, continuation-note ledgers, and residual-finding ledgers as *transport*; the report remains the human-facing sink and regenerates from controller-owned data alone — never from the mirror.
+Per run: `run.json` + `events.jsonl` + the controller-owned originals of `notes.md`, `run-report.md`, and every assessment and review (all in the state dir, per §8); `.pm/runs/<id>/` carries the human-facing mirror of those plus the Developer-authored evidence. `notes.md` (PM-curated: decisions, lessons, interfaces, failed approaches, open findings) replaces prior-slice-context generation, continuation-note ledgers, and residual-finding ledgers as *transport*; the report remains the human-facing sink and regenerates from controller-owned data alone — never from the mirror. PM updates `notes.md` only through `pm notes --append/--set`, which writes the authoritative original then re-mirrors; the mirror is never the write target, so a stray hand-edit to it can no longer be silently clobbered by the next re-mirror.
 
 Per slice (`.pm/runs/<id>/slices/slice-NNN/`), each with producer → consumer / lifetime / why irreplaceable:
 
 | Artifact | Producer → Consumer | Why it can't be simpler |
 |---|---|---|
-| `prompt.md` | PM → Developer, audit trail | the rendered contract is the authorization record for the session |
+| `prompt.md` | PM → Developer (via a one-line launch pointer), audit trail | the rendered contract is the authorization record for the session; the launch message only points here, so delivery can't truncate it |
 | `pane.txt` (final; plus `pane-live.txt` rolling) | toolkit → PM, humans | debugging dead/stalled sessions (Test 4 lesson); two files, not six families |
 | `transcript.jsonl` (when the harness exposes one) | toolkit → PM, humans | richer than pane text where available |
 | `diff.patch`, `status-before.txt`, `status-after.txt` | toolkit → PM assessment, reviewers, humans | the change itself; review input |
@@ -230,19 +230,20 @@ Lifetimes: everything persists for the run's life; `archive/`-style cleanup is t
 
 ## 12. Command surface
 
-Ten commands (from 19). All read/write the single authoritative state; all are safe to re-run. Every mutating command (`init` excepted — it mints the token) requires `--token` (or `PM_RUN_TOKEN` in the *controller's* environment, never the Developer's): `approve`, `start-slice`, `send`, `finalize`, `review`, `stop`. Read-only commands (`check-plan`, `status`, `observe`) do not.
+Eleven commands (from 19). All read/write the single authoritative state; all are safe to re-run. Every mutating command (`init` excepted — it mints the token) requires `--token` (or `PM_RUN_TOKEN` in the *controller's* environment, never the Developer's): `approve`, `start-slice`, `send`, `finalize`, `review`, `notes`, `stop`. Read-only commands (`check-plan`, `status`, `observe`) do not.
 
 | Command | Purpose / user intention | Reads → Writes | Essential? |
 |---|---|---|---|
 | `check-plan --plan [--repo]` | "Is this plan runnable?" | plan, worktree → stdout | Yes (also auto at `init`) |
-| `init --repo --plan --harness [--branch/--create-branch] [--attest "Slice 1,…"] [--max-attempts]` | "Set up this run" (incl. preflight) | plan, git → run.json, `.pm/` skeleton | Yes |
+| `init --repo --plan --harness [--branch/--create-branch] [--attest "Slice 1,…"] [--max-attempts]` | "Set up this run" (incl. preflight); refuses main/master by implicit default — pass `--branch`/`--create-branch` (explicit `--branch main` is honoured) | plan, git → run.json, `.pm/` skeleton | Yes |
 | `status [--report]` | "Where are we?" (+ regenerate report) | state, tmux, git → stdout, report | Yes |
 | `approve --slice --reason` | "I approve this gated slice" | → approvals, event | Yes |
 | `start-slice [--model/--effort/--reviewer-tools…]` | "Run the next eligible slice" | state, plan → session, prompt, current_slice | Yes |
 | `observe [--wait N]` | "Show me evidence" (bounded wait folded in) | tmux, files, git → stdout, events, pane-live | Yes |
 | `send --text --reason` | "Steer the live session" (hard-prompt floor enforced) | → tmux, event | Yes |
 | `finalize` | "Run the floor and collect assessment evidence" — outputs floor results + evidence paths; **accepts only on a passing floor plus PM's explicit `--accept "reasoning"` / records `--stop`/`--steer` otherwise** | git, artifacts → slice entry, state, report | Yes |
-| `review --slice --skill drift-audit\|code-review [--tool/--model]` | "Commission an independent review of the final diff" | diff, contract → review artifact | Yes (elevated path) |
+| `review --slice --skill drift-audit\|code-review [--tool/--model]` | "Commission an independent review of the final diff" (`--tool` ∈ codex/claude/copilot/opencode/qwen; a provider-prefixed model passes through, e.g. `--tool opencode --model opencode-go/<model>`) | diff, contract → review artifact | Yes (elevated path) |
+| `notes --append/--set [--run] --token` | "Update run notes safely" — writes the authoritative original then re-mirrors, so a hand-edit to the mirror isn't clobbered by the next re-mirror | text → `notes.md` original + mirror | Yes |
 | `stop --reason [--slice-status stopped] [--scavenge]` | "End it, preserving evidence" (evidence capture folded in — one stop, not three); `--scavenge` sweeps run-prefixed tmux sessions and recorded reviewer process groups even when state is unreadable | tmux, files → terminal state, captures | Yes |
 
 Dropped, with their need re-housed: `run-next`/`run --scope remaining` (the PM agent *is* the loop; the unattended no-model mode is dropped by owner decision — §16.1), `wait` (→ `observe --wait`), `pause-until` (PM schedules its own re-observation), `profiles`/`preflight` (→ `init`/`start-slice` checks + `--help`), `reconcile` (its cause — gate-stopped recoverable runs — is designed out; a stopped slice is re-run with `start-slice` after human review), `stop-with-evidence` (→ `stop`), `summarize` (→ `status --report`), `archive-sensitive` (nothing sensitive written).

@@ -1,8 +1,9 @@
 """Command-line parsing and dispatch (target-design §12).
 
-All ten commands are wired: `init`, `status` (incl. `--report`), `approve`,
-`start-slice`, `observe`, `send`, `finalize` (bare, and its
-`--accept`/`--steer`/`--stop` decision paths), `review`, and `stop`. This
+All eleven commands are wired: `init`, `status` (incl. `--report`),
+`approve`, `start-slice`, `observe`, `send`, `finalize` (bare, and its
+`--accept`/`--steer`/`--stop` decision paths), `review`, `notes`, and
+`stop`. This
 module stays thin: argument parsing, resolving the repo/run/token,
 dispatching into `slice_ops`/`review`, and formatting output. The actual
 mechanics (state mutation, session control, git facts, review commissioning)
@@ -106,8 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
     review = subparsers.add_parser("review", help="Commission an independent review of the final diff")
     review.add_argument("--slice", required=True)
     review.add_argument("--skill", required=True, choices=["drift-audit", "code-review"])
-    review.add_argument("--tool")
-    review.add_argument("--model")
+    review.add_argument("--tool", help="reviewer harness: one of codex, claude, copilot, opencode, qwen")
+    review.add_argument(
+        "--model",
+        help="model for --tool; a provider-prefixed name is passed through as-is, "
+        "e.g. an opencode-namespaced model is --tool opencode --model opencode-go/<model>",
+    )
     review.add_argument("--effort")
     review.add_argument("--reviewer-command", help="override the whole reviewer command (tests/unsupported tools)")
     review.add_argument(
@@ -117,6 +122,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review.add_argument("--run")
     review.add_argument("--token")
+
+    notes = subparsers.add_parser(
+        "notes", help="Update the run notes safely (authoritative original, then mirror)"
+    )
+    notes_group = notes.add_mutually_exclusive_group(required=True)
+    notes_group.add_argument("--append", help="append this text as a new trailing block")
+    notes_group.add_argument("--set", dest="set_text", help="replace the whole notes file with this text")
+    notes.add_argument("--run")
+    notes.add_argument("--token")
 
     stop = subparsers.add_parser("stop", help="End the run, preserving evidence")
     stop.add_argument("--reason", required=True)
@@ -483,6 +497,26 @@ def _run_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+# --- notes ----------------------------------------------------------------
+
+
+def _run_notes(args: argparse.Namespace) -> int:
+    repo = _repo_from_cwd()
+    token = _require_token(args)
+    run_dir = state_mod.resolve_run_dir(repo, args.run)
+    # MAC-verify state to keep notes a PM-only write (Developers hold no
+    # token) and to source the run id from authenticated state.
+    state = slice_ops.load_writable_state(run_dir, token)
+    mode, text = ("append", args.append) if args.append is not None else ("set", args.set_text)
+    original, warning = slice_ops.write_notes(repo, run_dir, state["run_id"], text=text, mode=mode)
+    print(f"notes {mode}: {original}")
+    mirror = slice_ops.notes_path(repo, state["run_id"])
+    print(f"mirror: {mirror}")
+    if warning:
+        print(f"WARNING: {warning}")
+    return 0
+
+
 _HANDLERS = {
     "check-plan": _run_check_plan,
     "init": _run_init,
@@ -493,6 +527,7 @@ _HANDLERS = {
     "send": _run_send,
     "finalize": _run_finalize,
     "review": _run_review,
+    "notes": _run_notes,
     "stop": _run_stop,
 }
 

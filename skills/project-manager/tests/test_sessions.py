@@ -252,16 +252,49 @@ class TestStartSessionAndBasicLifecycle(TmuxSessionTestCase):
 
 
 class TestSendPrompt(TmuxSessionTestCase):
-    def test_send_prompt_injects_file_content_into_pane(self) -> None:
+    def test_send_prompt_submits_the_pointer_not_just_types_it(self) -> None:
         name = "pm-test-sendprompt-s01a0"
-        self._start(name, "cat -")
+        # Echoes SUBMITTED:<line> only after reading a newline, so the marker
+        # proves the pointer was actually submitted (an Enter landed), not
+        # merely echoed by the tty as it would be with a bare `cat -`.
+        self._start(name, "sh -c 'read line; echo SUBMITTED:$line; sleep 30'")
         self.assertTrue(self._wait_for(lambda: sessions.session_exists(name)))
-        prompt_path = self.repo / "prompt.txt"
-        prompt_path.write_text("PM_TEST_PROMPT_MARKER_XYZ\n", encoding="utf-8")
 
-        sessions.send_prompt(name, prompt_path)
+        sessions.send_prompt(name, "read your contract at /x/prompt.md POINTER_MARKER_XYZ")
 
-        self.assertTrue(self._wait_for(lambda: "PM_TEST_PROMPT_MARKER_XYZ" in sessions.pane_text(name)))
+        self.assertTrue(
+            self._wait_for(
+                lambda: "SUBMITTED:" in sessions.pane_text(name) and "POINTER_MARKER_XYZ" in sessions.pane_text(name)
+            )
+        )
+
+    def test_send_prompt_withholds_second_enter_when_a_hard_stop_appears(self) -> None:
+        name = "pm-test-sendprompt-rescan-s01a0"
+        # After reading the pointer (first Enter), the harness reveals a
+        # credential prompt, then does a TIMED read for a second line: it
+        # prints GOT_SECOND_ENTER if one arrives, NO_SECOND_ENTER if it times
+        # out. The settle-and-rescan must withhold the second Enter, so
+        # NO_SECOND_ENTER is the expected positive outcome. Waiting for that
+        # sentinel — rather than asserting absence immediately — makes the
+        # check race-robust: a broken impl that DID send the second Enter
+        # would print GOT_SECOND_ENTER before the timeout instead.
+        self._start(
+            name,
+            "bash -c 'read a; echo Enter API key to continue; "
+            "if read -t 3 b; then echo GOT_SECOND_ENTER; else echo NO_SECOND_ENTER; fi; sleep 30'",
+        )
+        self.assertTrue(self._wait_for(lambda: sessions.session_exists(name)))
+
+        sessions.send_prompt(name, "read your contract at /x/prompt.md")
+
+        self.assertTrue(self._wait_for(lambda: "NO_SECOND_ENTER" in sessions.pane_text(name), timeout=8.0))
+        self.assertNotIn("GOT_SECOND_ENTER", sessions.pane_text(name))
+
+    def test_send_prompt_refuses_multiline_pointer(self) -> None:
+        # A newline would mean the multi-KB contract leaked into the launch
+        # message instead of the prompt.md file it must point to.
+        with self.assertRaises(PmError):
+            sessions.send_prompt("pm-test-doesnt-matter-s01a0", "line one\nline two")
 
 
 class TestSendLine(TmuxSessionTestCase):
@@ -373,11 +406,8 @@ class TestSendPromptCredentialGuard(TmuxSessionTestCase):
         self._start(name, "bash -c 'echo Enter API key to continue; sleep 30'")
         self.assertTrue(self._wait_for(lambda: "Enter API key" in sessions.pane_text(name)))
 
-        prompt_path = self.repo / "prompt.txt"
-        prompt_path.write_text("PM_TEST_PROMPT_MARKER\n", encoding="utf-8")
-
         with self.assertRaises(PmError) as ctx:
-            sessions.send_prompt(name, prompt_path)
+            sessions.send_prompt(name, "read your contract at /x/prompt.md")
         self.assertIn("credential", str(ctx.exception).lower())
 
 

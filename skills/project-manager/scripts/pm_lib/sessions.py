@@ -334,37 +334,48 @@ def wait_until_ready(
 # --- Injection ---------------------------------------------------------------
 
 
-def send_prompt(session: str, prompt_path: Path) -> None:
-    """load-buffer/paste-buffer/delete-buffer, then settle-and-double-C-m.
+def send_prompt(session: str, pointer: str) -> None:
+    """Deliver the one-line launch pointer, then settle-and-double-C-m.
 
-    Refuses outright when any hard-stop marker is visible in the pane at
-    injection time — the initial prompt injection is a send like any other
-    (target-design §3.2's "hard-prompt refusal on any send"), and pasting a
-    multi-KB prompt plus double-Enter into a credential/approval/side-effect
-    dialog would answer it blind. Readiness polling screens only trust
-    prompts (their phrasings are launch-specific); this is the full-set
-    backstop at the moment that matters.
+    `pointer` is the short "read your contract at <path>" line rendered by
+    `prompts.render_launch_pointer`; the full multi-KB contract lives in the
+    `prompt.md` file it names, not in this message. Earlier this function
+    pasted the whole contract via `tmux load-buffer`/`paste-buffer`, but PM
+    Test 20 (Finding 1) found some harness TUIs silently truncate a paste at
+    a fixed input-buffer size (~3 KB), leaving the Developer without its
+    validation plan, workflow, or hard rules. A single-line pointer is far
+    below any such limit and is sent as literal keystrokes, not a paste, so
+    the delivery path can no longer drop contract content.
 
-    A single C-m sent right after paste-buffer can be consumed finalizing the
-    pasted multi-line block instead of submitting it (confirmed by
-    reproduction in the old-evidence adapter); a second C-m after the TUI
-    settles reliably submits it. Both sends tolerate a session that has
-    already exited — a fast-finishing harness can exit before either fires,
-    which is a normal completion path, not a send_prompt failure.
+    Refuses outright when any hard-stop marker is visible in the pane — the
+    initial injection is a send like any other (target-design §3.2's
+    "hard-prompt refusal on any send"), and submitting anything blind into a
+    credential/approval/side-effect dialog would answer it. Refuses a
+    newline: the pointer must stay a single `send-keys -l` line.
+
+    A single C-m right after the send can be consumed finalizing the line
+    instead of submitting it, so a second is sent after the TUI settles — but
+    only after re-scanning the pane, so a credential/approval/side-effect
+    prompt the first C-m may have surfaced is never blindly answered by the
+    second (target-design §3.2's "hard-prompt refusal on any send"; when one
+    C-m already submitted, withholding the second is harmless). Both C-m
+    sends tolerate a session that has already exited — a fast-finishing
+    harness can exit before either fires, a normal completion path, not a
+    send_prompt failure.
     """
+    if "\n" in pointer or "\r" in pointer:
+        raise PmError("launch pointer must be a single line; the contract itself goes in the prompt.md file it names")
     hard_stop = scan_hard_stop(pane_text(session))
     if hard_stop["present"]:
         raise PmError(
-            "refusing to inject the slice prompt into a visible hard prompt: " + ", ".join(hard_stop["kinds"])
+            "refusing to inject the slice launch pointer into a visible hard prompt: " + ", ".join(hard_stop["kinds"])
         )
-    buffer_name = f"{session}_prompt"
-    _tmux_or_raise(["load-buffer", "-b", buffer_name, str(prompt_path)], "tmux prompt load failed")
-    _tmux_or_raise(["paste-buffer", "-b", buffer_name, "-t", session], "tmux prompt paste failed")
-    _run_tmux("delete-buffer", "-b", buffer_name)
+    _tmux_or_raise(["send-keys", "-t", session, "-l", "--", pointer], "tmux launch pointer send failed")
     time.sleep(1.0)
     _run_tmux("send-keys", "-t", session, "C-m")
     time.sleep(1.0)
-    _run_tmux("send-keys", "-t", session, "C-m")
+    if session_exists(session) and not scan_hard_stop(pane_text(session))["present"]:
+        _run_tmux("send-keys", "-t", session, "C-m")
 
 
 def send_line(session: str, text: str) -> None:

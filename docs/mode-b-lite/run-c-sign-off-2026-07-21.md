@@ -2,7 +2,7 @@
 
 ## Conclusion
 
-**PASS.** All five original Run C bar items are caught or rendered harmless, and both retrospective additions are pinned by standalone live scenarios. No slice was accepted in any adversarial trial. Run C is satisfied; Run B remains open.
+**PASS.** All five original Run C bar items are caught or rendered harmless, and both retrospective additions are pinned by standalone live scenarios. No slice was accepted in any adversarial trial. Run C is satisfied. Run B was subsequently satisfied by Test 23; the combined Stage 7 status is authoritative in `implementation-blueprint.md` §7.
 
 This exercise tests the project-manager system's refusal mechanics, not the quality of a fixture implementation. The three pre-existing scenarios were cited and rerun directly from the installed project-manager tests; they were not rebuilt. Four additional scenarios used one fake harness each and an isolated `mktemp` Git repository, following the README's `--harness-command` pattern.
 
@@ -63,4 +63,4 @@ uv run --no-project --with pytest python -m pytest -q \
 
 ## Sign-off decision
 
-Run C's bar is met. The five original attack/failure shapes are caught or rendered harmless, and the two retrospective additions demonstrate the launch hard-stop and review-freshness protections live. It is therefore valid to update only the Stage 7 status line in `implementation-blueprint.md` from “Runs B and C remain open” to “Run C satisfied; Run B remains open.”
+Run C's bar is met. The five original attack/failure shapes are caught or rendered harmless, and the two retrospective additions demonstrate the launch hard-stop and review-freshness protections live. At this sign-off point Run B was still pending; Test 23 subsequently satisfied it, and `implementation-blueprint.md` §7 now records Stage 7 as complete.

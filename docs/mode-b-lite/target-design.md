@@ -306,7 +306,7 @@ ai-agent-coder/
 │       │       ├── git_ops.py     # ~150  changed-files, ancestry, cleanliness, surface matching
 │       │       ├── floor.py       # ~150  the mechanical floor, one module, one function surface
 │       │       ├── sessions.py    # ~280  tmux control, readiness, hard-prompt markers, capture
-│       │       ├── profiles.py    # ~160  4 harness profiles + model-identity check
+│       │       ├── profiles.py    # ~160  5 harness profiles + model-identity check
 │       │       ├── slice_ops.py   # ~300  init/start/observe/send/finalize/stop orchestration
 │       │       ├── review.py      # ~120  PM-commissioned reviewer sessions
 │       │       └── prompts.py     # ~100  template rendering

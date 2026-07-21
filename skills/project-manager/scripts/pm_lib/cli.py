@@ -51,7 +51,9 @@ def build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="Set up a new PM run")
     init.add_argument("--repo", required=True)
     init.add_argument("--plan", required=True)
-    init.add_argument("--harness", required=True)
+    init.add_argument(
+        "--harness", required=True, help="Developer harness: one of codex, claude, copilot, opencode, qwen"
+    )
     init.add_argument("--model")
     init.add_argument("--effort")
     branch_group = init.add_mutually_exclusive_group()
@@ -59,7 +61,9 @@ def build_parser() -> argparse.ArgumentParser:
     branch_group.add_argument("--create-branch")
     init.add_argument("--attest", help='comma-separated slice ids, e.g. "Slice 1,Slice 2"')
     init.add_argument("--max-attempts", type=int)
-    init.add_argument("--reviewer-tools", help="comma-separated tool names")
+    init.add_argument(
+        "--reviewer-tools", help="comma-separated Reviewer harnesses: codex, claude, copilot, opencode, qwen"
+    )
     init.add_argument("--reviewer-model")
     init.add_argument("--reviewer-effort")
     init.add_argument("--harness-command")

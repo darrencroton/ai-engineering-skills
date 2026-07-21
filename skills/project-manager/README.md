@@ -6,8 +6,10 @@ Mode B runs a frozen implementation plan autonomously under a supervising PM age
 
 - Python ≥ 3.13 (`PurePosixPath.full_match` drives authorized-surface matching; `pm.py` refuses older interpreters)
 - `git`, `tmux`
-- At least one supported coding CLI for the Developer seat: `codex`, `claude`, `copilot`, or `opencode` (or any command via `--harness-command`)
+- At least one supported coding CLI for the Developer seat: `codex`, `claude`, `copilot`, `opencode`, or `qwen` (or any command via `--harness-command`)
 - Optionally a reviewer CLI (`codex`, `claude`, `copilot`, `opencode`, `qwen`) for PM-commissioned reviews
+
+All five supported harnesses are equally eligible for either seat; the operator chooses what fits the plan. Profiles encode factual CLI differences only: for example, OpenCode and Qwen expose no tested interactive effort override, so `--effort` fails closed for those harnesses rather than being silently ignored.
 
 ## CLI
 
@@ -29,6 +31,8 @@ All commands: `python3 skills/project-manager/scripts/pm.py <command> …`, run 
 | `stop --reason R [--slice-status stopped] [--scavenge]` | end the run preserving evidence; `--scavenge` sweeps sessions even with state destroyed |
 
 Exit codes: 0 success; 1 = a `finalize` refusal — a floor fact failed, or `--accept` was refused for another recorded reason (e.g. a missing or stale mandatory review on an elevated slice); 2 = error/refusal (integrity failures are prefixed `INTEGRITY:` and are terminal — start a new run).
+
+If a harness displays a directory-trust or permission prompt, the PM stops and leaves that approval to the human. The human may configure trust through the harness's own supported mechanism, then rerun `start-slice`; the PM must not acknowledge the dialog with `tmux send-keys` or change user-global harness configuration itself.
 
 ## Layout: who owns what
 

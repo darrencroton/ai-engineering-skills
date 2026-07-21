@@ -1,6 +1,6 @@
 # Mode B Lite — Outcomes Review: Plan Goals vs. Delivered System
 
-**Status:** Retrospective outcomes assessment, written after Stage 6 (cutover) and before Stage 7 (live validation). Measured at `87ee375` on `feature/mode-b-lite-impl`.
+**Status:** Retrospective outcomes assessment, originally measured after Stage 6 at `87ee375` on `feature/mode-b-lite-impl`; live-dependent rows updated after Stage 7 completed on 2026-07-21.
 **Question answered:** did the implementation deliver the before→after outcomes the approved plan promised, judged against the *adopted vision* (`docs/VISION.md`)? Every goal is scored **1–5** (5 = fully achieved); every non-5 is explained, including where the ceiling was structural rather than a failure of execution.
 **Measurement method:** raw line counts via `wc -l`; logical code lines via tokeniser (comments/docstrings/blanks excluded); test counts via `grep -c "def test_"`; baseline figures from the current-state map §1 (measured on `main` at `7a3ed6e`). Companion document: [`retrospective-code-review.md`](retrospective-code-review.md) (code-level findings F1–F11, independently assessed by Codex).
 
@@ -15,7 +15,7 @@
 | Responsibility & role simplification | **5** | One judge, one seat, clean module boundaries |
 | Workflow simplification | **5** | 4-step loop, 10 commands, 44-line Developer prompt |
 | Honesty & accountability goals | **4** | Excellent in the new system; two cutover framing misses (F9/F10) |
-| Weak-model & completion-rate goals | **provisional** | Mechanisms delivered; the falsifiable claim is exactly what Stage 7 measures |
+| Weak-model & completion-rate goals | **5** | Stage 7 confirmed 5/5 completion in both weak- and strong-pairing runs |
 | **Overall (scorable goals)** | **≈4.6 / 5** | The plan's intent is delivered; residuals are small and named |
 
 ## 2. Quantitative goals (blueprint §9), measured
@@ -41,10 +41,10 @@
 | 17 | PM documentation lines | 1,647 | ~450–550 | **334** (SKILL 62 + README 112 + references 160) | **5** | −80%, beat the target with the honesty content intact |
 | 18 | Developer prompt (before slice content) | ~160 lines | ~55 ◊ | **44 template lines** | **5** | The 43-line embedded delegation contract is gone entirely |
 | 19 | Developer result format | 13 fields, 2 sub-schemas, 2 vocabularies | 4 fields | **4 fields, 2 mandatory** | **5** | |
-| 20 | Model interactions per 5-slice run | ~60–100 supervising calls + relays | ~40–60 ◊ | **not yet measurable** | — | This is a Stage 7 Run B measurement by design (`events.jsonl` counting); scoring it now would be narration |
+| 20 | Model interactions per 5-slice run | ~60–100 supervising calls + relays | ~40–60 ◊ | **5 Developer + 6 Reviewer sessions; 34 toolkit events; 0 steers/relaunches/nudges** | **5** | Stage 7 Test 23 measured; the historical baseline's exact event count was unavailable, so no false exact delta is claimed |
 | 21 | Files to read to understand Mode B | ~10 docs + 20 modules | ~5 docs + 11 modules | **5 docs + 11 modules** | **5** | SKILL, README, run-state, 2 prompt refs |
 | 22 | Sources of truth per concept | 4 duplicated clusters | 1 each | **1 each** (CONTRIBUTING map updated; every contract has one home) | **5** | |
-| 23 | Harness-specific branches | 4 profiles | 4 | **4** (+ qwen reviewer-only) | **5** | Deliberately flat — external variance is real |
+| 23 | Harness-specific branches | 4 Developer profiles (+ qwen reviewer-only) | 4 | **5 Developer/Reviewer profiles** | **5** | Native Qwen promoted after Test 24; external variance remains isolated in profiles |
 | 24 | Operational steps per normal slice | ~9-step loop | 4-step loop | **4** (start-slice / observe / finalize / decide) | **5** | |
 
 ### 2.1 The missed number: implementation LOC (score 3)
@@ -73,11 +73,11 @@ Why not a 2: no behaviour was added beyond spec (the drift-audit discipline held
 | Complexity deliberately retained where variance is real | tmux/readiness/marker machinery, segment-aware matching, parser strictness all kept and tested | **5** |
 | Complexity moved to prompts counted honestly (SKILL.md ≤ ~120–130 lines) | SKILL.md is **62 lines** — half the cap; the charter carries judgement guidance without becoming a statute book | **5** |
 | SKILL.md/docs honesty style retained | "Trust model, honestly" + inherited-gaps register + per-layer enforcement attribution all present | **5** |
-| No old structure under new names (§6.6 pre-check) | No failure enums, no second control-read state copy, no unread-field validation, no gating artifact families, no verdict-string parsing (review §2; the one-time human sign-off remains scheduled) | **5** (pending the human pass) |
+| No old structure under new names (§6.6) | No failure enums, no second control-read state copy, no unread-field validation, no gating artifact families, no verdict-string parsing; the one-time owner review completed and passed on 2026-07-21 | **5** |
 
 ## 4. Capability goals (blueprint §10), scored where scorable now
 
-Rows whose truth depends on live runs are marked *provisional* — Stage 7 exists precisely to measure them, and pre-scoring them from the bench would repeat the old system's mistake of grading its own work.
+The rows that originally depended on live runs were provisional in the Stage 6 snapshot. Stage 7 has now supplied that evidence; their final scores below cite the live outcomes rather than bench projections.
 
 | Capability (weight) | Promised | Delivered now | Score |
 |---|---|---|---|
@@ -89,10 +89,10 @@ Rows whose truth depends on live runs are marked *provisional* — Stage 7 exist
 | PM-side simplicity (M) | 4 | 10 commands, 4 statuses, one loop; minor dents: F1 (unreachable `complete`), F3 (dead flag) | **4** |
 | Maintenance burden (M) | 4 | 8.9k total lines vs 20.8k, no interacting statutes, stdlib-only, CI-enforced no-baggage | **5** |
 | Interruption recovery (H) | 4 | Durable authenticated state + `status` reconstruction + scavenge; `wake_at` declared but writer-less (F6) — the declared harness-dependency honesty survives, the recorded-resume-time part doesn't yet | **4** |
-| Failed-work detection (H) | 4 | Same evidence judged directly; elevated slices force both fresh reviews + PM validation rerun | **provisional 4** — bench-verified mechanics; live confirmation is Run A/B's job |
-| Successful autonomous completion (H) | 4 (from 1–2 weak / 4 strong) | All wedge points removed on the bench (no schema traps, no retention gates, no digest churn) | **provisional** — this is *the* falsifiable claim; Run A's ≥4/5 bar decides it |
-| Support for weaker Developer models (M) | 4 (from 1) | Minimal paperwork, PM tolerance, plan-level controls in place | **provisional** — Run A decides |
-| Cost efficiency / operating overhead (M) | 4 | Shorter prompts, no relays, no forensics; interaction counts | **provisional** — Run B measures |
+| Failed-work detection (H) | 4 | Fresh review and PM-validation paths exercised across Runs A/B; adversarial failures refused in Run C | **5** |
+| Successful autonomous completion (H) | 4 (from 1–2 weak / 4 strong) | Run A completed 5/5 with the former 0/5 weak pairing; Run B completed 5/5 with a strong pairing | **5** |
+| Support for weaker Developer models (M) | 4 (from 1) | Run A improved the repeated 0/5 baseline to 5/5 with one in-surface steer | **5** |
+| Cost efficiency / operating overhead (M) | 4 | Run B completed 5/5 in ~14m42s with 34 toolkit events and no interventions | **5** |
 | Deterministic acceptance reproducibility (L) | 2 (deliberate regression) | Floor deterministic; acceptance recorded but not re-derivable — exactly as the vision trades | **5** (the trade landed as designed, and is documented as a trade) |
 | Unattended no-model batch (L) | 0 (dropped by owner) | Gone; no vestige | **5** (as decided) |
 
@@ -111,12 +111,12 @@ Rows whose truth depends on live runs are marked *provisional* — Stage 7 exist
 | Minimise the whole system | −57% total maintained mass; no mechanism without a consumer — minus the two dead-surface items (F1, F3) | **4** |
 | Honest threat model, stated where it matters | Outstanding inside `skills/project-manager/` (trust-model section, inherited-gaps register); dented at the repo's front door — README's opening still speaks the *abandoned* vision's identity ("moves trust out of the model", "the chain never changes"), and CONTRIBUTING cites a retired principle (F9/F10) | **3** — the vision-swap goal was "the repository never claims an assurance model it doesn't run", and two prominent framing passages currently do exactly that. Cheap to fix; scored honestly because this axis is the one the cutover stage existed to protect |
 
-## 6. What cannot be scored yet, and what would change the scores
+## 6. Stage 7 disposition
 
-- **Run A (weak-pairing completion)** decides the provisional rows in §4 and, with them, whether the plan's central bet — judgement over machinery raises delivered outcome — is confirmed. A miss triggers blueprint §8's diagnose-don't-patch rule, not a quiet fix.
-- **Run B (strong-pairing parity + interaction counts)** turns metric #20 into a measured value.
-- **Run C (adversarial spot-checks)** converts several bench-verified "5"s (floor, tamper, approval bypass) into live-run evidence; the retrospective review recommends adding launch-time hard-prompt and stale-review-acceptance scenarios to it.
-- **Fixing F1/F2/F3 + F9/F10** (all small) would raise §2 row 5 to 5, §5 "fail closed" to 5, "minimise" to 5, and "honest threat model" to 5 — i.e., the plan's non-provisional goals would then be met essentially in full.
+- **Run A satisfied:** Test 21 completed 5/5 with the former 0/5 local pairing, confirming the central weak-model bet.
+- **Run B satisfied:** Test 23 completed 5/5 with zero interventions and materially lower observed operating overhead. The historical baseline's exact event count was not recoverable; the measured run and qualitative comparison are recorded without inventing precision.
+- **Run C satisfied:** every adversarial shape was caught or rendered harmless, including launch-time hard prompts and stale-review acceptance.
+- Tests 24 and 25 added 5/5 cross-harness confirmation. Test 24's native-Qwen path is now a first-class profile, and its observed approval phrasing is regression-pinned in the hard-stop floor.
 
 ## 7. Addendum: post-assessment fixes (same change-set)
 
@@ -124,4 +124,4 @@ The scores above describe the system **as delivered at Stage 6** (`87ee375`) and
 
 ## 8. Bottom line
 
-Judged against the adopted vision, the implementation delivered the plan's substance completely: every structural move shipped as designed, every workflow/vocabulary/responsibility goal is met, the honesty apparatus survived the rewrite, and no goal was met by quietly reintroducing the machinery the plan deleted. The genuine misses are one headline metric (implementation LOC, missed on its own terms even after fair accounting), a handful of small dead or unfinished surfaces (F1, F3, F6), one launch-path floor gap (F2), and two front-door documentation passages still speaking the old vision (F9/F10). Nothing in the misses touches the design's load-bearing claims — those stand or fall with Stage 7, exactly as the plan intended.
+Judged against the adopted vision, the implementation delivered the plan's substance completely: every structural move shipped as designed, every workflow/vocabulary/responsibility goal is met, the honesty apparatus survived the rewrite, and no goal was met by quietly reintroducing the machinery the plan deleted. The original Stage 6 snapshot's genuine misses remain recorded above, including the implementation-LOC miss; the later addendum records their fixes. Stage 7 confirmed the load-bearing completion, efficiency, and refusal claims, and the owner-confirmed §6.6 anti-resurrection review passed. The implementation plan is complete.

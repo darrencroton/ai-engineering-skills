@@ -73,6 +73,11 @@ class TestScanHardStopPositiveFixtures(unittest.TestCase):
         self.assertTrue(result["present"])
         self.assertIn("approval_prompt", result["kinds"])
 
+    def test_qwen_manual_approval_prompt(self) -> None:
+        result = sessions.scan_hard_stop("This action requires manual approval before continuing")
+        self.assertTrue(result["present"])
+        self.assertIn("approval_prompt", result["kinds"])
+
     def test_credential_prompt(self) -> None:
         result = sessions.scan_hard_stop("Enter API key to continue")
         self.assertTrue(result["present"])

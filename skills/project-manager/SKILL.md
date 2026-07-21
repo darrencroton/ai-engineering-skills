@@ -56,7 +56,7 @@ Plan file: <absolute path>
 Repo: <absolute path>
 
 Use the project-manager skill. You are the PM. Run this plan under Mode B:
-init with --harness <codex|claude|copilot|opencode> [--model …] (keep the printed PM_RUN_TOKEN in your environment only), then loop start-slice / observe / assess / finalize per the skill's workflow until every slice is decided, stopping where the plan or floor requires a human. Then report from run-report.md: what was accepted on what evidence, what stopped and why, and residual risk.
+init with --harness <codex|claude|copilot|opencode|qwen> [--model …] (keep the printed PM_RUN_TOKEN in your environment only), then loop start-slice / observe / assess / finalize per the skill's workflow until every slice is decided, stopping where the plan or floor requires a human. Then report from run-report.md: what was accepted on what evidence, what stopped and why, and residual risk.
 ```
 
 Details the launcher relies on: CLI reference and state layout in [README.md](README.md) and [references/run-state.md](references/run-state.md); prompt contracts in [references/developer-prompt.md](references/developer-prompt.md) and [references/reviewer-prompt.md](references/reviewer-prompt.md).

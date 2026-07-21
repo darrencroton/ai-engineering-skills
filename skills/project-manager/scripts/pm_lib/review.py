@@ -1,7 +1,7 @@
 """The `review` command: commissioning an independent review of the
 pinned diff (target-design §3.3/§5/§10, implementation-blueprint.md §4).
 
-`review.py` shares the four-plus-`qwen` tool roster with the Developer
+`review.py` shares the five-tool roster with the Developer
 launch path conceptually, but not its code: reviews run one-shot/exec where
 the tool supports it (never the Developer's interactive tmux TUI path), so
 this module composes its own command table — re-specified fresh from

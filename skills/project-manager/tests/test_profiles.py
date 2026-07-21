@@ -1,31 +1,30 @@
 """Protected behaviours: harness launch-command composition and model inventory.
 
-Pins the four harness profiles (target-design/replacement-ledger §9.1 — the
-observed base commands and override flags are the sanctioned data
-carry-over; the composing code is written fresh):
+Pins the five harness profiles (target-design/replacement-ledger §9.1 — the
+observed base commands and override flags are sanctioned operational data;
+the composing code is written fresh):
 
-- `HARNESS_PROFILES` has exactly the four supported harnesses: codex,
-  claude, copilot, opencode.
+- `HARNESS_PROFILES` has exactly the five supported harnesses: codex,
+  claude, copilot, opencode, qwen.
 - `compose_command` builds each harness's base command exactly as observed:
   codex `codex --no-alt-screen -s workspace-write -a never`; claude
   `claude --permission-mode auto`; copilot `copilot --allow-all-tools
   --autopilot`; opencode `opencode --auto`.
 - Model overrides: codex/opencode use `-m <model>`; claude/copilot use
-  `--model <model>`.
+  `--model <model>`; qwen uses `-m <model>`.
 - Effort overrides: codex composes `-c model_reasoning_effort="<effort>"`;
-  claude/copilot use `--effort <effort>`; opencode has no effort mechanism
-  at all, so an effort request fails closed with a `PmError` at compose
+  claude/copilot use `--effort <effort>`; opencode/qwen have no effort
+  mechanism, so an effort request fails closed with a `PmError` at compose
   time (never silently dropped, never a broken launch command).
 - codex-only composition: `reviewer_network=True` appends `-c
   sandbox_workspace_write.network_access=true`; a `git_access_dir` appends
-  `--add-dir <path>`. Both are no-ops (not errors) for the other three
+  `--add-dir <path>`. Both are no-ops (not errors) for the other four
   harnesses, since Stage 3's caller composes generically and not every
   harness has an equivalent flag.
 - claude-only composition: a `session_id` appends `--session-id <uuid>`;
-  a no-op for the other three harnesses.
-- An unknown harness name (not one of the four) raises `PmError` naming
-  the four supported harnesses.
-- `query_model_identity` returns `None` for codex/claude/copilot (no
+  a no-op for the other four harnesses.
+- An unknown harness name raises `PmError` naming all five supported harnesses.
+- `query_model_identity` returns `None` for codex/claude/copilot/qwen (no
   inventory contract). For opencode it runs `opencode models <provider>
   --verbose` (provider = text before the first `/` in the model id) and:
   parses the verbose-JSON display-name metadata following the matched
@@ -54,8 +53,10 @@ from pm_lib import profiles
 
 
 class TestHarnessProfileTable(unittest.TestCase):
-    def test_exactly_four_supported_harnesses(self) -> None:
-        self.assertEqual(set(profiles.HARNESS_PROFILES.keys()), {"codex", "claude", "copilot", "opencode"})
+    def test_exactly_five_supported_harnesses(self) -> None:
+        expected = ("codex", "claude", "copilot", "opencode", "qwen")
+        self.assertEqual(profiles.SUPPORTED_HARNESSES, expected)
+        self.assertEqual(set(profiles.HARNESS_PROFILES), set(expected))
 
 
 class TestComposeCommandBaseCommands(unittest.TestCase):
@@ -70,6 +71,9 @@ class TestComposeCommandBaseCommands(unittest.TestCase):
 
     def test_opencode_base_command(self) -> None:
         self.assertEqual(profiles.compose_command("opencode"), "opencode --auto")
+
+    def test_qwen_base_command(self) -> None:
+        self.assertEqual(profiles.compose_command("qwen"), "qwen")
 
 
 class TestComposeCommandOverrides(unittest.TestCase):
@@ -99,6 +103,14 @@ class TestComposeCommandOverrides(unittest.TestCase):
         with self.assertRaises(PmError) as ctx:
             profiles.compose_command("opencode", effort="high")
         self.assertIn("opencode", str(ctx.exception))
+
+    def test_qwen_model_only(self) -> None:
+        self.assertEqual(profiles.compose_command("qwen", model="qwen/qwen3.6"), "qwen -m qwen/qwen3.6")
+
+    def test_qwen_effort_fails_closed(self) -> None:
+        with self.assertRaises(PmError) as ctx:
+            profiles.compose_command("qwen", effort="high")
+        self.assertIn("qwen", str(ctx.exception))
 
     def test_no_overrides_leaves_base_command_untouched(self) -> None:
         self.assertEqual(profiles.compose_command("claude"), "claude --permission-mode auto")
@@ -149,13 +161,13 @@ class TestComposeCommandUnknownHarness(unittest.TestCase):
         with self.assertRaises(PmError) as ctx:
             profiles.compose_command("gemini")
         message = str(ctx.exception)
-        for name in ("codex", "claude", "copilot", "opencode"):
+        for name in ("codex", "claude", "copilot", "opencode", "qwen"):
             self.assertIn(name, message)
 
 
 class TestQueryModelIdentityNoInventory(unittest.TestCase):
-    def test_codex_claude_copilot_have_no_inventory_contract(self) -> None:
-        for harness in ("codex", "claude", "copilot"):
+    def test_codex_claude_copilot_qwen_have_no_inventory_contract(self) -> None:
+        for harness in ("codex", "claude", "copilot", "qwen"):
             with self.subTest(harness=harness):
                 self.assertIsNone(profiles.query_model_identity(harness, "some-model"))
 

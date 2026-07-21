@@ -1,10 +1,10 @@
 """Harness launch profiles: composed commands and model-inventory queries.
 
-Behaviour is re-specified from the current implementation's observed launch
-mechanics (see the Stage 2 brief's old-evidence pointer and
+Behaviour is re-specified from observed launch mechanics (see the Stage 2
+brief's old-evidence pointer, the Stage 7 native-Qwen run, and
 ``docs/mode-b-lite/replacement-ledger.md`` §9.1 — recorded marker/readiness
-strings, including these base commands and flags, are the sanctioned
-data carry-over; the code composing them is written fresh).
+strings, including these base commands and flags, are sanctioned operational
+data; the code composing them is written fresh).
 
 Launch policy (target-design + implementation-blueprint §4, simplified from
 the old tri-state): there is exactly one composed path — this module's
@@ -24,7 +24,7 @@ from typing import Any
 
 from . import PmError
 
-SUPPORTED_HARNESSES: tuple[str, ...] = ("codex", "claude", "copilot", "opencode")
+SUPPORTED_HARNESSES: tuple[str, ...] = ("codex", "claude", "copilot", "opencode", "qwen")
 
 HARNESS_PROFILES: dict[str, dict[str, Any]] = {
     "codex": {
@@ -53,6 +53,12 @@ HARNESS_PROFILES: dict[str, dict[str, Any]] = {
         # fails closed at compose time (see _append_effort below) instead of
         # launching a broken command.
         "model_inventory_command": ["opencode", "models", "{provider}", "--verbose"],
+    },
+    "qwen": {
+        "base_command": ["qwen"],
+        "model_flag": "-m",
+        # Qwen Code's interactive command exposes no reasoning-effort flag.
+        # An effort request therefore fails closed through _append_effort.
     },
 }
 
@@ -127,7 +133,7 @@ def query_model_identity(harness: str, model: str) -> dict[str, str] | None:
     """Resolve an exact model id through a harness-owned inventory when available.
 
     ``None`` means the profile has no queryable inventory contract (codex,
-    claude, copilot). A configured inventory (opencode) is fail-closed: a
+    claude, copilot, qwen). A configured inventory (opencode) is fail-closed: a
     failed query, a model id absent from the inventory, or unparseable/empty
     display-name metadata all raise ``PmError`` rather than letting the
     harness silently select a different model.

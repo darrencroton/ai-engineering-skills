@@ -44,4 +44,4 @@ Do not retain `steer-<attempt>.md` as an accountability mechanism without first 
 
 ## Next action
 
-Use this report as the frozen brief for a new implementation session. After implementation, run a fresh §6.6 review before clearing the owner gate for Runs A/B.
+Use this report as the frozen brief for a new implementation session. After implementation, run a fresh §6.6 review before clearing the owner gate for Runs A/B. **That owner review subsequently completed and passed on 2026-07-21.**

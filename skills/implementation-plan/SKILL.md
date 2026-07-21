@@ -151,7 +151,7 @@ For each selected slice or batch, in plan order:
 
 After the selected slice(s) or batch are committed, use the handoff skill to record state, audit provenance (Reviewer tool/label or Developer self-audit and fallback context), and the next slice or batch to resume from. Do not continue past the selected scope.
 
-Confirm before starting: plan file read, selected slice(s) or batch, branch, and the first slice.
+Confirm before starting: plan file read, selected slice(s) or batch, branch, and the first slice. Then begin.
 ```
 
 ### Mode A — Autonomous session (alternate usage)
@@ -179,5 +179,5 @@ Stop the run early on: an approval-gated slice, a blocker, an unapproved scope c
 
 When all slices are complete, use the report skill to write a final report covering slices committed, gate results and audit provenance per slice, validation, and every residual or post-plan consideration left for me to assess. Identify each Reviewer tool/label used and every Developer self-audit with its fallback context. Do not lose a non-blocking observation merely because it did not belong in the frozen plan.
 
-Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice.
+Confirm before starting: plan file read, branch name, the ordered slice list you'll execute, and the first slice. Then begin.
 ```

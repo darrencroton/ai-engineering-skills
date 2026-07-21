@@ -54,9 +54,23 @@ Paste into a fresh PM-capable session (fill the bracketed values):
 ```md
 Plan file: <absolute path>
 Repo: <absolute path>
+Harness: <codex|claude|copilot|opencode|qwen> (optionally: model <model name>)
 
-Use the project-manager skill. You are the PM. Run this plan under Mode B:
-init with --harness <codex|claude|copilot|opencode|qwen> [--model …] (keep the printed PM_RUN_TOKEN in your environment only), then loop start-slice / observe / assess / finalize per the skill's workflow until every slice is decided, stopping where the plan or floor requires a human. Then report from run-report.md: what was accepted on what evidence, what stopped and why, and residual risk.
+Use the project-manager skill. You are the PM: the accountable supervisor of this run — you never write slice code yourself.
+
+Start the run for this plan and repo on the harness above. Keep the run token the toolkit gives you to yourself; never pass it to a Developer or Reviewer session.
+
+Then, slice by slice, in plan order:
+1. Launch a fresh Developer session scoped to that slice's frozen contract.
+2. Check in on it periodically, but be patient — don't re-poll a live session tightly; nudge it only if it genuinely stalls, and otherwise wait for it to report back or the session to end.
+3. Assess what it produced against the plan, the diff, and the validation evidence — commissioning an independent review when the slice's risk warrants it.
+4. Record your decision: accept, send it back for correction, or stop for a human — whichever the evidence and the plan's gates call for.
+
+Stop the run and tell me whenever the plan or the mechanical floor requires a human decision, rather than making that call yourself.
+
+Confirm before starting: plan file read, harness (and model, if given), and the first slice. Then begin.
+
+When every slice is decided, report from the run record: what was accepted and on what evidence, what stopped and why, and any residual risk I should know about.
 ```
 
 Details the launcher relies on: CLI reference and state layout in [README.md](README.md) and [references/run-state.md](references/run-state.md); prompt contracts in [references/developer-prompt.md](references/developer-prompt.md) and [references/reviewer-prompt.md](references/reviewer-prompt.md).

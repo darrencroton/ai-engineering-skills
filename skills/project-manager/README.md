@@ -2,6 +2,10 @@
 
 Mode B runs a frozen implementation plan autonomously under a supervising PM agent: one fresh Developer session per slice, a mechanical floor of eight non-waivable checks, a recorded PM assessment for every decided slice, independent reviews commissioned by PM where risk warrants, and a durable audit trail. The PM's operating contract is [SKILL.md](SKILL.md); this file covers the toolkit, layout, privacy, and a verify-your-setup trial.
 
+## Launcher
+
+To start a Mode B run, paste the launcher prompt from [SKILL.md](SKILL.md#launcher) — the single authoritative copy — into a fresh PM-capable session.
+
 ## Requirements
 
 - Python ≥ 3.13 (`PurePosixPath.full_match` drives authorized-surface matching; `pm.py` refuses older interpreters)

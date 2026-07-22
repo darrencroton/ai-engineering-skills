@@ -1,12 +1,10 @@
-"""Per-vendor session-transcript heuristics for tracked delegates.
+"""Per-vendor session discovery heuristics for tracked delegates.
 
-Claude Code and Codex CLI write their own on-disk session transcripts
-(~/.claude/projects/..., ~/.codex/sessions/...). This module owns everything
-that locates a delegate's session file from its recorded launch command, reads
-lightweight activity signals from it, and extracts the final answer when the
-outfile alone is not enough. delegate_jobs.py imports from here; the split keeps
-the launcher/lifecycle logic and the vendor transcript knowledge in separate
-files.
+This module binds harness-owned session records to a tracked launch using an
+explicit launch-time id where the harness supports one, or exact prompt, cwd,
+and start-time correlation where it does not. It also owns transcript activity
+and extraction. ``delegate_jobs.py`` imports from here so vendor store details
+stay separate from launcher and lifecycle logic.
 """
 
 from __future__ import annotations
@@ -14,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,6 +175,8 @@ def prompt_from_command(command: list[str]) -> str | None:
     tool = infer_tool_name(command)
     if tool == "codex":
         return codex_prompt_from_command(command)
+    if tool == "opencode" and len(command) >= 3 and command[1] == "run":
+        return command[2]
     values = option_values(command, {"-p", "--print", "--prompt"})
     return values[-1] if values else None
 
@@ -203,6 +204,8 @@ def infer_project_dirs(command: list[str], tool: str) -> list[Path]:
         raw_values.extend(option_values(command, {"-C", "--cd", "--add-dir"}))
     elif tool == "copilot":
         raw_values.extend(option_values(command, {"--add-dir"}))
+    elif tool == "opencode":
+        raw_values.extend(option_values(command, {"--dir"}))
 
     project_dirs: list[Path] = []
     seen: set[str] = set()
@@ -234,6 +237,19 @@ def codex_session_root() -> Path:
     return Path.home() / ".codex" / "sessions"
 
 
+def copilot_session_root() -> Path:
+    return Path.home() / ".copilot" / "session-state"
+
+
+def opencode_session_db() -> Path:
+    return Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+
+
+def qwen_project_root(project_dir: Path) -> Path:
+    normalized = re.sub(r"[^A-Za-z0-9]", "-", str(project_dir))
+    return Path.home() / ".qwen" / "projects" / normalized
+
+
 def session_id_from_text(text: str) -> str | None:
     match = SESSION_ID_RE.search(text)
     return match.group(0) if match else None
@@ -253,6 +269,11 @@ def codex_session_id_from_output(path: Path, *, max_bytes: int = 8192) -> str | 
         return None
     match = CODEX_SESSION_ID_RE.search(text)
     return match.group(1) if match else None
+
+
+def configured_session_id(command: list[str]) -> str | None:
+    values = option_values(command, {"--session-id"})
+    return values[-1] if values and values[-1] else None
 
 
 def file_head_contains(path: Path, marker: str | None, *, max_bytes: int = 131072) -> bool:
@@ -352,6 +373,16 @@ def codex_workdir_from_command(command: list[str]) -> Path | None:
         return None
 
 
+def entry_workdir(entry: dict[str, Any]) -> Path | None:
+    raw_cwd = entry.get("cwd")
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        return None
+    try:
+        return Path(raw_cwd).expanduser().resolve()
+    except OSError:
+        return None
+
+
 def resolve_claude_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> Path | None:
     existing = entry.get("session_path")
     if isinstance(existing, str) and existing:
@@ -362,6 +393,18 @@ def resolve_claude_session_path(entry: dict[str, Any], *, wait_seconds: float = 
     command = entry.get("command", [])
     if not isinstance(command, list):
         return None
+
+    session_id = entry.get("session_id") or configured_session_id(command)
+    if isinstance(session_id, str) and session_id:
+        deadline = time.time() + max(wait_seconds, 0.0)
+        while True:
+            for project_dir in infer_project_dirs(command, "claude"):
+                exact_path = claude_project_root(project_dir) / f"{session_id}.jsonl"
+                if exact_path.exists():
+                    return exact_path
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.5)
 
     prompt = prompt_from_command(command)
     marker = prompt_marker(prompt)
@@ -428,10 +471,12 @@ def resolve_codex_session_path(entry: dict[str, Any], *, wait_seconds: float = 0
     prompt = prompt_from_command(command)
     workdir = codex_workdir_from_command(command)
     started_at = parse_iso(entry.get("started_at"))
+    if not prompt or workdir is None or started_at is None:
+        return None
     deadline = time.time() + max(wait_seconds, 0.0)
-    best_match: tuple[int, float, Path] | None = None
 
     while True:
+        matches: list[tuple[float, Path]] = []
         if session_root.exists():
             candidates: list[tuple[float, Path]] = []
             for candidate in session_root.rglob("*.jsonl"):
@@ -441,24 +486,165 @@ def resolve_codex_session_path(entry: dict[str, Any], *, wait_seconds: float = 0
                     continue
             for _, candidate in sorted(candidates, reverse=True):
                 stat = candidate.stat()
-                if started_at is not None and stat.st_mtime < (started_at - 300):
+                if stat.st_mtime < (started_at - 5):
                     continue
-                score = 0
-                if started_at is not None and stat.st_mtime >= (started_at - 1):
-                    score += 2
-                if workdir is not None and codex_candidate_cwd_matches(candidate, workdir):
-                    score += 6
-                if codex_candidate_prompt_matches(candidate, prompt):
-                    score += 10
-                if best_match is None or (score, stat.st_mtime) > (best_match[0], best_match[1]):
-                    best_match = (score, stat.st_mtime, candidate)
+                if not codex_candidate_cwd_matches(candidate, workdir):
+                    continue
+                if not codex_candidate_prompt_matches(candidate, prompt):
+                    continue
+                matches.append((stat.st_mtime, candidate))
 
-        threshold = 12 if prompt and workdir else 10 if prompt else 6 if workdir else 2
-        if best_match and best_match[0] >= threshold:
-            return best_match[2]
+        if len(matches) == 1:
+            return matches[0][1]
         if time.time() >= deadline:
-            fallback_threshold = 8 if prompt and workdir else 6 if prompt else 4 if workdir else 2
-            return best_match[2] if best_match and best_match[0] >= fallback_threshold else None
+            return None
+        time.sleep(0.5)
+
+
+def resolve_copilot_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> Path | None:
+    existing = entry.get("session_path")
+    if isinstance(existing, str) and existing:
+        path = Path(existing)
+        if path.exists():
+            return path
+
+    command = entry.get("command", [])
+    if not isinstance(command, list):
+        return None
+    session_id = entry.get("session_id") or configured_session_id(command)
+    if not isinstance(session_id, str) or not session_id:
+        return None
+
+    path = copilot_session_root() / session_id / "events.jsonl"
+    deadline = time.time() + max(wait_seconds, 0.0)
+    while True:
+        if path.exists():
+            return path
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _opencode_part_matches_prompt(data: str, prompt: str) -> bool:
+    try:
+        payload = json.loads(data)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("type") == "text" and payload.get("text") == prompt
+
+
+def _opencode_matching_session_ids(entry: dict[str, Any], *, wait_seconds: float) -> list[str]:
+    command = entry.get("command", [])
+    if not isinstance(command, list):
+        return []
+    prompt = prompt_from_command(command)
+    workdirs = infer_project_dirs(command, "opencode")
+    started_at = parse_iso(entry.get("started_at"))
+    database = opencode_session_db()
+    if not prompt or len(workdirs) != 1 or started_at is None or not database.exists():
+        return []
+
+    try:
+        connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            candidates = connection.execute(
+                "SELECT id FROM session WHERE directory = ? AND time_created BETWEEN ? AND ? "
+                "ORDER BY time_created DESC",
+                (
+                    str(workdirs[0]),
+                    int((started_at - 5) * 1000),
+                    int((started_at + max(wait_seconds, 0.0) + 5) * 1000),
+                ),
+            ).fetchall()
+            matches: list[str] = []
+            for (session_id,) in candidates:
+                part_rows = connection.execute(
+                    "SELECT data FROM part WHERE session_id = ? ORDER BY time_created, id",
+                    (session_id,),
+                ).fetchall()
+                if any(_opencode_part_matches_prompt(data, prompt) for (data,) in part_rows):
+                    matches.append(str(session_id))
+            return matches
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return []
+
+
+def resolve_opencode_session_id(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> str | None:
+    deadline = time.time() + max(wait_seconds, 0.0)
+    while True:
+        matches = _opencode_matching_session_ids(entry, wait_seconds=wait_seconds)
+        if len(matches) == 1:
+            return matches[0]
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
+def _qwen_candidate_session(
+    path: Path,
+    prompt: str,
+    workdir: Path,
+    started_at: float,
+    latest_start: float,
+) -> tuple[str, float] | None:
+    try:
+        with path.open(encoding="utf-8", errors="replace") as handle:
+            for _ in range(40):
+                line = handle.readline()
+                if not line:
+                    break
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "user" or row.get("cwd") != str(workdir):
+                    continue
+                timestamp = parse_iso(row.get("timestamp"))
+                if timestamp is None or not (started_at - 5 <= timestamp <= latest_start):
+                    continue
+                parts = row.get("message", {}).get("parts", [])
+                if not any(isinstance(part, dict) and part.get("text") == prompt for part in parts):
+                    continue
+                session_id = row.get("sessionId")
+                if isinstance(session_id, str) and session_id and path.stem == session_id:
+                    return session_id, timestamp
+    except OSError:
+        return None
+    return None
+
+
+def resolve_qwen_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> Path | None:
+    existing = entry.get("session_path")
+    if isinstance(existing, str) and existing:
+        path = Path(existing)
+        if path.exists():
+            return path
+
+    command = entry.get("command", [])
+    if not isinstance(command, list):
+        return None
+    prompt = prompt_from_command(command)
+    workdir = entry_workdir(entry)
+    started_at = parse_iso(entry.get("started_at"))
+    if not prompt or workdir is None or started_at is None:
+        return None
+
+    chats_root = qwen_project_root(workdir) / "chats"
+    deadline = time.time() + max(wait_seconds, 0.0)
+    latest_start = started_at + max(wait_seconds, 0.0) + 5
+    while True:
+        matches: list[tuple[float, Path]] = []
+        if chats_root.exists():
+            for candidate in chats_root.glob("*.jsonl"):
+                match = _qwen_candidate_session(candidate, prompt, workdir, started_at, latest_start)
+                if match is not None:
+                    matches.append((match[1], candidate))
+        if len(matches) == 1:
+            return matches[0][1]
+        if time.time() >= deadline:
+            return None
         time.sleep(0.5)
 
 
@@ -648,7 +834,45 @@ def resolve_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) ->
         return resolve_claude_session_path(entry, wait_seconds=wait_seconds)
     if tool == "codex":
         return resolve_codex_session_path(entry, wait_seconds=wait_seconds)
+    if tool == "copilot":
+        return resolve_copilot_session_path(entry, wait_seconds=wait_seconds)
+    if tool == "qwen":
+        return resolve_qwen_session_path(entry, wait_seconds=wait_seconds)
     return None
+
+
+def resolve_launch_session(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> tuple[str | None, Path | None]:
+    """Return only session metadata whose ownership is bound to ``entry``."""
+    command = entry.get("command", [])
+    if not isinstance(command, list):
+        return None, None
+
+    tool = entry.get("tool")
+    if tool in {"claude", "copilot"}:
+        session_id = entry.get("session_id") or configured_session_id(command)
+        if not isinstance(session_id, str) or not session_id:
+            return None, None
+        session_path = resolve_session_path(entry, wait_seconds=wait_seconds)
+        return session_id, session_path
+
+    if tool == "codex":
+        outfile = entry.get("outfile")
+        session_id = None
+        if isinstance(outfile, str) and outfile:
+            session_id = codex_session_id_from_output(Path(outfile))
+        session_path = resolve_codex_session_path(entry, wait_seconds=wait_seconds)
+        if session_id is None and session_path is not None:
+            session_id = session_id_from_path(session_path)
+        return session_id, session_path
+
+    if tool == "opencode":
+        return resolve_opencode_session_id(entry, wait_seconds=wait_seconds), None
+
+    if tool == "qwen":
+        session_path = resolve_qwen_session_path(entry, wait_seconds=wait_seconds)
+        return (session_id_from_path(session_path), session_path) if session_path is not None else (None, None)
+
+    return None, None
 
 
 def session_activity(tool: str, path: Path) -> dict[str, Any]:

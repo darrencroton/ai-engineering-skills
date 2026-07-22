@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -716,13 +717,25 @@ def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]
         return command
 
     if tool == "claude":
+        session_id = str(uuid.uuid4())
         command = ["claude", "-p", prompt]
         if model != "default":
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
         permission_mode = "acceptEdits" if write else "plan"
-        command.extend(["--permission-mode", permission_mode, "--output-format", "text", "--add-dir", repo])
+        command.extend(
+            [
+                "--permission-mode",
+                permission_mode,
+                "--session-id",
+                session_id,
+                "--output-format",
+                "text",
+                "--add-dir",
+                repo,
+            ]
+        )
         return command
 
     if tool == "codex":
@@ -736,12 +749,25 @@ def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]
         return command
 
     if tool == "copilot":
+        session_id = str(uuid.uuid4())
         command = ["copilot"]
         if model != "default":
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
-        command.extend(["-p", prompt, "--allow-all-tools", "--autopilot", "--silent", "--add-dir", repo])
+        command.extend(
+            [
+                "-p",
+                prompt,
+                "--allow-all-tools",
+                "--autopilot",
+                "--session-id",
+                session_id,
+                "--silent",
+                "--add-dir",
+                repo,
+            ]
+        )
         return command
 
     raise DelegateContractError(

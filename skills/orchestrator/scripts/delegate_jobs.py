@@ -43,12 +43,13 @@ from delegate_contract import (
 )
 from delegate_sessions import (
     claude_project_root,
+    configured_session_id,
     extract_session_text,
     infer_tool_name,
     looks_like_codex_exec_transcript,
+    resolve_launch_session,
     resolve_session_path,
     session_activity,
-    session_id_from_path,
 )
 
 
@@ -429,6 +430,8 @@ def delegate_status(entry: dict[str, Any]) -> dict[str, Any]:
         "started_at": entry.get("started_at"),
         "finished_at": status_payload.get("finished_at"),
         "command": entry.get("command", []),
+        "session_id": entry.get("session_id"),
+        "session_path": entry.get("session_path"),
     }
 
 
@@ -673,6 +676,10 @@ def start_tracked_delegate(
             # Popen handle so they can reap it after an external cancel.
             _LIBRARY_WRAPPERS[process.pid] = process
 
+        initial_session_id = None
+        if tool_name in {"claude", "copilot"}:
+            initial_session_id = configured_session_id(command)
+
         manifest["delegates"][label] = {
             "label": label,
             "tool": tool_name,
@@ -683,6 +690,7 @@ def start_tracked_delegate(
             "status_file": str(status_file),
             "started_at": started_at,
             "cwd": str(cwd),
+            "session_id": initial_session_id,
         }
         if normalized_dependencies:
             manifest["delegates"][label]["depends_on"] = normalized_dependencies
@@ -691,16 +699,24 @@ def start_tracked_delegate(
         save_manifest(run_dir, manifest)
         sync_run_index(run_dir, manifest=manifest, status="active")
 
-    if tool_name in {"claude", "codex"}:
-        session_path = resolve_session_path(manifest["delegates"][label], wait_seconds=5.0)
-        if session_path is not None:
-            with hold_manifest_lock(run_dir):
-                manifest = ensure_manifest(run_dir)
-                delegate_entry = manifest["delegates"].get(label)
-                if delegate_entry is not None:
-                    delegate_entry["session_path"] = str(session_path)
-                    delegate_entry["session_id"] = session_id_from_path(session_path) or session_path.stem
-                    save_manifest(run_dir, manifest)
+    wait_seconds = 5.0 if tool_name in {"claude", "codex", "copilot", "opencode", "qwen"} else 0.0
+    try:
+        session_id, session_path = resolve_launch_session(manifest["delegates"][label], wait_seconds=wait_seconds)
+    except Exception as exc:
+        # Session discovery is additive evidence. A missing, unreadable, or
+        # newly changed vendor store must not turn a successfully started
+        # delegate into a launch failure. Settable ids remain launch-bound by
+        # construction; post-launch ids fail closed to null.
+        print(f"WARNING: session capture failed for {label} ({tool_name}): {exc}", file=sys.stderr)
+        session_id, session_path = initial_session_id, None
+    with hold_manifest_lock(run_dir):
+        manifest = ensure_manifest(run_dir)
+        delegate_entry = manifest["delegates"].get(label)
+        if delegate_entry is not None:
+            delegate_entry["session_id"] = session_id
+            if session_path is not None:
+                delegate_entry["session_path"] = str(session_path)
+            save_manifest(run_dir, manifest)
 
     return {
         "label": label,
@@ -710,6 +726,8 @@ def start_tracked_delegate(
         "status_file": str(status_file),
         "run_dir": str(run_dir),
         "cwd": str(cwd),
+        "session_id": session_id,
+        "session_path": str(session_path) if session_path is not None else None,
     }
 
 
@@ -866,6 +884,7 @@ def command_status(args: argparse.Namespace) -> int:
             suffix = f" returncode={status['returncode']}"
         print(
             f"{status['label']}: state={status['state']} pid={status['pid']} "
+            f"session_id={status['session_id'] or 'unavailable'} "
             f"out={status['outfile_size']}B err={status['errfile_size']}B{suffix}"
         )
     return 0
@@ -888,6 +907,7 @@ def command_activity(args: argparse.Namespace) -> int:
             "state": status["state"],
             "running": status["running"],
             "tool": status["tool"],
+            "session_id": status["session_id"],
             "outfile_size": status["outfile_size"],
             "errfile_size": status["errfile_size"],
         }
@@ -924,6 +944,7 @@ def command_activity(args: argparse.Namespace) -> int:
     for payload in activity_rows:
         line = (
             f"{payload['label']}: state={payload['state']} healthy={'yes' if payload.get('healthy') else 'no'} "
+            f"session_id={payload['session_id'] or 'unavailable'} "
             f"out={payload['outfile_size']}B err={payload['errfile_size']}B"
         )
         if payload.get("tool") in {"claude", "codex"} and payload.get("session_mtime_age_s") is not None:

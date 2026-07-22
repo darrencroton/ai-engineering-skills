@@ -322,6 +322,19 @@ class DelegateContractTests(unittest.TestCase):
         copilot = delegate_contract.compose_delegate_command(self.validate(tool="copilot"), "prompt")
         self.assertIn("--autopilot", copilot)
 
+    def test_settable_harness_commands_include_generated_session_id(self):
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        with mock.patch.object(delegate_contract.uuid, "uuid4", return_value=session_id):
+            for tool in ("claude", "copilot"):
+                with self.subTest(tool=tool):
+                    command = delegate_contract.compose_delegate_command(self.validate(tool=tool), "prompt")
+                    self.assertEqual(command[command.index("--session-id") + 1], session_id)
+
+        for tool in ("codex", "opencode", "qwen"):
+            with self.subTest(tool=tool):
+                command = delegate_contract.compose_delegate_command(self.validate(tool=tool), "prompt")
+                self.assertNotIn("--session-id", command)
+
     def test_harness_commands_select_write_enabled_modes(self):
         cases = {
             "claude": ("--permission-mode", "acceptEdits"),
@@ -338,8 +351,9 @@ class DelegateContractTests(unittest.TestCase):
         # both, so the composed command is identical either way.
         for tool in ("copilot", "qwen"):
             with self.subTest(tool=tool):
-                read_only_command = delegate_contract.compose_delegate_command(self.validate(tool=tool), "prompt")
-                write_command = delegate_contract.compose_delegate_command(self.validate_write(tool=tool), "prompt")
+                with mock.patch.object(delegate_contract.uuid, "uuid4", return_value="12345678-1234-1234-1234-123456789abc"):
+                    read_only_command = delegate_contract.compose_delegate_command(self.validate(tool=tool), "prompt")
+                    write_command = delegate_contract.compose_delegate_command(self.validate_write(tool=tool), "prompt")
                 self.assertEqual(read_only_command, write_command)
 
     def test_opencode_nondefault_effort_fails_closed(self):
@@ -455,6 +469,136 @@ class DelegateContractTests(unittest.TestCase):
         prompt_text = (self.run_dir / f"{request['label']}-prompt.md").read_text(encoding="utf-8")
         self.assertIn("ACCESS: read-write", prompt_text)
         self.assertIn("target.py: add a helper", prompt_text)
+
+    def test_tracked_launch_persists_session_metadata_for_every_harness(self):
+        delegate_jobs = load_delegate_jobs()
+        delegate_jobs.ensure_manifest(self.run_dir)
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        commands = {
+            "claude": ["claude", "-p", "prompt", "--session-id", session_id],
+            "codex": ["codex", "exec", "prompt", "-C", str(self.repo)],
+            "copilot": ["copilot", "-p", "prompt", "--session-id", session_id],
+            "opencode": ["opencode", "run", "prompt", "--dir", str(self.repo)],
+            "qwen": ["qwen", "--prompt", "prompt"],
+        }
+        captured_ids = {
+            "claude": session_id,
+            "codex": "22345678-1234-1234-1234-123456789abc",
+            "copilot": session_id,
+            "opencode": "ses_owned",
+            "qwen": "32345678-1234-1234-1234-123456789abc",
+        }
+        process = mock.Mock(pid=4242)
+
+        def resolved(entry, *, wait_seconds):
+            self.assertEqual(wait_seconds, 5.0)
+            return captured_ids[entry["tool"]], self.root / f"{entry['tool']}.jsonl"
+
+        with mock.patch.object(delegate_jobs.subprocess, "Popen", return_value=process), mock.patch.object(
+            delegate_jobs, "resolve_launch_session", side_effect=resolved
+        ), mock.patch.object(delegate_jobs, "sync_run_index"):
+            for index, (tool, command) in enumerate(commands.items(), start=1):
+                result = delegate_jobs.start_tracked_delegate(
+                    self.run_dir,
+                    f"0{index}-{tool}-capture",
+                    command,
+                    cwd=self.repo,
+                )
+                self.assertEqual(result["session_id"], captured_ids[tool])
+
+        manifest = delegate_jobs.load_manifest(self.run_dir)
+        self.assertEqual(len(manifest["delegates"]), 5)
+        for entry in manifest["delegates"].values():
+            self.assertIn("session_id", entry)
+            self.assertEqual(entry["session_id"], captured_ids[entry["tool"]])
+            self.assertEqual(entry["session_path"], str(self.root / f"{entry['tool']}.jsonl"))
+
+    def test_tracked_launch_succeeds_with_null_when_post_launch_capture_fails(self):
+        delegate_jobs = load_delegate_jobs()
+        delegate_jobs.ensure_manifest(self.run_dir)
+        process = mock.Mock(pid=4242)
+        label = "01-qwen-capture"
+        with mock.patch.object(delegate_jobs.subprocess, "Popen", return_value=process), mock.patch.object(
+            delegate_jobs, "resolve_launch_session", side_effect=OSError("store unavailable")
+        ), mock.patch.object(delegate_jobs, "sync_run_index"), contextlib.redirect_stderr(io.StringIO()) as stderr:
+            result = delegate_jobs.start_tracked_delegate(self.run_dir, label, ["qwen", "--prompt", "prompt"], cwd=self.repo)
+
+        self.assertIsNone(result["session_id"])
+        self.assertIn("session capture failed", stderr.getvalue())
+        entry = delegate_jobs.load_manifest(self.run_dir)["delegates"][label]
+        self.assertIn("session_id", entry)
+        self.assertIsNone(entry["session_id"])
+        self.assertNotIn("session_path", entry)
+
+    def test_tracked_launch_preserves_settable_id_when_capture_fails(self):
+        delegate_jobs = load_delegate_jobs()
+        delegate_jobs.ensure_manifest(self.run_dir)
+        process = mock.Mock(pid=4242)
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        with mock.patch.object(delegate_jobs.subprocess, "Popen", return_value=process), mock.patch.object(
+            delegate_jobs, "resolve_launch_session", side_effect=OSError("store unavailable")
+        ), mock.patch.object(delegate_jobs, "sync_run_index"), contextlib.redirect_stderr(io.StringIO()):
+            for index, tool in enumerate(("claude", "copilot"), start=1):
+                label = f"0{index}-{tool}-capture"
+                result = delegate_jobs.start_tracked_delegate(
+                    self.run_dir,
+                    label,
+                    [tool, "-p", "prompt", "--session-id", session_id],
+                    cwd=self.repo,
+                )
+                self.assertEqual(result["session_id"], session_id)
+                entry = delegate_jobs.load_manifest(self.run_dir)["delegates"][label]
+                self.assertEqual(entry["session_id"], session_id)
+
+    def test_status_and_activity_json_surface_session_id_for_every_harness(self):
+        delegate_jobs = load_delegate_jobs()
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        session_ids = {}
+        for index, tool in enumerate(("claude", "codex", "copilot", "opencode", "qwen"), start=1):
+            label = f"0{index}-{tool}-capture"
+            session_ids[label] = f"session-{tool}"
+            manifest["delegates"][label] = {
+                "label": label,
+                "tool": tool,
+                "pid": 9000 + index,
+                "session_id": session_ids[label],
+                "status_file": str(self.run_dir / f"{label}-status.json"),
+                "outfile": str(self.run_dir / f"{label}-out.txt"),
+                "errfile": str(self.run_dir / f"{label}-err.txt"),
+                "command": [tool],
+            }
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+
+        def status(entry):
+            return {
+                "label": entry["label"],
+                "pid": entry["pid"],
+                "tool": entry["tool"],
+                "state": "running",
+                "running": True,
+                "outfile_size": 0,
+                "errfile_size": 0,
+                "returncode": None,
+                "session_id": entry["session_id"],
+            }
+
+        status_args = mock.Mock(run_dir=str(self.run_dir), label=None, json=True)
+        activity_args = mock.Mock(run_dir=str(self.run_dir), label=None, json=True, max_idle=60)
+        with mock.patch.object(delegate_jobs, "delegate_status", side_effect=status), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as output:
+            self.assertEqual(delegate_jobs.command_status(status_args), 0)
+        status_rows = json.loads(output.getvalue())
+        self.assertEqual({row["label"]: row["session_id"] for row in status_rows}, session_ids)
+
+        with mock.patch.object(delegate_jobs, "delegate_status", side_effect=status), mock.patch.object(
+            delegate_jobs, "resolve_session_path", return_value=None
+        ), mock.patch.object(delegate_jobs, "helper_activity", return_value={}), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as output:
+            self.assertEqual(delegate_jobs.command_activity(activity_args), 0)
+        activity_rows = json.loads(output.getvalue())
+        self.assertEqual({row["label"]: row["session_id"] for row in activity_rows}, session_ids)
 
     def test_rejected_launch_writes_feedback_and_starts_nothing(self):
         delegate_jobs = load_delegate_jobs()

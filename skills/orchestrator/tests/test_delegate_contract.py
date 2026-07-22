@@ -6,6 +6,7 @@ import io
 import json
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -599,6 +600,205 @@ class DelegateContractTests(unittest.TestCase):
             self.assertEqual(delegate_jobs.command_activity(activity_args), 0)
         activity_rows = json.loads(output.getvalue())
         self.assertEqual({row["label"]: row["session_id"] for row in activity_rows}, session_ids)
+
+    def test_activity_uses_session_signals_for_every_harness(self):
+        delegate_jobs = load_delegate_jobs()
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        tools = ("claude", "codex", "copilot", "opencode", "qwen")
+        for index, tool in enumerate(tools, start=1):
+            label = f"0{index}-{tool}-activity"
+            manifest["delegates"][label] = {
+                "label": label,
+                "tool": tool,
+                "pid": 9000 + index,
+                "session_id": f"session-{tool}",
+                "status_file": str(self.run_dir / f"{label}-status.json"),
+                "outfile": str(self.run_dir / f"{label}-out.txt"),
+                "errfile": str(self.run_dir / f"{label}-err.txt"),
+                "command": [tool],
+            }
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+
+        def status(entry):
+            return {
+                "label": entry["label"],
+                "pid": entry["pid"],
+                "tool": entry["tool"],
+                "state": "running",
+                "running": True,
+                "outfile_size": 0,
+                "errfile_size": 0,
+                "returncode": None,
+                "session_id": entry["session_id"],
+            }
+
+        args = mock.Mock(run_dir=str(self.run_dir), label=None, json=True, max_idle=60)
+        with mock.patch.object(delegate_jobs, "delegate_status", side_effect=status), mock.patch.object(
+            delegate_jobs, "resolve_session_path", return_value=self.root / "session-source"
+        ), mock.patch.object(
+            delegate_jobs,
+            "session_activity",
+            return_value={
+                "activity_source": "session_transcript",
+                "last_activity_at": "2026-07-23T00:00:00Z",
+                "last_activity_age_s": 1,
+            },
+        ) as session_activity, contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(delegate_jobs.command_activity(args), 0)
+
+        rows = json.loads(output.getvalue())
+        self.assertEqual(session_activity.call_count, 5)
+        self.assertEqual({call.args[0] for call in session_activity.call_args_list}, set(tools))
+        self.assertTrue(all(row["healthy"] for row in rows))
+        self.assertTrue(all(row["activity_source"] == "session_transcript" for row in rows))
+
+    def test_activity_falls_back_to_captured_outfile_mtime(self):
+        delegate_jobs = load_delegate_jobs()
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        label = "01-opencode-activity"
+        outfile = self.run_dir / f"{label}-out.txt"
+        errfile = self.run_dir / f"{label}-err.txt"
+        status_file = self.run_dir / f"{label}-status.json"
+        outfile.write_text("", encoding="utf-8")
+        errfile.write_text("older stderr output", encoding="utf-8")
+        status_file.write_text("{}", encoding="utf-8")
+        os.utime(outfile, (1000, 1000))
+        os.utime(errfile, (900, 900))
+        os.utime(status_file, (3000, 3000))
+        entry = {
+            "label": label,
+            "tool": "opencode",
+            "pid": 9001,
+            "session_id": "ses_owned",
+            "status_file": str(status_file),
+            "outfile": str(outfile),
+            "errfile": str(errfile),
+            "command": ["opencode"],
+        }
+        manifest["delegates"][label] = entry
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+
+        status = {
+            "label": label,
+            "pid": 9001,
+            "tool": "opencode",
+            "state": "running",
+            "running": True,
+            "outfile_size": 0,
+            "errfile_size": errfile.stat().st_size,
+            "returncode": None,
+            "session_id": "ses_owned",
+        }
+        args = mock.Mock(run_dir=str(self.run_dir), label=None, json=True, max_idle=60)
+        with mock.patch.object(delegate_jobs, "delegate_status", return_value=status), mock.patch.object(
+            delegate_jobs, "resolve_session_path", return_value=None
+        ), mock.patch.object(delegate_jobs.time, "time", return_value=1010), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as output:
+            self.assertEqual(delegate_jobs.command_activity(args), 0)
+
+        row = json.loads(output.getvalue())[0]
+        self.assertEqual(row["activity_source"], "outfile")
+        self.assertEqual(row["last_activity_path"], str(outfile))
+        self.assertEqual(row["last_activity_age_s"], 10)
+        self.assertTrue(row["healthy"])
+
+        text_args = mock.Mock(run_dir=str(self.run_dir), label=None, json=False, max_idle=60)
+        with mock.patch.object(delegate_jobs, "delegate_status", return_value=status), mock.patch.object(
+            delegate_jobs, "resolve_session_path", return_value=None
+        ), mock.patch.object(delegate_jobs.time, "time", return_value=1010), contextlib.redirect_stdout(
+            io.StringIO()
+        ) as text_output:
+            self.assertEqual(delegate_jobs.command_activity(text_args), 0)
+        self.assertIn(f"helper_activity={outfile}", text_output.getvalue())
+
+    def test_helper_activity_uses_newer_captured_stderr(self):
+        delegate_jobs = load_delegate_jobs()
+        outfile = self.run_dir / "delegate-out.txt"
+        errfile = self.run_dir / "delegate-err.txt"
+        outfile.write_text("", encoding="utf-8")
+        errfile.write_text("streaming progress", encoding="utf-8")
+        os.utime(outfile, (1000, 1000))
+        os.utime(errfile, (1005, 1005))
+
+        activity = delegate_jobs.helper_activity(
+            {"outfile": str(outfile), "errfile": str(errfile)},
+            1010,
+        )
+
+        self.assertEqual(activity["activity_source"], "errfile")
+        self.assertEqual(activity["last_activity_path"], str(errfile))
+        self.assertEqual(activity["last_activity_age_s"], 5)
+
+    def test_command_activity_reads_opencode_store_with_captured_session_id(self):
+        delegate_jobs = load_delegate_jobs()
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        database = self.root / "opencode.db"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, time_updated INTEGER NOT NULL);
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            """
+        )
+        updated_ms = int(delegate_jobs.time.time() * 1000)
+        connection.execute("INSERT INTO session VALUES (?, ?)", ("ses_owned", updated_ms))
+        connection.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?)",
+            ("msg_1", "ses_owned", updated_ms, json.dumps({"role": "assistant"})),
+        )
+        connection.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
+            ("part_1", "msg_1", "ses_owned", updated_ms, json.dumps({"type": "text"})),
+        )
+        connection.commit()
+        connection.close()
+        label = "01-opencode-activity"
+        entry = {
+            "label": label,
+            "tool": "opencode",
+            "pid": 9001,
+            "session_id": "ses_owned",
+            "status_file": str(self.run_dir / f"{label}-status.json"),
+            "outfile": str(self.run_dir / f"{label}-out.txt"),
+            "errfile": str(self.run_dir / f"{label}-err.txt"),
+            "command": ["opencode"],
+        }
+        manifest["delegates"][label] = entry
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+        status = {
+            "label": label,
+            "pid": 9001,
+            "tool": "opencode",
+            "state": "running",
+            "running": True,
+            "outfile_size": 0,
+            "errfile_size": 0,
+            "returncode": None,
+            "session_id": "ses_owned",
+        }
+        args = mock.Mock(run_dir=str(self.run_dir), label=None, json=True, max_idle=60)
+        with mock.patch.object(delegate_jobs, "delegate_status", return_value=status), mock.patch.object(
+            delegate_jobs, "resolve_session_path", return_value=database
+        ), contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(delegate_jobs.command_activity(args), 0)
+
+        row = json.loads(output.getvalue())[0]
+        self.assertEqual(row["activity_source"], "session_store")
+        self.assertEqual(row["session_id"], "ses_owned")
+        self.assertTrue(row["healthy"])
 
     def test_rejected_launch_writes_feedback_and_starts_nothing(self):
         delegate_jobs = load_delegate_jobs()

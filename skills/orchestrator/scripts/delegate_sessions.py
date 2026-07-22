@@ -582,6 +582,31 @@ def resolve_opencode_session_id(entry: dict[str, Any], *, wait_seconds: float = 
         time.sleep(0.5)
 
 
+def resolve_opencode_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) -> Path | None:
+    """Return the OpenCode store only when it contains the captured session."""
+    session_id = entry.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+
+    database = opencode_session_db()
+    deadline = time.time() + max(wait_seconds, 0.0)
+    while True:
+        if database.exists():
+            try:
+                connection = sqlite3.connect(f"{database.resolve().as_uri()}?mode=ro", uri=True)
+                try:
+                    found = connection.execute("SELECT 1 FROM session WHERE id = ?", (session_id,)).fetchone()
+                finally:
+                    connection.close()
+                if found is not None:
+                    return database
+            except (OSError, sqlite3.Error, ValueError):
+                pass
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
+
+
 def _qwen_candidate_session(
     path: Path,
     prompt: str,
@@ -699,6 +724,38 @@ def summarize_codex_row(row: dict[str, Any]) -> tuple[str, str | None]:
     return (row_type, None)
 
 
+def summarize_copilot_row(row: dict[str, Any]) -> tuple[str, str | None]:
+    row_type = str(row.get("type", "unknown"))
+    data = row.get("data", {})
+    if row_type == "assistant.message":
+        return (row_type, "text")
+    if row_type.startswith("assistant."):
+        return (row_type, None)
+    if row_type.startswith("tool."):
+        detail = data.get("toolName") if isinstance(data, dict) else None
+        return (row_type, detail)
+    return (row_type, None)
+
+
+def summarize_qwen_row(row: dict[str, Any]) -> tuple[str, str | None]:
+    row_type = str(row.get("type", "unknown"))
+    if row_type != "assistant":
+        return (row_type, None)
+
+    message = row.get("message")
+    parts = message.get("parts", []) if isinstance(message, dict) else []
+    if isinstance(parts, list):
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            function_call = part.get("functionCall")
+            if isinstance(function_call, dict):
+                return ("assistant.function_call", function_call.get("name"))
+            if isinstance(part.get("text"), str):
+                return ("assistant.text", "text")
+    return ("assistant", None)
+
+
 def _session_activity_payload(
     path: Path,
     summarize_row: Callable[[dict[str, Any]], tuple[str, str | None]],
@@ -732,6 +789,11 @@ def _session_activity_payload(
     )
 
     payload: dict[str, Any] = {
+        "activity_source": "session_transcript",
+        "last_activity_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "last_activity_age_s": max(0, int(now - stat.st_mtime)),
         "session_path": str(path),
         "session_mtime_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "session_mtime_age_s": max(0, int(now - stat.st_mtime)),
@@ -760,6 +822,81 @@ def _session_activity_payload(
         if assistant_ts is not None:
             payload["last_assistant_age_s"] = max(0, int(now - assistant_ts))
 
+    return payload
+
+
+def _opencode_session_activity(path: Path, session_id: str) -> dict[str, Any]:
+    """Read activity for one captured OpenCode session from its SQLite store."""
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            session_row = connection.execute(
+                "SELECT time_updated FROM session WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if session_row is None:
+                return {}
+            part_rows = connection.execute(
+                "SELECT p.time_updated, p.data, m.data "
+                "FROM part AS p LEFT JOIN message AS m ON m.id = p.message_id "
+                "WHERE p.session_id = ? ORDER BY p.time_updated DESC, p.id DESC LIMIT 100",
+                (session_id,),
+            ).fetchall()
+        finally:
+            connection.close()
+    except (OSError, sqlite3.Error, ValueError):
+        return {}
+
+    now = time.time()
+    try:
+        session_updated_at = float(session_row[0]) / 1000
+        latest_part_at = float(part_rows[0][0]) / 1000 if part_rows else session_updated_at
+    except (TypeError, ValueError):
+        return {}
+    updated_at = max(session_updated_at, latest_part_at)
+    payload: dict[str, Any] = {
+        "activity_source": "session_store",
+        "last_activity_at": datetime.fromtimestamp(updated_at, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+        "last_activity_age_s": max(0, int(now - updated_at)),
+        "session_path": str(path),
+        "session_id": session_id,
+    }
+
+    latest_event: tuple[float, str, str | None] | None = None
+    latest_assistant: tuple[float, str, str | None] | None = None
+    for raw_timestamp, raw_part, raw_message in part_rows:
+        try:
+            part = json.loads(raw_part)
+            message = json.loads(raw_message) if raw_message else {}
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        if not isinstance(part, dict) or not isinstance(message, dict):
+            continue
+        timestamp = float(raw_timestamp) / 1000
+        part_type = str(part.get("type", "unknown"))
+        role = message.get("role")
+        event_type = f"{role}.{part_type}" if role else f"part.{part_type}"
+        detail = part.get("tool") if part_type == "tool" else None
+        if latest_event is None:
+            latest_event = (timestamp, event_type, detail)
+        if role == "assistant" and latest_assistant is None:
+            latest_assistant = (timestamp, event_type, detail)
+        if latest_event is not None and latest_assistant is not None:
+            break
+
+    for prefix, event in (("last_event", latest_event), ("last_assistant", latest_assistant)):
+        if event is None:
+            continue
+        timestamp, event_type, detail = event
+        payload[f"{prefix}_at"] = datetime.fromtimestamp(timestamp, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        payload[f"{prefix}_age_s"] = max(0, int(now - timestamp))
+        payload[f"{prefix}_type"] = event_type
+        if detail:
+            payload[f"{prefix}_detail"] = detail
     return payload
 
 
@@ -836,6 +973,8 @@ def resolve_session_path(entry: dict[str, Any], *, wait_seconds: float = 0.0) ->
         return resolve_codex_session_path(entry, wait_seconds=wait_seconds)
     if tool == "copilot":
         return resolve_copilot_session_path(entry, wait_seconds=wait_seconds)
+    if tool == "opencode":
+        return resolve_opencode_session_path(entry, wait_seconds=wait_seconds)
     if tool == "qwen":
         return resolve_qwen_session_path(entry, wait_seconds=wait_seconds)
     return None
@@ -875,11 +1014,21 @@ def resolve_launch_session(entry: dict[str, Any], *, wait_seconds: float = 0.0) 
     return None, None
 
 
-def session_activity(tool: str, path: Path) -> dict[str, Any]:
+def session_activity(tool: str, path: Path, *, session_id: str | None = None) -> dict[str, Any]:
     if tool == "claude":
         return _session_activity_payload(path, summarize_session_row)
     if tool == "codex":
         return _session_activity_payload(path, summarize_codex_row, extra={"session_id": session_id_from_path(path)})
+    if tool == "copilot":
+        return _session_activity_payload(
+            path,
+            summarize_copilot_row,
+            extra={"session_id": session_id_from_path(path.parent)},
+        )
+    if tool == "opencode" and session_id:
+        return _opencode_session_activity(path, session_id)
+    if tool == "qwen":
+        return _session_activity_payload(path, summarize_qwen_row, extra={"session_id": session_id_from_path(path)})
     return {}
 
 

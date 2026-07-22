@@ -486,26 +486,23 @@ def extract_sections(text: str, names: list[str]) -> str:
 
 
 def helper_activity(entry: dict[str, Any], now: float) -> dict[str, Any]:
-    latest_mtime = None
-    latest_path: Path | None = None
-    for path_key in ("outfile", "errfile", "status_file"):
+    candidates: list[tuple[float, str, Path]] = []
+    for path_key in ("outfile", "errfile"):
         raw_path = entry.get(path_key)
         if not isinstance(raw_path, str) or not raw_path:
             continue
         path = Path(raw_path)
         if not path.exists():
             continue
-        path_mtime = path.stat().st_mtime
-        if latest_mtime is None or path_mtime > latest_mtime:
-            latest_mtime = path_mtime
-            latest_path = path
-    if latest_mtime is None:
+        candidates.append((path.stat().st_mtime, path_key, path))
+    if not candidates:
         return {}
+    latest_mtime, source, path = max(candidates, key=lambda candidate: candidate[0])
     return {
-        "activity_source": "helper_files",
+        "activity_source": source,
         "last_activity_at": datetime.fromtimestamp(latest_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "last_activity_age_s": max(0, int(now - latest_mtime)),
-        "last_activity_path": str(latest_path) if latest_path is not None else None,
+        "last_activity_path": str(path),
     }
 
 
@@ -912,28 +909,24 @@ def command_activity(args: argparse.Namespace) -> int:
             "errfile_size": status["errfile_size"],
         }
 
-        if entry.get("tool") in {"claude", "codex"}:
-            session_path = resolve_session_path(entry)
-            if session_path is not None:
-                session_payload = session_activity(str(entry.get("tool")), session_path)
-                payload.update(session_payload)
-                payload["activity_source"] = "session"
-                payload["healthy"] = status["running"] and session_payload.get("session_mtime_age_s", args.max_idle + 1) <= args.max_idle
-            else:
-                payload["session_path"] = None
-                fallback_payload = helper_activity(entry, now)
-                payload.update(fallback_payload)
-                if fallback_payload:
-                    payload["healthy"] = status["running"] and fallback_payload.get("last_activity_age_s", args.max_idle + 1) <= args.max_idle
-                else:
-                    payload["healthy"] = False
-        else:
-            fallback_payload = helper_activity(entry, now)
-            payload.update(fallback_payload)
-            if fallback_payload:
-                payload["healthy"] = status["running"] and payload["last_activity_age_s"] <= args.max_idle
-            else:
-                payload["healthy"] = False
+        session_path = resolve_session_path(entry)
+        session_payload = (
+            session_activity(
+                str(entry.get("tool")),
+                session_path,
+                session_id=entry.get("session_id") if isinstance(entry.get("session_id"), str) else None,
+            )
+            if session_path is not None
+            else {}
+        )
+        activity_payload = session_payload or helper_activity(entry, now)
+        payload.update(activity_payload)
+        if not session_payload:
+            payload["session_path"] = None
+        payload["healthy"] = (
+            status["running"]
+            and activity_payload.get("last_activity_age_s", args.max_idle + 1) <= args.max_idle
+        )
 
         activity_rows.append(payload)
 
@@ -962,7 +955,7 @@ def command_activity(args: argparse.Namespace) -> int:
             print(f"  last_event={payload['last_event_type']}{suffix} at {payload['last_event_at']}")
         elif payload.get("last_activity_at"):
             print(f"  last_activity_at={payload['last_activity_at']}")
-        if payload.get("activity_source") == "helper_files" and payload.get("last_activity_path"):
+        if payload.get("last_activity_path"):
             print(f"  helper_activity={payload['last_activity_path']}")
         if payload.get("session_path"):
             print(f"  session={payload['session_path']}")

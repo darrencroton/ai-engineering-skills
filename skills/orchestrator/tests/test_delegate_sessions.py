@@ -84,6 +84,108 @@ class DelegateSessionTests(unittest.TestCase):
         self.assertEqual(codex["last_assistant_type"], "assistant.function_call")
         self.assertEqual(codex["last_assistant_detail"], "exec_command")
         self.assertEqual(codex["session_id"], session_id)
+        self.assertEqual(claude["activity_source"], "session_transcript")
+        self.assertEqual(codex["activity_source"], "session_transcript")
+        self.assertIn("last_activity_age_s", claude)
+        self.assertIn("last_activity_age_s", codex)
+
+    def test_session_activity_is_populated_for_copilot_opencode_and_qwen(self):
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        copilot_path = self.root / session_id / "events.jsonl"
+        copilot_path.parent.mkdir()
+        copilot_path.write_text(
+            json.dumps(
+                {
+                    "type": "assistant.message",
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "data": {"content": "Copilot answer"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        qwen_path = self.write_rows(
+            f"{session_id}.jsonl",
+            [
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-13T00:00:00Z",
+                    "message": None,
+                },
+                {
+                    "type": "assistant",
+                    "timestamp": "2026-07-13T00:00:01Z",
+                    "message": {"parts": [{"functionCall": {"name": "read_file"}}]},
+                }
+            ],
+        )
+        database = self.root / "opencode.db"
+        connection = sqlite3.connect(database)
+        connection.executescript(
+            """
+            CREATE TABLE session (id TEXT PRIMARY KEY, time_updated INTEGER NOT NULL);
+            CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE part (
+                id TEXT PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                time_updated INTEGER NOT NULL,
+                data TEXT NOT NULL
+            );
+            """
+        )
+        updated_ms = int(time.time() * 1000)
+        connection.execute("INSERT INTO session VALUES (?, ?)", ("ses_owned", updated_ms - 10_000))
+        connection.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?)",
+            ("msg_1", "ses_owned", updated_ms, json.dumps({"role": "assistant"})),
+        )
+        connection.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
+            (
+                "part_1",
+                "msg_1",
+                "ses_owned",
+                updated_ms,
+                json.dumps({"type": "tool", "tool": "read"}),
+            ),
+        )
+        connection.commit()
+        connection.close()
+
+        copilot = delegate_sessions.session_activity("copilot", copilot_path)
+        opencode = delegate_sessions.session_activity("opencode", database, session_id="ses_owned")
+        qwen = delegate_sessions.session_activity("qwen", qwen_path)
+
+        for activity in (copilot, opencode, qwen):
+            self.assertTrue(activity)
+            self.assertIn("activity_source", activity)
+            self.assertIn("last_activity_at", activity)
+            self.assertIn("last_activity_age_s", activity)
+        self.assertEqual(copilot["last_assistant_type"], "assistant.message")
+        self.assertEqual(opencode["activity_source"], "session_store")
+        self.assertLessEqual(opencode["last_activity_age_s"], 1)
+        self.assertEqual(opencode["last_assistant_type"], "assistant.tool")
+        self.assertEqual(qwen["last_assistant_type"], "assistant.function_call")
+
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "INSERT INTO message VALUES (?, ?, ?, ?)",
+            ("msg_bad", "ses_owned", updated_ms + 1, "null"),
+        )
+        connection.execute(
+            "INSERT INTO part VALUES (?, ?, ?, ?, ?)",
+            ("part_bad", "msg_bad", "ses_owned", updated_ms + 1, "123"),
+        )
+        connection.commit()
+        connection.close()
+        malformed_safe = delegate_sessions.session_activity("opencode", database, session_id="ses_owned")
+        self.assertEqual(malformed_safe["last_assistant_type"], "assistant.tool")
 
     def test_unknown_tool_has_no_session_fallback(self):
         path = self.write_rows("unknown.jsonl", [])
@@ -131,7 +233,6 @@ class DelegateSessionTests(unittest.TestCase):
                 },
             ],
         )
-
         self.assertEqual(delegate_sessions.extract_session_text("claude", claude_path), "latest Claude")
         self.assertEqual(delegate_sessions.extract_session_text("codex", codex_path), "latest Codex")
 
@@ -264,6 +365,23 @@ class DelegateSessionTests(unittest.TestCase):
 
         self.assertEqual(session_id, "ses_owned")
         self.assertIsNone(session_path)
+
+    def test_opencode_session_path_requires_captured_id_in_store(self):
+        database = self.root / "opencode.db"
+        connection = sqlite3.connect(database)
+        connection.execute("CREATE TABLE session (id TEXT PRIMARY KEY)")
+        connection.execute("INSERT INTO session VALUES (?)", ("ses_owned",))
+        connection.commit()
+        connection.close()
+
+        with mock.patch.object(delegate_sessions, "opencode_session_db", return_value=database):
+            self.assertEqual(
+                delegate_sessions.resolve_session_path({"tool": "opencode", "session_id": "ses_owned"}),
+                database,
+            )
+            self.assertIsNone(
+                delegate_sessions.resolve_session_path({"tool": "opencode", "session_id": "ses_unrelated"})
+            )
 
     def test_opencode_malformed_part_does_not_hide_matching_session(self):
         database = self.root / "opencode.db"

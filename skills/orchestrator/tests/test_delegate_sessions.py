@@ -557,6 +557,21 @@ class DelegateSessionTests(unittest.TestCase):
         with mock.patch.object(delegate_sessions, "qwen_project_root", return_value=self.root / "missing"):
             self.assertEqual(delegate_sessions.resolve_launch_session(entry), (None, None))
 
+    def test_continuation_preserves_verified_parent_session_without_recorrelation(self):
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        for tool in ("claude", "codex", "copilot", "opencode", "qwen"):
+            with self.subTest(tool=tool), mock.patch.object(
+                delegate_sessions, "resolve_session_path", return_value=None
+            ) as resolve_path:
+                entry = {
+                    "tool": tool,
+                    "command": [tool],
+                    "session_id": session_id,
+                    "parent_session_id": session_id,
+                }
+                self.assertEqual(delegate_sessions.resolve_launch_session(entry), (session_id, None))
+                resolve_path.assert_called_once_with(entry, wait_seconds=0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

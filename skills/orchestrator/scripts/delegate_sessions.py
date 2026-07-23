@@ -986,6 +986,13 @@ def resolve_launch_session(entry: dict[str, Any], *, wait_seconds: float = 0.0) 
     if not isinstance(command, list):
         return None, None
 
+    # A validated continuation inherits the exact launch-bound parent session
+    # identity. Preserve it rather than trying to correlate the resumed prompt
+    # as though it were a new vendor session.
+    parent_session_id = entry.get("parent_session_id")
+    if isinstance(parent_session_id, str) and parent_session_id:
+        return parent_session_id, resolve_session_path(entry, wait_seconds=wait_seconds)
+
     tool = entry.get("tool")
     if tool in {"claude", "copilot"}:
         session_id = entry.get("session_id") or configured_session_id(command)

@@ -103,6 +103,7 @@ REQUEST_FIELDS = {
     "non_goals",
     "constraints",
     "expected_output",
+    "parent_label",
 }
 
 
@@ -166,6 +167,23 @@ def _required_string(payload: dict[str, Any], field: str, issues: list[ContractI
             ContractIssue("missing-field", field, f"{field} must be a non-empty string", f"Set {field} to the required value.")
         )
         return ""
+    return value.strip()
+
+
+def _optional_string(payload: dict[str, Any], field: str, issues: list[ContractIssue]) -> str | None:
+    if field not in payload:
+        return None
+    value = payload.get(field)
+    if not isinstance(value, str) or not value.strip():
+        issues.append(
+            ContractIssue(
+                "wrong-type",
+                field,
+                f"{field} must be a non-empty string when supplied",
+                f"Set {field} to a non-empty value or remove the field.",
+            )
+        )
+        return None
     return value.strip()
 
 
@@ -351,6 +369,34 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
                 "Use lowercase letters/digits and hyphens, for example 01-opencode-check-output or 01-opencode-check-output-r1.",
             )
         )
+    parent_label = _optional_string(request, "parent_label", issues)
+    if parent_label and not LABEL_RE.fullmatch(parent_label):
+        issues.append(
+            ContractIssue(
+                "invalid-label",
+                "parent_label",
+                f"parent_label must name a valid managed delegate label, got {parent_label!r}",
+                "Use the exact label of a prior delegate in this run.",
+            )
+        )
+    if parent_label and label and not re.search(r"-r\d+$", label):
+        issues.append(
+            ContractIssue(
+                "continuation-label-required",
+                "label",
+                f"continuation label must end in -rN, got {label!r}",
+                "Add an -rN suffix so the continuation is identifiable in run artifacts.",
+            )
+        )
+    if parent_label and label and parent_label == label:
+        issues.append(
+            ContractIssue(
+                "self-parent",
+                "parent_label",
+                "a continuation cannot name itself as its parent",
+                "Name the exact prior delegate whose captured session should continue.",
+            )
+        )
     tool = _required_string(request, "tool", issues)
     if tool and tool not in required_tools:
         issues.append(
@@ -526,6 +572,7 @@ def validate_contract(policy: dict[str, Any], request: dict[str, Any], run_dir: 
         "non_goals": non_goals if access == ACCESS_READ_WRITE else [],
         "constraints": constraints,
         "expected_output": expected_output,
+        "parent_label": parent_label,
     }
 
 
@@ -673,12 +720,25 @@ RETURN:
     return prompt
 
 
-def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]:
+def compose_delegate_command(
+    contract: dict[str, Any], prompt: str, *, resume_session_id: str | None = None
+) -> list[str]:
     tool = contract["tool"]
     model = contract["model"]
     effort = contract["effort"]
     repo = contract["repo_path"]
     write = contract["access"] == ACCESS_READ_WRITE
+    if resume_session_id is not None and (not isinstance(resume_session_id, str) or not resume_session_id.strip()):
+        raise DelegateContractError(
+            [
+                ContractIssue(
+                    "missing-session-id",
+                    "parent_label",
+                    "continuation requires a non-empty captured parent session id",
+                    "Use a terminal parent with a captured session id; never fall back to a global last session.",
+                )
+            ]
+        )
 
     if tool == "opencode":
         if effort != "default":
@@ -693,6 +753,8 @@ def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]
                 ]
             )
         command = ["opencode", "run", prompt]
+        if resume_session_id is not None:
+            command.extend(["--session", resume_session_id])
         if model != "default":
             command.extend(["-m", model])
         command.extend(["--agent", "build" if write else "plan", "--auto", "--dir", repo])
@@ -711,35 +773,34 @@ def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]
                 ]
             )
         command = ["qwen", "--prompt", prompt]
+        if resume_session_id is not None:
+            command.extend(["--resume", resume_session_id])
         if model != "default":
             command.extend(["--model", model])
         command.extend(["--sandbox", "--output-format", "text"])
         return command
 
     if tool == "claude":
-        session_id = str(uuid.uuid4())
         command = ["claude", "-p", prompt]
         if model != "default":
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
         permission_mode = "acceptEdits" if write else "plan"
-        command.extend(
-            [
-                "--permission-mode",
-                permission_mode,
-                "--session-id",
-                session_id,
-                "--output-format",
-                "text",
-                "--add-dir",
-                repo,
-            ]
-        )
+        if resume_session_id is not None:
+            command.extend(["--resume", resume_session_id])
+        command.extend(["--permission-mode", permission_mode])
+        if resume_session_id is None:
+            command.extend(["--session-id", str(uuid.uuid4())])
+        command.extend(["--output-format", "text", "--add-dir", repo])
         return command
 
     if tool == "codex":
-        command = ["codex", "exec", prompt]
+        command = (
+            ["codex", "exec", "resume", resume_session_id, prompt]
+            if resume_session_id is not None
+            else ["codex", "exec", prompt]
+        )
         if model != "default":
             command.extend(["-m", model])
         if effort != "default":
@@ -749,25 +810,18 @@ def compose_delegate_command(contract: dict[str, Any], prompt: str) -> list[str]
         return command
 
     if tool == "copilot":
-        session_id = str(uuid.uuid4())
         command = ["copilot"]
         if model != "default":
             command.extend(["--model", model])
         if effort != "default":
             command.extend(["--effort", effort])
-        command.extend(
-            [
-                "-p",
-                prompt,
-                "--allow-all-tools",
-                "--autopilot",
-                "--session-id",
-                session_id,
-                "--silent",
-                "--add-dir",
-                repo,
-            ]
-        )
+        command.extend(["-p", prompt])
+        if resume_session_id is not None:
+            command.append(f"--resume={resume_session_id}")
+        command.extend(["--allow-all-tools", "--autopilot"])
+        if resume_session_id is None:
+            command.extend(["--session-id", str(uuid.uuid4())])
+        command.extend(["--silent", "--add-dir", repo])
         return command
 
     raise DelegateContractError(

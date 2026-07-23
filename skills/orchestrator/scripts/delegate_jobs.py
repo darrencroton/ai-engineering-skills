@@ -31,6 +31,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from delegate_contract import (
+    ContractIssue,
     DelegateContractError,
     DELEGATE_PROFILES,
     LABEL_RE,
@@ -63,6 +64,7 @@ INDEX_NAME = "index.json"
 INDEX_LOCK_NAME = ".index.lock"
 # Match line-based SECTION headers even when a model prefixes them with Markdown.
 SECTION_RE = re.compile(r"^\s*(?:#+\s*)?SECTION:\s*([A-Za-z0-9_ -]+)\s*$", re.MULTILINE)
+CONTINUATION_SUFFIX_RE = re.compile(r"-r(\d+)$")
 _LIBRARY_WRAPPERS: dict[int, subprocess.Popen[bytes]] = {}
 
 
@@ -628,6 +630,7 @@ def start_tracked_delegate(
     cwd: Path,
     depends_on: list[str] | None = None,
     launch_contract: dict[str, Any] | None = None,
+    continuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Start a validated delegate command and persist its durable evidence."""
     validate_label(label)
@@ -673,8 +676,8 @@ def start_tracked_delegate(
             # Popen handle so they can reap it after an external cancel.
             _LIBRARY_WRAPPERS[process.pid] = process
 
-        initial_session_id = None
-        if tool_name in {"claude", "copilot"}:
+        initial_session_id = continuation.get("parent_session_id") if continuation else None
+        if initial_session_id is None and tool_name in {"claude", "copilot"}:
             initial_session_id = configured_session_id(command)
 
         manifest["delegates"][label] = {
@@ -691,6 +694,17 @@ def start_tracked_delegate(
         }
         if normalized_dependencies:
             manifest["delegates"][label]["depends_on"] = normalized_dependencies
+        if continuation is not None:
+            manifest["delegates"][label].update(
+                {
+                    "parent_label": continuation["parent_label"],
+                    "parent_session_id": continuation["parent_session_id"],
+                    "continuation_index": continuation["continuation_index"],
+                }
+            )
+            parent_session_path = continuation.get("parent_session_path")
+            if parent_session_path:
+                manifest["delegates"][label]["session_path"] = parent_session_path
         if launch_contract is not None:
             manifest["delegates"][label]["launch_contract"] = launch_contract
         save_manifest(run_dir, manifest)
@@ -715,7 +729,7 @@ def start_tracked_delegate(
                 delegate_entry["session_path"] = str(session_path)
             save_manifest(run_dir, manifest)
 
-    return {
+    result = {
         "label": label,
         "pid": process.pid,
         "outfile": str(outfile),
@@ -726,6 +740,15 @@ def start_tracked_delegate(
         "session_id": session_id,
         "session_path": str(session_path) if session_path is not None else None,
     }
+    if continuation is not None:
+        result.update(
+            {
+                "parent_label": continuation["parent_label"],
+                "parent_session_id": continuation["parent_session_id"],
+                "continuation_index": continuation["continuation_index"],
+            }
+        )
+    return result
 
 
 def _feedback_paths(run_dir: Path, label: str) -> tuple[Path, Path]:
@@ -762,6 +785,127 @@ def write_contract_feedback(run_dir: Path, label: str, exc: DelegateContractErro
     return payload
 
 
+def resolve_continuation_parent(run_dir: Path, contract: dict[str, Any]) -> dict[str, Any] | None:
+    """Validate and return lineage for an explicitly requested continuation."""
+    parent_label = contract.get("parent_label")
+    if parent_label is None:
+        return None
+
+    child_match = CONTINUATION_SUFFIX_RE.search(contract["label"])
+    if child_match is None:
+        raise DelegateContractError(
+            [
+                ContractIssue(
+                    "continuation-label-required",
+                    "label",
+                    f"continuation label must end in -rN, got {contract['label']!r}",
+                    "Add an -rN suffix so the continuation is identifiable in run artifacts.",
+                )
+            ]
+        )
+    child_root = contract["label"][: child_match.start()]
+
+    with hold_manifest_lock(run_dir):
+        manifest = ensure_manifest(run_dir)
+        parent = manifest.get("delegates", {}).get(parent_label)
+        if parent is None:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-parent-not-found",
+                        "parent_label",
+                        f"continuation parent {parent_label!r} does not exist in managed run {run_dir.name!r}",
+                        "Name a prior delegate from this exact run; cross-run continuation is not allowed.",
+                    )
+                ]
+            )
+
+        parent_tool = parent.get("tool")
+        if parent_tool != contract["tool"]:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-tool-mismatch",
+                        "parent_label",
+                        f"continuation tool {contract['tool']!r} does not match parent tool {parent_tool!r}",
+                        "Use the same harness as the parent session.",
+                    )
+                ]
+            )
+
+        try:
+            parent_state = delegate_status(parent)["state"]
+        except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-parent-malformed",
+                        "parent_label",
+                        f"continuation parent {parent_label!r} has malformed lifecycle metadata: {exc}",
+                        "Repair or recreate the managed parent entry before continuing it.",
+                    )
+                ]
+            ) from exc
+        if parent_state not in {"completed", "cancelled", "failed"}:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-parent-not-terminal",
+                        "parent_label",
+                        f"continuation parent {parent_label!r} is {parent_state!r}, not terminal",
+                        "Wait for the parent to complete, fail, or be cancelled before continuing it.",
+                    )
+                ]
+            )
+
+        parent_session_id = parent.get("session_id")
+        if not isinstance(parent_session_id, str) or not parent_session_id.strip():
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-session-unavailable",
+                        "parent_label",
+                        f"continuation parent {parent_label!r} has no captured session id",
+                        "Use a parent with a launch-bound captured session id; never resume a global last session.",
+                    )
+                ]
+            )
+
+        parent_match = CONTINUATION_SUFFIX_RE.search(parent_label)
+        continuation_index = int(child_match.group(1))
+        parent_root = parent_label[: parent_match.start()] if parent_match is not None else parent_label
+        parent_index = int(parent_match.group(1)) if parent_match is not None else 0
+        if child_root != parent_root:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-lineage-mismatch",
+                        "label",
+                        f"continuation label {contract['label']!r} does not extend parent lineage {parent_label!r}",
+                        f"Use a label beginning {parent_root!r} with an -rN suffix.",
+                    )
+                ]
+            )
+        if continuation_index <= parent_index:
+            raise DelegateContractError(
+                [
+                    ContractIssue(
+                        "continuation-lineage-order",
+                        "label",
+                        f"continuation suffix r{continuation_index} does not advance parent {parent_label!r}",
+                        "Use an -rN suffix whose number is greater than the parent's continuation suffix.",
+                    )
+                ]
+            )
+
+        return {
+            "parent_label": parent_label,
+            "parent_session_id": parent_session_id.strip(),
+            "parent_session_path": parent.get("session_path") if isinstance(parent.get("session_path"), str) else None,
+            "continuation_index": continuation_index,
+        }
+
+
 def command_launch(args: argparse.Namespace) -> int:
     run_dir = ensure_managed_run_dir(resolve_run_dir(args.run_dir))
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -775,8 +919,13 @@ def command_launch(args: argparse.Namespace) -> int:
             label = request["label"].strip()
         contract = validate_contract(policy, request, run_dir)
         label = contract["label"]
+        continuation = resolve_continuation_parent(run_dir, contract)
         prompt = render_delegate_prompt(contract)
-        command = compose_delegate_command(contract, prompt)
+        command = compose_delegate_command(
+            contract,
+            prompt,
+            resume_session_id=continuation["parent_session_id"] if continuation else None,
+        )
     except DelegateContractError as exc:
         payload = write_contract_feedback(run_dir, label, exc)
         print(json.dumps(payload, indent=2, sort_keys=True), file=sys.stderr)
@@ -806,6 +955,14 @@ def command_launch(args: argparse.Namespace) -> int:
         "repo_path": contract["repo_path"],
         "cwd": contract["repo_path"],
     }
+    if continuation is not None:
+        contract_artifact.update(
+            {
+                "parent_label": continuation["parent_label"],
+                "parent_session_id": continuation["parent_session_id"],
+                "continuation_index": continuation["continuation_index"],
+            }
+        )
     request_copy = run_dir / f"{label}-request.json"
     policy_copy = run_dir / f"{label}-policy.json"
     prompt_path = run_dir / f"{label}-prompt.md"
@@ -828,6 +985,7 @@ def command_launch(args: argparse.Namespace) -> int:
         cwd=Path(contract["repo_path"]),
         depends_on=args.depends_on,
         launch_contract=launch_contract,
+        continuation=continuation,
     )
     print(json.dumps({**result, "launch_contract": launch_contract}, indent=2, sort_keys=True))
     return 0

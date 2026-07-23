@@ -87,6 +87,45 @@ class DelegateContractTests(unittest.TestCase):
         )
         return delegate_contract.validate_contract(policy, request, self.run_dir)
 
+    def add_terminal_parent(
+        self,
+        delegate_jobs,
+        *,
+        label: str = "01-opencode-review",
+        tool: str = "opencode",
+        session_id: str | None = "12345678-1234-1234-1234-123456789abc",
+        state: str = "completed",
+    ) -> dict:
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        status_file = self.run_dir / f"{label}-status.json"
+        outfile = self.run_dir / f"{label}-out.txt"
+        errfile = self.run_dir / f"{label}-err.txt"
+        returncode = 0 if state == "completed" else -signal.SIGTERM if state == "cancelled" else 1
+        delegate_jobs.write_json(
+            status_file,
+            {
+                "label": label,
+                "state": state,
+                "returncode": returncode,
+                "finished_at": "2026-07-23T00:00:00Z",
+            },
+        )
+        entry = {
+            "label": label,
+            "tool": tool,
+            "pid": 999999,
+            "session_id": session_id,
+            "status_file": str(status_file),
+            "outfile": str(outfile),
+            "errfile": str(errfile),
+            "command": [tool],
+            "started_at": "2026-07-23T00:00:00Z",
+            "cwd": str(self.repo),
+        }
+        manifest["delegates"][label] = entry
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+        return entry
+
     def test_normalized_contract_defaults_to_read_only_access(self):
         contract = self.validate()
         self.assertEqual(contract["schema_version"], 3)
@@ -100,6 +139,27 @@ class DelegateContractTests(unittest.TestCase):
         self.assertEqual(contract["access"], "read-write")
         self.assertEqual(contract["authorized_surface"], ["target.py"])
         self.assertEqual(contract["non_goals"], ["Do not touch unrelated files."])
+
+    def test_continuation_request_normalizes_parent_and_requires_r_suffix(self):
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label="01-opencode-review",
+        )
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        self.assertEqual(contract["parent_label"], "01-opencode-review")
+
+        request["label"] = "01-opencode-review-followup"
+        with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+            delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        self.assertIn("continuation-label-required", {issue.code for issue in raised.exception.issues})
+
+    def test_retry_label_without_parent_remains_a_first_launch(self):
+        request = dict(self.request, label="02-opencode-check-output-r2")
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        self.assertIsNone(contract["parent_label"])
+        command = delegate_contract.compose_delegate_command(contract, "prompt")
+        self.assertNotIn("--session", command)
 
     def test_read_write_request_requires_nonempty_authorized_surface(self):
         policy = dict(self.policy, required_access=["read-only", "read-write"])
@@ -336,6 +396,72 @@ class DelegateContractTests(unittest.TestCase):
                 command = delegate_contract.compose_delegate_command(self.validate(tool=tool), "prompt")
                 self.assertNotIn("--session-id", command)
 
+    def test_settable_harness_first_launch_command_order_is_preserved(self):
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        with mock.patch.object(delegate_contract.uuid, "uuid4", return_value=session_id):
+            claude = delegate_contract.compose_delegate_command(self.validate(tool="claude"), "prompt")
+            copilot = delegate_contract.compose_delegate_command(self.validate(tool="copilot"), "prompt")
+        self.assertEqual(
+            claude,
+            [
+                "claude",
+                "-p",
+                "prompt",
+                "--model",
+                "provider/model",
+                "--permission-mode",
+                "plan",
+                "--session-id",
+                session_id,
+                "--output-format",
+                "text",
+                "--add-dir",
+                str(self.repo.resolve()),
+            ],
+        )
+        self.assertEqual(
+            copilot,
+            [
+                "copilot",
+                "--model",
+                "provider/model",
+                "-p",
+                "prompt",
+                "--allow-all-tools",
+                "--autopilot",
+                "--session-id",
+                session_id,
+                "--silent",
+                "--add-dir",
+                str(self.repo.resolve()),
+            ],
+        )
+
+    def test_harness_resume_commands_use_only_the_explicit_parent_session_id(self):
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        expected_prefixes = {
+            "claude": ["claude", "-p", "prompt"],
+            "codex": ["codex", "exec", "resume", session_id, "prompt"],
+            "copilot": ["copilot"],
+            "opencode": ["opencode", "run", "prompt", "--session", session_id],
+            "qwen": ["qwen", "--prompt", "prompt", "--resume", session_id],
+        }
+        for tool, expected_prefix in expected_prefixes.items():
+            with self.subTest(tool=tool):
+                command = delegate_contract.compose_delegate_command(
+                    self.validate(tool=tool),
+                    "prompt",
+                    resume_session_id=session_id,
+                )
+                self.assertEqual(command[: len(expected_prefix)], expected_prefix)
+                self.assertNotIn("--session-id", command)
+                self.assertNotIn("--last", command)
+                self.assertNotIn("--continue", command)
+                if tool == "claude":
+                    self.assertEqual(command[command.index("--resume") + 1], session_id)
+                if tool == "copilot":
+                    self.assertIn(f"--resume={session_id}", command)
+
     def test_harness_commands_select_write_enabled_modes(self):
         cases = {
             "claude": ("--permission-mode", "acceptEdits"),
@@ -470,6 +596,277 @@ class DelegateContractTests(unittest.TestCase):
         prompt_text = (self.run_dir / f"{request['label']}-prompt.md").read_text(encoding="utf-8")
         self.assertIn("ACCESS: read-write", prompt_text)
         self.assertIn("target.py: add a helper", prompt_text)
+
+    def test_continuation_launch_revalidates_contract_and_passes_verified_lineage(self):
+        delegate_jobs = load_delegate_jobs()
+        parent = self.add_terminal_parent(delegate_jobs)
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label=parent["label"],
+        )
+        policy_path = self.repo / "delegate-policy.json"
+        request_path = self.repo / "delegate-request.json"
+        policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        args = mock.Mock(run_dir=str(self.run_dir), policy=str(policy_path), request=str(request_path), depends_on=None)
+
+        with mock.patch.dict(os.environ, {delegate_jobs.ARTIFACT_ROOT_ENV: str(self.artifact_root)}), mock.patch.object(
+            delegate_jobs,
+            "start_tracked_delegate",
+            return_value={"label": request["label"], "pid": 123, "run_dir": str(self.run_dir)},
+        ) as start, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(delegate_jobs.command_launch(args), 0)
+
+        command = start.call_args.args[2]
+        self.assertEqual(command[:5], ["opencode", "run", mock.ANY, "--session", parent["session_id"]])
+        continuation = start.call_args.kwargs["continuation"]
+        self.assertEqual(continuation["parent_label"], parent["label"])
+        self.assertEqual(continuation["parent_session_id"], parent["session_id"])
+        self.assertEqual(continuation["continuation_index"], 1)
+        launch_contract = start.call_args.kwargs["launch_contract"]
+        self.assertEqual(launch_contract["parent_label"], parent["label"])
+        self.assertEqual(launch_contract["parent_session_id"], parent["session_id"])
+
+    def test_continuation_rejects_unauthorized_access_before_start(self):
+        delegate_jobs = load_delegate_jobs()
+        parent = self.add_terminal_parent(delegate_jobs)
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label=parent["label"],
+            access="read-write",
+            authorized_surface=["target.py"],
+            non_goals=["Do not touch unrelated files."],
+        )
+        policy_path = self.repo / "delegate-policy.json"
+        request_path = self.repo / "delegate-request.json"
+        policy_path.write_text(json.dumps(self.policy), encoding="utf-8")
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        args = mock.Mock(run_dir=str(self.run_dir), policy=str(policy_path), request=str(request_path), depends_on=None)
+
+        with mock.patch.dict(os.environ, {delegate_jobs.ARTIFACT_ROOT_ENV: str(self.artifact_root)}), mock.patch.object(
+            delegate_jobs, "start_tracked_delegate"
+        ) as start, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(delegate_jobs.command_launch(args), 2)
+        start.assert_not_called()
+        feedback = json.loads((self.run_dir / f"{request['label']}-request-feedback.json").read_text())
+        self.assertIn("access-not-authorized", {issue["code"] for issue in feedback["issues"]})
+
+    def test_authorized_read_write_continuation_composes_write_mode_resume(self):
+        delegate_jobs = load_delegate_jobs()
+        parent = self.add_terminal_parent(delegate_jobs)
+        policy = dict(self.policy, required_access=["read-only", "read-write"])
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label=parent["label"],
+            access="read-write",
+            authorized_surface=["target.py"],
+            non_goals=["Do not touch unrelated files."],
+        )
+        policy_path = self.repo / "delegate-policy.json"
+        request_path = self.repo / "delegate-request.json"
+        policy_path.write_text(json.dumps(policy), encoding="utf-8")
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        args = mock.Mock(run_dir=str(self.run_dir), policy=str(policy_path), request=str(request_path), depends_on=None)
+
+        with mock.patch.dict(os.environ, {delegate_jobs.ARTIFACT_ROOT_ENV: str(self.artifact_root)}), mock.patch.object(
+            delegate_jobs,
+            "start_tracked_delegate",
+            return_value={"label": request["label"], "pid": 123, "run_dir": str(self.run_dir)},
+        ) as start, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(delegate_jobs.command_launch(args), 0)
+
+        command = start.call_args.args[2]
+        self.assertEqual(command[command.index("--session") + 1], parent["session_id"])
+        self.assertEqual(command[command.index("--agent") + 1], "build")
+        self.assertEqual(start.call_args.kwargs["launch_contract"]["access"], "read-write")
+        self.assertEqual(start.call_args.kwargs["continuation"]["parent_label"], parent["label"])
+
+    def test_read_write_continuation_still_requires_bounded_surface(self):
+        policy = dict(self.policy, required_access=["read-only", "read-write"])
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label="01-opencode-review",
+            access="read-write",
+        )
+        with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+            delegate_contract.validate_contract(policy, request, self.run_dir)
+        fields = {issue.field for issue in raised.exception.issues}
+        self.assertTrue({"authorized_surface", "non_goals"}.issubset(fields))
+
+    def test_continuation_parent_identity_gate_rejects_invalid_parents(self):
+        delegate_jobs = load_delegate_jobs()
+        cases = (
+            ("01-opencode-running", "opencode", "session-running", "running", "continuation-parent-not-terminal"),
+            ("02-qwen-review", "qwen", "session-qwen", "completed", "continuation-tool-mismatch"),
+            ("03-opencode-idless", "opencode", None, "completed", "continuation-session-unavailable"),
+        )
+        for label, tool, session_id, state, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                if state == "running":
+                    manifest = delegate_jobs.ensure_manifest(self.run_dir)
+                    entry = {
+                        "label": label,
+                        "tool": tool,
+                        "pid": 999999,
+                        "session_id": session_id,
+                        "status_file": str(self.run_dir / f"{label}-status.json"),
+                        "outfile": str(self.run_dir / f"{label}-out.txt"),
+                        "errfile": str(self.run_dir / f"{label}-err.txt"),
+                        "command": [tool],
+                    }
+                    delegate_jobs.write_json(Path(entry["status_file"]), {"label": label, "state": "running"})
+                    manifest["delegates"][label] = entry
+                    delegate_jobs.save_manifest(self.run_dir, manifest)
+                else:
+                    self.add_terminal_parent(
+                        delegate_jobs,
+                        label=label,
+                        tool=tool,
+                        session_id=session_id,
+                        state=state,
+                    )
+                request = dict(
+                    self.request,
+                    label=f"{label}-r1",
+                    parent_label=label,
+                )
+                contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+                with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+                    delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+                self.assertEqual(raised.exception.issues[0].code, expected_code)
+
+    def test_continuation_accepts_each_terminal_parent_state(self):
+        delegate_jobs = load_delegate_jobs()
+        for index, state in enumerate(("completed", "cancelled", "failed"), start=1):
+            with self.subTest(state=state):
+                label = f"0{index}-opencode-{state}"
+                parent = self.add_terminal_parent(delegate_jobs, label=label, state=state)
+                request = dict(self.request, label=f"{label}-r1", parent_label=label)
+                contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+                continuation = delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+                self.assertEqual(continuation["parent_label"], label)
+                self.assertEqual(continuation["parent_session_id"], parent["session_id"])
+
+    def test_continuation_accepts_an_advancing_grandchild_lineage(self):
+        delegate_jobs = load_delegate_jobs()
+        parent = self.add_terminal_parent(delegate_jobs, label="01-opencode-review-r1")
+        request = dict(
+            self.request,
+            label="01-opencode-review-r2",
+            parent_label=parent["label"],
+        )
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        continuation = delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+        self.assertEqual(continuation["continuation_index"], 2)
+        self.assertEqual(continuation["parent_session_id"], parent["session_id"])
+
+    def test_continuation_reports_malformed_parent_metadata(self):
+        delegate_jobs = load_delegate_jobs()
+        manifest = delegate_jobs.ensure_manifest(self.run_dir)
+        label = "01-opencode-corrupt"
+        manifest["delegates"][label] = {
+            "label": label,
+            "tool": "opencode",
+            "pid": 999999,
+            "session_id": "session-corrupt",
+        }
+        delegate_jobs.save_manifest(self.run_dir, manifest)
+        request = dict(self.request, label=f"{label}-r1", parent_label=label)
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+            delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+        self.assertEqual(raised.exception.issues[0].code, "continuation-parent-malformed")
+
+    def test_continuation_reports_non_object_parent_status(self):
+        delegate_jobs = load_delegate_jobs()
+        parent = self.add_terminal_parent(delegate_jobs, label="01-opencode-corrupt-status")
+        Path(parent["status_file"]).write_text("[]\n", encoding="utf-8")
+        request = dict(
+            self.request,
+            label="01-opencode-corrupt-status-r1",
+            parent_label=parent["label"],
+        )
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+            delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+        self.assertEqual(raised.exception.issues[0].code, "continuation-parent-malformed")
+
+    def test_continuation_label_must_extend_and_advance_parent_lineage(self):
+        delegate_jobs = load_delegate_jobs()
+        self.add_terminal_parent(delegate_jobs, label="01-opencode-review-r2")
+        cases = (
+            ("02-opencode-fix-r3", "continuation-lineage-mismatch"),
+            ("01-opencode-review-r2", "self-parent"),
+            ("01-opencode-review-r1", "continuation-lineage-order"),
+        )
+        for child_label, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                request = dict(
+                    self.request,
+                    label=child_label,
+                    parent_label="01-opencode-review-r2",
+                )
+                if child_label == "01-opencode-review-r2":
+                    with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+                        delegate_contract.validate_contract(self.policy, request, self.run_dir)
+                else:
+                    contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+                    with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+                        delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+                self.assertIn(expected_code, {issue.code for issue in raised.exception.issues})
+
+    def test_continuation_parent_must_exist_in_the_same_managed_run(self):
+        delegate_jobs = load_delegate_jobs()
+        other_run = self.artifact_root / "delegates-other"
+        other_run.mkdir()
+        original_run = self.run_dir
+        self.run_dir = other_run
+        try:
+            self.add_terminal_parent(delegate_jobs, label="01-opencode-review")
+        finally:
+            self.run_dir = original_run
+        delegate_jobs.ensure_manifest(self.run_dir)
+        request = dict(
+            self.request,
+            label="01-opencode-review-r1",
+            parent_label="01-opencode-review",
+        )
+        contract = delegate_contract.validate_contract(self.policy, request, self.run_dir)
+        with self.assertRaises(delegate_contract.DelegateContractError) as raised:
+            delegate_jobs.resolve_continuation_parent(self.run_dir, contract)
+        self.assertEqual(raised.exception.issues[0].code, "continuation-parent-not-found")
+
+    def test_tracked_continuation_records_parent_lineage_in_manifest(self):
+        delegate_jobs = load_delegate_jobs()
+        delegate_jobs.ensure_manifest(self.run_dir)
+        process = mock.Mock(pid=4242)
+        session_id = "12345678-1234-1234-1234-123456789abc"
+        continuation = {
+            "parent_label": "01-opencode-review",
+            "parent_session_id": session_id,
+            "parent_session_path": None,
+            "continuation_index": 1,
+        }
+        with mock.patch.object(delegate_jobs.subprocess, "Popen", return_value=process), mock.patch.object(
+            delegate_jobs, "resolve_launch_session", return_value=(session_id, None)
+        ), mock.patch.object(delegate_jobs, "sync_run_index"):
+            delegate_jobs.start_tracked_delegate(
+                self.run_dir,
+                "01-opencode-review-r1",
+                ["opencode", "run", "prompt", "--session", session_id],
+                cwd=self.repo,
+                continuation=continuation,
+            )
+
+        entry = delegate_jobs.load_manifest(self.run_dir)["delegates"]["01-opencode-review-r1"]
+        self.assertEqual(entry["session_id"], session_id)
+        self.assertEqual(entry["parent_label"], continuation["parent_label"])
+        self.assertEqual(entry["parent_session_id"], session_id)
+        self.assertEqual(entry["continuation_index"], 1)
 
     def test_tracked_launch_persists_session_metadata_for_every_harness(self):
         delegate_jobs = load_delegate_jobs()
